@@ -30,6 +30,11 @@ function Render-Tui {
         [bool]$ErrorsOnly,
         [bool]$RawLogs,
         [bool]$ConfirmQuit,
+        [string]$FilterText = "",
+        [bool]$FilterInputMode = $false,
+        [bool]$ExpandStacks = $false,
+        [bool]$PausedLogs = $false,
+        $FrozenEntries = $null,
         [switch]$DryRun
     )
 
@@ -42,11 +47,14 @@ function Render-Tui {
 
     $sb = New-Object System.Text.StringBuilder
     $modeTag = if ($AllLogs) { "ALL" } else { $Services[$SelectedIndex].Name }
-    $errTag = if ($ErrorsOnly) { " | ${script:C_YELLOW}WARN/ERR ONLY${script:C_RESET}" } else { "" }
+    $errTag = if ($ErrorsOnly) { " | ${script:C_YELLOW}WARN/ERR${script:C_RESET}" } else { "" }
     $rawTag = if ($RawLogs) { " | ${script:C_MAGENTA}RAW${script:C_RESET}" } else { " | ${script:C_GREEN}UNIFIED${script:C_RESET}" }
+    $pauseTag = if ($PausedLogs) { " | ${script:C_YELLOW}PAUSED${script:C_RESET}" } else { "" }
+    $stackTag = if ($ExpandStacks) { " | ${script:C_CYAN}STACKS:ON${script:C_RESET}" } else { "" }
+    $filtTag = if ($FilterText) { " | ${script:C_CYAN}Filter:'$FilterText'${script:C_RESET}" } else { "" }
 
-    [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$script:C_RESET $script:C_DIM| Services: $($Services.Count) | Log: $modeTag$script:C_RESET$rawTag$errTag" $width) + "`n")
-    [void]$sb.Append((Pad-Line "$script:C_DIM Keys: [Up/Down] Select  [s] Start  [x] Stop  [r] Restart  [t] Route  [a/Tab] All Logs  [e] Warn/Err  [v] Raw  [d] Detach  [q] Quit$script:C_RESET" $width) + "`n")
+    [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$script:C_RESET $script:C_DIM| Services: $($Services.Count) | Log: $modeTag$script:C_RESET$rawTag$errTag$stackTag$pauseTag$filtTag" $width) + "`n")
+    [void]$sb.Append((Pad-Line "$script:C_DIM Keys: [Up/Down] Sel [s/S] Start [x/X] Stop [r] Rst [b] Build [t] Route [a] All [e] Err [z] Stack [/] Find [Space] Pause [c] Clr [q] Quit$script:C_RESET" $width) + "`n")
     [void]$sb.Append(("-" * $width) + "`n")
 
     $hdr = "{0,-2} {1,-21} {2,-12} {3,-6} {4,-7} {5,-13} {6,-14} {7,-8} {8,-8} {9,-10}" -f "", "SERVICE", "TYPE", "PORT", "PID", "STATE", "ROUTING", "UPTIME", "MAXHEAP", "RAM USED"
@@ -89,7 +97,11 @@ function Render-Tui {
 
     $usedRows = 4 + $Services.Count + 2 + 1
     $logRows = [Math]::Max(4, $height - $usedRows - 1)
-    $entries = @(Get-UnifiedLogs -Services $Services -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -RawMode $RawLogs -MaxRows $logRows)
+    if ($PausedLogs -and $null -ne $FrozenEntries) {
+        $entries = @($FrozenEntries)
+    } else {
+        $entries = @(Get-UnifiedLogs -Services $Services -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -RawMode $RawLogs -MaxRows $logRows -FilterText $FilterText -ExpandStacks $ExpandStacks)
+    }
 
     for ($r = 0; $r -lt $logRows; $r++) {
         if ($r -lt $entries.Count) {
@@ -111,6 +123,8 @@ function Render-Tui {
 
     if ($ConfirmQuit) {
         [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_YELLOW [CONFIRM] Stop all running services and exit? Press [y] to confirm, any other key to cancel.$script:C_RESET" $width))
+    } elseif ($FilterInputMode) {
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN Filter (Enter=apply, Esc=clear): /$FilterText$script:C_RESET" $width))
     } else {
         [void]$sb.Append((Pad-Line "$script:C_DIM $BannerMsg$script:C_RESET" $width))
     }

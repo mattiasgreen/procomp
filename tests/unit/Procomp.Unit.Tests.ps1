@@ -76,6 +76,35 @@ Describe "LogViewer" {
         $entries = @(Get-UnifiedLogs -Services $svcs -SelectedIndex 0 -AllMode $false -ErrorsOnly $false -RawMode $false -MaxRows 10)
         $entries.Count | Should Be 0
     }
+
+    It "supports custom logMapping, incremental byte-offset tailing, stack folding, and traceId filter" {
+        $logPath = Join-Path $TestDrive "custom.log"
+        $customJson = '{"ts":"2026-11-18T08:00:00.000Z","lvl":"ERROR","event":"Boom","reqId":"tr-999","stack_trace":"java.lang.RuntimeException\n\tat com.foo.Bar(Bar.java:10)\n\tat com.foo.Baz(Baz.java:20)"}'
+        Set-Content -Path $logPath -Value $customJson -Encoding UTF8
+
+        $svc = [PSCustomObject]@{
+            Name = "custom-svc"; LogFile = $logPath; ErrFile = (Join-Path $TestDrive "custom.err.log")
+            StatusText = "HEALTHY"; CachedLogRawMode = $null
+            LogMapping = @{ timestamp = "ts"; level = "lvl"; message = "event"; traceId = "reqId" }
+        }
+        $svcs = @($svc)
+
+        # Folded by default
+        $folded = @(Get-UnifiedLogs -Services $svcs -SelectedIndex 0 -AllMode $false -ErrorsOnly $false -RawMode $false -MaxRows 10 -ExpandStacks $false)
+        $folded.Count | Should Be 1
+        $folded[0].Text | Should Match "\[trace=tr-999\]"
+        $folded[0].Text | Should Match "\[\+3 stack lines\]"
+
+        # Expanded
+        $expanded = @(Get-UnifiedLogs -Services $svcs -SelectedIndex 0 -AllMode $false -ErrorsOnly $false -RawMode $false -MaxRows 10 -ExpandStacks $true)
+        $expanded.Count | Should Be 4
+
+        # Append a new line incrementally and filter by traceId
+        Add-Content -Path $logPath -Value '{"ts":"2026-11-18T08:00:01.000Z","lvl":"INFO","event":"Other","reqId":"tr-111"}' -Encoding UTF8
+        $filtered = @(Get-UnifiedLogs -Services $svcs -SelectedIndex 0 -AllMode $false -ErrorsOnly $false -RawMode $false -MaxRows 10 -FilterText "tr-999")
+        $filtered.Count | Should Be 1
+        $filtered[0].Text | Should Match "Boom"
+    }
 }
 
 Describe "TUI DryRun Renderer" {

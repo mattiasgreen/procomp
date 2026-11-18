@@ -164,12 +164,35 @@ try {
     $running = $true
     $lastRefresh = [datetime]::MinValue
     $needsRender = $true
+    $filterText = ""
+    $filterInputMode = $false
+    $expandStacks = $false
+    $pausedLogs = $false
+    $frozenEntries = $null
 
     while ($running) {
         $now = Get-Date
         if (($now - $lastRefresh).TotalMilliseconds -ge 750) {
             Refresh-ProcessSnapshot -Services $services -DetectIde
             Poll-AsyncHealth -Services $services -HttpClient $HttpClient
+            # Check any in-flight async Gradle builds
+            foreach ($svc in $services) {
+                if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
+                    $exitCode = $svc.BuildProc.ExitCode
+                    $svc.BuildProc = $null
+                    if ($exitCode -eq 0) {
+                        try {
+                            Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+                            $banner = "Build succeeded; started $($svc.Name)"
+                        } catch {
+                            $banner = $_.Exception.Message
+                        }
+                    } else {
+                        $svc.StatusText = "BUILD-FAIL"
+                        $banner = "Build failed for $($svc.Name) (exit $exitCode)"
+                    }
+                }
+            }
             $lastRefresh = $now
             $needsRender = $true
         } else {
@@ -183,7 +206,7 @@ try {
         }
 
         if ($needsRender) {
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit
+            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -PausedLogs $pausedLogs -FrozenEntries $frozenEntries
             $needsRender = $false
         }
 
@@ -206,6 +229,23 @@ try {
                     }
                 }
 
+                if ($filterInputMode) {
+                    if ($key.Key -eq [ConsoleKey]::Enter) {
+                        $filterInputMode = $false
+                        $banner = if ($filterText) { "Filter applied: '$filterText'" } else { "Filter cleared" }
+                    } elseif ($key.Key -eq [ConsoleKey]::Escape) {
+                        $filterInputMode = $false
+                        $filterText = ""
+                        $banner = "Filter cleared"
+                    } elseif ($key.Key -eq [ConsoleKey]::Backspace) {
+                        if ($filterText.Length -gt 0) { $filterText = $filterText.Substring(0, $filterText.Length - 1) }
+                    } elseif (-not [char]::IsControl($key.KeyChar)) {
+                        $filterText += $key.KeyChar
+                    }
+                    $needsRender = $true
+                    continue
+                }
+
                 if ($isCtrlC -or $key.KeyChar -eq 'q') {
                     $confirmQuit = $true
                     $needsRender = $true
@@ -216,6 +256,18 @@ try {
                     "UpArrow"   { $selected = [Math]::Max(0, $selected - 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                     "DownArrow" { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                     "Tab"       { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
+                    "Enter"     { $expandStacks = -not $expandStacks; $banner = if ($expandStacks) { "Stack traces expanded" } else { "Stack traces folded" }; $needsRender = $true }
+                    "Spacebar"  {
+                        $pausedLogs = -not $pausedLogs
+                        if ($pausedLogs) {
+                            $frozenEntries = @(Get-UnifiedLogs -Services $services -SelectedIndex $selected -AllMode $allLogs -ErrorsOnly $errorsOnly -RawMode $rawLogs -MaxRows 20 -FilterText $filterText -ExpandStacks $expandStacks)
+                            $banner = "Log stream PAUSED"
+                        } else {
+                            $frozenEntries = $null
+                            $banner = "Log stream RESUMED"
+                        }
+                        $needsRender = $true
+                    }
                     default {
                         switch -CaseSensitive ($key.KeyChar) {
                             'k' { $selected = [Math]::Max(0, $selected - 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
@@ -223,6 +275,9 @@ try {
                             'a' { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
                             'e' { $errorsOnly = -not $errorsOnly; $banner = if ($errorsOnly) { "Filter: WARN/ERROR only" } else { "Filter: All log levels" }; $needsRender = $true }
                             'v' { $rawLogs = -not $rawLogs; $banner = if ($rawLogs) { "Log format: Raw" } else { "Log format: Unified/Normalized" }; $needsRender = $true }
+                            'z' { $expandStacks = -not $expandStacks; $banner = if ($expandStacks) { "Stack traces expanded" } else { "Stack traces folded" }; $needsRender = $true }
+                            '/' { $filterInputMode = $true; $needsRender = $true }
+                            'c' { Clear-ServiceLogView -Services $services; $frozenEntries = $null; $banner = "Cleared log display buffer"; $needsRender = $true }
                             't' {
                                 $svc = $services[$selected]
                                 $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
