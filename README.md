@@ -30,20 +30,29 @@ cd ..
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` or `j` / `k` | Select service & switch log tail |
-| `s` | Start selected service |
-| `x` | Stop selected service |
+| `s` / `S` | Start selected service / Start all enabled `LOCAL` services |
+| `x` / `X` | Stop selected service / Stop all managed services |
 | `r` | Restart selected service |
-| `t` | Toggle routing (`LOCAL` ↔ `REMOTE`) |
+| `b` | Stop & rebuild selected service via Gradle (`BUILDING` state) |
+| `t` | Toggle routing (`LOCAL` ↔ `REMOTE`, syncs WireMock if running) |
 | `a` / `Tab` | Toggle `[ALL]` merged log stream vs. selected service |
 | `e` | Toggle `WARN`/`ERROR` only filter |
 | `v` | Toggle Unified/Normalized vs. Raw log lines |
+| `z` / `Enter` | Expand / collapse multi-line stack traces |
+| `/` | Live text / `traceId` filter |
+| `Space` | Pause / resume log auto-scroll |
+| `c` | Clear log display buffer |
 | `d` | Detach (exit TUI while leaving services running) |
 | `q` / `Ctrl+C` | Confirm & stop all managed services |
 
 ### CLI & Tests
 ```powershell
-.\procomp.cmd -Action up      # Start enabled services in background
-.\procomp.cmd -Action status  # Print status, PID, routing, heap, and RAM table
-.\procomp.cmd -Action down    # Cleanly stop all managed services
-.\test.cmd                    # Run Pester unit & real-JVM integration tests
+.\procomp.cmd -Profile checkout  # Launch TUI with a routing profile
+.\procomp.cmd -Action doctor     # Run preflight environment & port checks
+.\procomp.cmd -Action sync       # Fast-forward clean main/develop Git repos
+.\procomp.cmd -Action build      # Build Gradle bootJar artifacts
+.\procomp.cmd -Action up         # Start enabled services in background
+.\procomp.cmd -Action status     # Print status, PID, routing, heap, and RAM table
+.\procomp.cmd -Action down       # Cleanly stop all managed services
+.\test.cmd                       # Run Pester unit & real-JVM integration tests
 ```

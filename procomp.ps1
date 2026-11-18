@@ -5,7 +5,7 @@
     Compatible with Windows PowerShell 5.1+ and PowerShell 7+.
 #>
 param(
-    [ValidateSet("tui", "up", "down", "status", "sync", "build")]
+    [ValidateSet("tui", "up", "down", "status", "sync", "build", "doctor")]
     [string]$Action = "tui",
     [string]$ConfigPath = (Join-Path $PSScriptRoot "services.json"),
     [string]$Profile = "",
@@ -31,6 +31,7 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 . (Join-Path $RootDir "src\HealthMonitor.ps1")
 . (Join-Path $RootDir "src\WireMockBridge.ps1")
 . (Join-Path $RootDir "src\LogViewer.ps1")
+. (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
@@ -39,6 +40,18 @@ if ($Profile) {
     Apply-RoutingProfile -Services $services -ProfileName $Profile -ProfilesPath $ProfilesPath -RoutingFile $RoutingFile
 }
 $wireMockUrl = Get-WireMockServiceUrl -Services $services
+
+if ($Action -eq "doctor") {
+    try {
+        $checks = @(Invoke-ProcompDoctor -Services $services -RootDir $RootDir -MockJarPath $MockJar)
+        $checks | Format-Table -AutoSize
+        $fails = @($checks | Where-Object { $_.Status -eq "FAIL" }).Count
+        if ($fails -gt 0) { exit 1 }
+    } finally {
+        $HttpClient.Dispose()
+    }
+    exit 0
+}
 
 if ($Action -eq "sync") {
     try {
