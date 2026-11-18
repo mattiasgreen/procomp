@@ -7,6 +7,7 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $RepoRoot "src\IdeDetector.ps1")
 . (Join-Path $RepoRoot "src\ProcessManager.ps1")
 . (Join-Path $RepoRoot "src\HealthMonitor.ps1")
+. (Join-Path $RepoRoot "src\WireMockBridge.ps1")
 . (Join-Path $RepoRoot "src\LogViewer.ps1")
 . (Join-Path $RepoRoot "src\Tui.ps1")
 
@@ -128,5 +129,42 @@ Describe "GitGradle" {
         $st = Get-GitRepoStatus -RepoPath $RepoRoot
         $st.Exists | Should Be $true
         $st.Branch | Should Not Be "-"
+    }
+}
+
+Describe "WireMockBridge & Profiles" {
+    It "builds LOCAL and REMOTE WireMock proxy mappings with deterministic IDs" {
+        $svc = [PSCustomObject]@{
+            Name = "order-service"; Port = 8082; ProxyPath = "/orders"
+            RemoteUrl = "https://shared-dev.mycorp/orders"; RoutingMode = "LOCAL"
+        }
+        $mLocal = Build-WireMockMapping -Svc $svc
+        $mLocal.response.proxyBaseUrl | Should Be "http://127.0.0.1:8082"
+        $mLocal.response.proxyUrlPrefixToRemove | Should Be "/orders"
+
+        $svc.RoutingMode = "REMOTE"
+        $mRemote = Build-WireMockMapping -Svc $svc
+        $mRemote.id | Should Be $mLocal.id
+        $mRemote.response.proxyBaseUrl | Should Be "https://shared-dev.mycorp/orders"
+    }
+
+    It "applies named routing profiles and persists routing.json" {
+        $pFile = Join-Path $TestDrive "profiles.json"
+        $rFile = Join-Path $TestDrive "routing.json"
+        @{ checkout = @{ local = @("order-service"); remote = @("auth-service") } } | ConvertTo-Json -Depth 3 | Set-Content $pFile
+
+        $svcs = @(
+            [PSCustomObject]@{ Name = "order-service"; RoutingMode = "REMOTE"; Enabled = $false; StatusText = "REMOTE" },
+            [PSCustomObject]@{ Name = "auth-service";  RoutingMode = "LOCAL";  Enabled = $true;  StatusText = "STOPPED" }
+        )
+        Apply-RoutingProfile -Services $svcs -ProfileName "checkout" -ProfilesPath $pFile -RoutingFile $rFile
+        $svcs[0].RoutingMode | Should Be "LOCAL"
+        $svcs[0].Enabled | Should Be $true
+        $svcs[1].RoutingMode | Should Be "REMOTE"
+        $svcs[1].Enabled | Should Be $false
+
+        $saved = Load-RoutingState -RoutingFile $rFile
+        $saved["order-service"] | Should Be "LOCAL"
+        $saved["auth-service"] | Should Be "REMOTE"
     }
 }

@@ -139,3 +139,45 @@ function Load-Services {
     }
     return $list
 }
+
+function Apply-RoutingProfile {
+    param(
+        $Services,
+        [string]$ProfileName,
+        [string]$ProfilesPath,
+        [string]$RoutingFile
+    )
+    if (-not $ProfileName) { return }
+    if (-not (Test-Path $ProfilesPath)) {
+        throw "Profiles file not found: $ProfilesPath"
+    }
+    $profiles = Get-Content -Path $ProfilesPath -Raw | ConvertFrom-Json
+    if (-not $profiles.PSObject.Properties[$ProfileName]) {
+        throw "Profile '$ProfileName' not found in $ProfilesPath"
+    }
+
+    $prof = $profiles.$ProfileName
+    $localSet = @{}
+    $remoteSet = @{}
+    if ($prof.PSObject.Properties["local"] -and $prof.local) {
+        foreach ($n in $prof.local) { $localSet[[string]$n] = $true }
+    }
+    if ($prof.PSObject.Properties["remote"] -and $prof.remote) {
+        foreach ($n in $prof.remote) { $remoteSet[[string]$n] = $true }
+    }
+
+    $rMap = @{}
+    foreach ($svc in $Services) {
+        if ($localSet.ContainsKey($svc.Name)) {
+            $svc.RoutingMode = "LOCAL"
+            $svc.Enabled = $true
+            $svc.StatusText = "STOPPED"
+        } elseif ($remoteSet.ContainsKey($svc.Name)) {
+            $svc.RoutingMode = "REMOTE"
+            $svc.Enabled = $false
+            $svc.StatusText = "REMOTE"
+        }
+        $rMap[$svc.Name] = $svc.RoutingMode
+    }
+    Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
+}

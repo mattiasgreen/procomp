@@ -7,7 +7,9 @@
 param(
     [ValidateSet("tui", "up", "down", "status", "sync", "build")]
     [string]$Action = "tui",
-    [string]$ConfigPath = (Join-Path $PSScriptRoot "services.json")
+    [string]$ConfigPath = (Join-Path $PSScriptRoot "services.json"),
+    [string]$Profile = "",
+    [string]$ProfilesPath = (Join-Path $PSScriptRoot "profiles.json")
 )
 
 Set-StrictMode -Version Latest
@@ -27,11 +29,16 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 . (Join-Path $RootDir "src\IdeDetector.ps1")
 . (Join-Path $RootDir "src\ProcessManager.ps1")
 . (Join-Path $RootDir "src\HealthMonitor.ps1")
+. (Join-Path $RootDir "src\WireMockBridge.ps1")
 . (Join-Path $RootDir "src\LogViewer.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
 $services = @(Load-Services -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir)
+if ($Profile) {
+    Apply-RoutingProfile -Services $services -ProfileName $Profile -ProfilesPath $ProfilesPath -RoutingFile $RoutingFile
+}
+$wireMockUrl = Get-WireMockServiceUrl -Services $services
 
 if ($Action -eq "sync") {
     try {
@@ -210,7 +217,7 @@ try {
                     "DownArrow" { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                     "Tab"       { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
                     default {
-                        switch ($key.KeyChar) {
+                        switch -CaseSensitive ($key.KeyChar) {
                             'k' { $selected = [Math]::Max(0, $selected - 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                             'j' { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                             'a' { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
@@ -222,7 +229,9 @@ try {
                                 $rMap = @{}
                                 foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
                                 Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
-                                $banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)"
+                                $wmSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $wireMockUrl
+                                $wmNote = if ($wmSynced) { " (WireMock updated)" } else { "" }
+                                $banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$wmNote"
                                 $needsRender = $true
                             }
                             's' {
@@ -230,11 +239,20 @@ try {
                                 $svc.Enabled = $true
                                 $svc.RoutingMode = "LOCAL"
                                 try {
-                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar
+                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
                                     $banner = "Started $($svc.Name)"
                                 } catch {
                                     $banner = $_.Exception.Message
                                 }
+                                $needsRender = $true
+                            }
+                            'S' {
+                                foreach ($s in $services) {
+                                    if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
+                                        try { Start-ServiceProcess -Svc $s -MockJarPath $MockJar -RootDir $RootDir } catch { }
+                                    }
+                                }
+                                $banner = "Started all enabled LOCAL services"
                                 $needsRender = $true
                             }
                             'x' {
@@ -249,6 +267,15 @@ try {
                                 }
                                 $needsRender = $true
                             }
+                            'X' {
+                                foreach ($s in $services) {
+                                    if (($s.Managed -or (Test-Path $s.PidFile)) -and (-not $s.ExternalIde)) {
+                                        Stop-ServiceProcess -Svc $s
+                                    }
+                                }
+                                $banner = "Stopped all managed services"
+                                $needsRender = $true
+                            }
                             'r' {
                                 $svc = $services[$selected]
                                 if ($svc.ExternalIde) {
@@ -259,8 +286,19 @@ try {
                                     Stop-ServiceProcess -Svc $svc
                                     $svc.Enabled = $true
                                     $svc.RoutingMode = "LOCAL"
-                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar
+                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
                                     $banner = "Restarted $($svc.Name)"
+                                }
+                                $needsRender = $true
+                            }
+                            'b' {
+                                $svc = $services[$selected]
+                                Stop-ServiceProcess -Svc $svc
+                                try {
+                                    Start-GradleBuildAsync -Svc $svc -RootDir $RootDir
+                                    $banner = "Building $($svc.Name)..."
+                                } catch {
+                                    $banner = $_.Exception.Message
                                 }
                                 $needsRender = $true
                             }
