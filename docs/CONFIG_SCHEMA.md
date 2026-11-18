@@ -23,6 +23,8 @@
 | `proxyPath` | `string` | No | `"/<name>"` | Context prefix exposed on WireMock (`localhost:8080<proxyPath>/...`). |
 | `remoteUrl` | `string` | No | `null` | Upstream URL used by WireMock when the service's routing mode is `REMOTE`. |
 | `logFormat` | `string` | No | `"text"` | Hint for log viewer (`"text"` or `"json"`). JSON auto-detection still applies. |
+| `logMapping` | `object` | No | `null` | Optional JSON field-name overrides (`timestamp`, `level`, `logger`, `message`, `traceId`, `stack_trace`). |
+| `env` | `object` | No | `{}` | Non-secret environment variables injected at process launch (overridden by `.env.<name>`). |
 | `enabled` | `boolean` | No | `true` | Whether `up` / TUI launch starts this service automatically. |
 
 ---
@@ -77,7 +79,28 @@
 
 ---
 
-## 2. Runtime State (`.stack_state/`)
+## 2. `profiles.json` (Optional Scenario Presets)
+
+Define named routing presets (`.\procomp.cmd -Profile checkout`) that specify which services run `LOCAL` vs. `REMOTE`:
+
+```json
+{
+  "checkout": {
+    "local": ["activemq-broker", "order-service", "payment-service"],
+    "remote": ["auth-service", "inventory-service"]
+  }
+}
+```
+
+---
+
+## 3. Environment & Secrets (`.env`)
+
+Untracked `.env` (global) and `.env.<service>` (per-service) files in the workspace root are loaded at process launch (precedence: `.env` < `services.json` `env` < `.env.<service>`).
+
+---
+
+## 4. Runtime State (`.stack_state/`)
 
 * **`.stack_state/<name>.pid`**: Stores the Windows `PID` of processes launched by `procomp`, enabling detach (`d`), re-attach, and clean `taskkill /F /T` teardown.
 * **`.stack_state/routing.json`**: Persists each service's active WireMock routing mode (`"LOCAL"` or `"REMOTE"`) across TUI restarts.

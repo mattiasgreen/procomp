@@ -58,10 +58,19 @@ Because `services.json` tracks `gitrepo` and `gradlesubproject` (supporting both
 * **Smart Rebuild Decisions:**
   * Clean `main`/`develop` repos can be fast-forwarded (`git pull --ff-only`), triggering `./gradlew :<subproject>:bootJar` only when new commits land or the JAR is missing/stale.
   * Dirty or feature-branch repos are never overwritten during sync and are surfaced visually in the TUI.
+* **CLI & In-TUI Builds:** `-Action sync` and `-Action build` handle batch prep before launch, while pressing `b` in the TUI stops a single service, runs `bootJar` asynchronously (`BUILDING` state) with live Gradle output in the log pane, and restarts it.
 
 ---
 
-## 5. Responsive TUI & Unified Log Viewer
+## 5. Profiles, Secrets, and Diagnostics
+
+* **Routing Presets (`profiles.json` / `-Profile <name>`):** Named scenarios (e.g., `checkout`, `auth`) set which services boot `LOCAL` vs. route `REMOTE`, complemented by bulk `S` (start all enabled) and `X` (stop all managed) keys in the TUI.
+* **Environment & Secrets (`.env`):** Untracked `.env` (global) and optional `.env.<service>` files—plus an optional `env` map in `services.json`—are injected into child process environments at launch without risking secret commits.
+* **Preflight Diagnostics (`-Action doctor`):** Verifies `java`, `git`, WireMock JAR availability, `gitrepo` paths, `.env` presence, and free local ports before launching the stack.
+
+---
+
+## 6. Responsive TUI & Unified Log Viewer
 
 ### UI Loop Responsiveness
 To keep keyboard navigation instantaneous even with 10+ active services:

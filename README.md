@@ -12,6 +12,7 @@ A lightweight, Process-Compose-inspired PowerShell TUI and process orchestrator 
 ## Documentation
 * [Architecture & Design](docs/ARCHITECTURE.md)
 * [Configuration Schema (`services.json`)](docs/CONFIG_SCHEMA.md)
+* [Unified Log Viewer Design](docs/LOG_VIEWER.md)
 * [PowerShell Best Practices & Agentic Guidelines](docs/POWERSHELL_GUIDELINES.md)
 
 ## Quick Start (PoC)
