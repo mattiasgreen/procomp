@@ -22,7 +22,7 @@ cd mock-service
 javac MockService.java
 jar cfe mock-service.jar MockService MockService.class
 cd ..
-.\stack.cmd
+.\procomp.cmd
 ```
 
 ### TUI Keybindings
@@ -32,16 +32,17 @@ cd ..
 | `s` | Start selected service |
 | `x` | Stop selected service |
 | `r` | Restart selected service |
+| `t` | Toggle routing (`LOCAL` ↔ `REMOTE`) |
 | `a` / `Tab` | Toggle `[ALL]` merged log stream vs. selected service |
 | `e` | Toggle `WARN`/`ERROR` only filter |
 | `v` | Toggle Unified/Normalized vs. Raw log lines |
 | `d` | Detach (exit TUI while leaving services running) |
 | `q` / `Ctrl+C` | Confirm & stop all managed services |
 
-### CLI Mode
+### CLI & Tests
 ```powershell
-.\stack.cmd -Action up        # Start enabled services in background
-.\stack.cmd -Action status    # Print status, PID, heap, and RAM table
-.\stack.cmd -Action down      # Cleanly stop all managed services
-.\stack.cmd -Action selftest  # Run automated PoC verification suite
+.\procomp.cmd -Action up      # Start enabled services in background
+.\procomp.cmd -Action status  # Print status, PID, routing, heap, and RAM table
+.\procomp.cmd -Action down    # Cleanly stop all managed services
+.\test.cmd                    # Run Pester unit & real-JVM integration tests
 ```
