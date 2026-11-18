@@ -2,6 +2,8 @@ Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $RepoRoot "src\Config.ps1")
+. (Join-Path $RepoRoot "src\EnvLoader.ps1")
+. (Join-Path $RepoRoot "src\GitGradle.ps1")
 . (Join-Path $RepoRoot "src\IdeDetector.ps1")
 . (Join-Path $RepoRoot "src\ProcessManager.ps1")
 . (Join-Path $RepoRoot "src\HealthMonitor.ps1")
@@ -97,5 +99,34 @@ Describe "TUI DryRun Renderer" {
         $frame | Should Match "LOCAL :8082"
         $frame | Should Match "REMOTE"
         $frame | Should Match "\[CONFIRM\]"
+    }
+}
+
+Describe "EnvLoader" {
+    It "merges .env < inline env < .env.<service> in precedence order" {
+        $envDir = Join-Path $TestDrive "envtest"
+        New-Item -ItemType Directory -Force -Path $envDir | Out-Null
+        "DB_HOST=global`nAPI_KEY=`"secret123`"`n# comment" | Set-Content (Join-Path $envDir ".env")
+        "API_KEY=override-svc`nSVC_ONLY=yes" | Set-Content (Join-Path $envDir ".env.orders")
+
+        $svc = [PSCustomObject]@{ Name = "orders"; Env = @{ DB_HOST = "inline-host"; INLINE_ONLY = "1" } }
+        $resolved = Resolve-ServiceEnvironment -Svc $svc -RootDir $envDir
+        $resolved["DB_HOST"] | Should Be "inline-host"
+        $resolved["API_KEY"] | Should Be "override-svc"
+        $resolved["SVC_ONLY"] | Should Be "yes"
+        $resolved["INLINE_ONLY"] | Should Be "1"
+    }
+}
+
+Describe "GitGradle" {
+    It "formats Gradle bootJar task names for root and subprojects" {
+        Get-GradleTaskName -GradleSubproj "" | Should Be "bootJar"
+        Get-GradleTaskName -GradleSubproj ":services:order-service" | Should Be ":services:order-service:bootJar"
+    }
+
+    It "reads Git branch and dirty state for an existing repo" {
+        $st = Get-GitRepoStatus -RepoPath $RepoRoot
+        $st.Exists | Should Be $true
+        $st.Branch | Should Not Be "-"
     }
 }

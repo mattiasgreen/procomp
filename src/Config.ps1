@@ -84,6 +84,20 @@ function Load-Services {
         $gitRepo = if ($item.PSObject.Properties["gitrepo"] -and $item.gitrepo) { [string]$item.gitrepo } else { "" }
         $gradleSub = if ($item.PSObject.Properties["gradlesubproject"] -and $item.gradlesubproject) { [string]$item.gradlesubproject } else { "" }
 
+        $envMap = @{}
+        if ($item.PSObject.Properties["env"] -and $item.env) {
+            foreach ($ep in $item.env.PSObject.Properties) {
+                $envMap[$ep.Name] = [string]$ep.Value
+            }
+        }
+
+        $logMap = @{}
+        if ($item.PSObject.Properties["logMapping"] -and $item.logMapping) {
+            foreach ($lp in $item.logMapping.PSObject.Properties) {
+                $logMap[$lp.Name] = [string]$lp.Value
+            }
+        }
+
         $list += [PSCustomObject]@{
             Name             = [string]$item.name
             Type             = $type
@@ -96,6 +110,8 @@ function Load-Services {
             MaxHeap          = (Parse-MaxHeap -JvmArgs $jvmArgs)
             StartupDelayMs   = $delayMs
             LogFormat        = $logFmt
+            LogMapping       = $logMap
+            Env              = $envMap
             ProxyPath        = $proxyPath
             RemoteUrl        = $remoteUrl
             RoutingMode      = $routeMode
@@ -108,6 +124,8 @@ function Load-Services {
             PortConflict     = $false
             Healthy          = $false
             Stopping         = $false
+            BuildProc        = $null
+            GitSummary       = "-"
             LastHealthAt     = [datetime]::MinValue
             HealthTask       = $null
             CachedPid        = $null

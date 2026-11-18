@@ -64,7 +64,7 @@ function Refresh-ProcessSnapshot {
 }
 
 function Start-ServiceProcess {
-    param($Svc, [string]$MockJarPath)
+    param($Svc, [string]$MockJarPath, [string]$RootDir = "")
 
     $existingPid = Read-PidFromFile -PidFile $Svc.PidFile
     if ($existingPid) {
@@ -92,29 +92,70 @@ function Start-ServiceProcess {
         }
     }
 
-    if (-not (Test-Path $MockJarPath)) {
-        throw "Mock JAR not found at $MockJarPath. Compile MockService.java first."
-    }
-
+    $exePath = "java"
     $argList = @()
-    if ($Svc.JvmArgs) {
-        $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" })
-    }
-    $argList += "-Dservice.name=$($Svc.Name)"
-    $argList += "-Dservice.type=$($Svc.Type)"
-    $argList += "-Dserver.port=$($Svc.Port)"
-    $argList += "-Dhealth.path=$($Svc.HealthPath)"
-    $argList += "-Dstartup.delay.ms=$($Svc.StartupDelayMs)"
-    $argList += "-Dlog.format=$($Svc.LogFormat)"
-    $argList += "-jar"
-    $argList += $MockJarPath
 
-    $proc = Start-Process -FilePath "java" `
-        -ArgumentList $argList `
-        -RedirectStandardOutput $Svc.LogFile `
-        -RedirectStandardError $Svc.ErrFile `
-        -WindowStyle Hidden `
-        -PassThru
+    if ($Svc.PSObject.Properties["Command"] -and $Svc.Command) {
+        $exePath = "cmd.exe"
+        $argList = @("/c", $Svc.Command)
+    } else {
+        $realJar = $null
+        if ($RootDir -and (Get-Command Resolve-RepoPath -ErrorAction SilentlyContinue)) {
+            $repoPath = Resolve-RepoPath -GitRepo $Svc.GitRepo -RootDir $RootDir
+            if ($repoPath -and (Test-Path $repoPath)) {
+                $realJar = Find-ServiceBootJar -RepoPath $repoPath -GradleSubproj $Svc.GradleSubproj
+                if (-not $realJar) {
+                    $ok = Invoke-GradleBuildSync -Svc $Svc -RootDir $RootDir
+                    if ($ok) { $realJar = Find-ServiceBootJar -RepoPath $repoPath -GradleSubproj $Svc.GradleSubproj }
+                }
+            }
+        }
+
+        if ($realJar) {
+            if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
+            $argList += "-Dserver.port=$($Svc.Port)"
+            $argList += "-Dspring.profiles.active=local"
+            $argList += "-jar"
+            $argList += $realJar
+        } else {
+            if (-not (Test-Path $MockJarPath)) {
+                throw "No bootJar or Mock JAR found at $MockJarPath."
+            }
+            if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
+            $argList += "-Dservice.name=$($Svc.Name)"
+            $argList += "-Dservice.type=$($Svc.Type)"
+            $argList += "-Dserver.port=$($Svc.Port)"
+            $argList += "-Dhealth.path=$($Svc.HealthPath)"
+            $argList += "-Dstartup.delay.ms=$($Svc.StartupDelayMs)"
+            $argList += "-Dlog.format=$($Svc.LogFormat)"
+            $argList += "-jar"
+            $argList += $MockJarPath
+        }
+    }
+
+    # Inject .env / service env vars temporarily so Start-Process child inherits them (PS 5.1+ compatible)
+    $envToInject = @{}
+    if ($RootDir -and (Get-Command Resolve-ServiceEnvironment -ErrorAction SilentlyContinue)) {
+        $envToInject = Resolve-ServiceEnvironment -Svc $Svc -RootDir $RootDir
+    }
+    $savedEnv = @{}
+    foreach ($k in $envToInject.Keys) {
+        $savedEnv[$k] = [System.Environment]::GetEnvironmentVariable($k, "Process")
+        [System.Environment]::SetEnvironmentVariable($k, $envToInject[$k], "Process")
+    }
+
+    try {
+        $proc = Start-Process -FilePath $exePath `
+            -ArgumentList $argList `
+            -RedirectStandardOutput $Svc.LogFile `
+            -RedirectStandardError $Svc.ErrFile `
+            -WindowStyle Hidden `
+            -PassThru
+    } finally {
+        foreach ($k in $savedEnv.Keys) {
+            [System.Environment]::SetEnvironmentVariable($k, $savedEnv[$k], "Process")
+        }
+    }
 
     Set-Content -Path $Svc.PidFile -Value $proc.Id -Encoding ASCII
     $Svc.Managed = $true

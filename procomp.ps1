@@ -5,7 +5,7 @@
     Compatible with Windows PowerShell 5.1+ and PowerShell 7+.
 #>
 param(
-    [ValidateSet("tui", "up", "down", "status")]
+    [ValidateSet("tui", "up", "down", "status", "sync", "build")]
     [string]$Action = "tui",
     [string]$ConfigPath = (Join-Path $PSScriptRoot "services.json")
 )
@@ -22,6 +22,8 @@ $MockJar     = Join-Path $RootDir "mock-service\mock-service.jar"
 New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 
 . (Join-Path $RootDir "src\Config.ps1")
+. (Join-Path $RootDir "src\EnvLoader.ps1")
+. (Join-Path $RootDir "src\GitGradle.ps1")
 . (Join-Path $RootDir "src\IdeDetector.ps1")
 . (Join-Path $RootDir "src\ProcessManager.ps1")
 . (Join-Path $RootDir "src\HealthMonitor.ps1")
@@ -31,11 +33,36 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
 $services = @(Load-Services -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir)
 
+if ($Action -eq "sync") {
+    try {
+        $syncRes = @(Sync-GitRepos -Services $services -RootDir $RootDir)
+        $syncRes | Format-Table -AutoSize
+    } finally {
+        $HttpClient.Dispose()
+    }
+    exit 0
+}
+
+if ($Action -eq "build") {
+    try {
+        foreach ($svc in $services) {
+            if ($svc.GitRepo) {
+                Write-Host "Building $($svc.Name)..."
+                $ok = Invoke-GradleBuildSync -Svc $svc -RootDir $RootDir
+                Write-Host "  $($svc.Name): $(if ($ok) { 'OK' } else { 'SKIPPED/FAILED' })"
+            }
+        }
+    } finally {
+        $HttpClient.Dispose()
+    }
+    exit 0
+}
+
 if ($Action -eq "up") {
     try {
         foreach ($svc in $services) {
             if ($svc.Enabled) {
-                Start-ServiceProcess -Svc $svc -MockJarPath $MockJar
+                Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
                 Write-Host "Started $($svc.Name) (port $($svc.Port))"
             } else {
                 Write-Host "Skipped $($svc.Name) (disabled)"
