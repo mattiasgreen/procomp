@@ -124,16 +124,16 @@ Describe 'Real-JVM Integration Tests' {
             $ok2 = Set-ServiceWireMockRoute -Svc $orders -WireMockBaseUrl "http://127.0.0.1:18080"
             $ok2 | Should Be $true
 
-            $ps.EndInvoke($handle)
+            [void]$handle.AsyncWaitHandle.WaitOne(5000)
             $b1 = ""; $b2 = ""
             [void]$captured.TryDequeue([ref]$b1)
             [void]$captured.TryDequeue([ref]$b2)
             $b1 | Should Match "127\.0\.0\.1:18181"
             $b2 | Should Match "https://shared-dev\.mycorp/orders"
         } finally {
-            $ps.Dispose()
             $listener.Stop()
             $listener.Close()
+            $ps.Dispose()
         }
     }
 }

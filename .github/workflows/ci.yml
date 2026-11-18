@@ -9,6 +9,7 @@ on:
 jobs:
   test-windows:
     runs-on: windows-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
