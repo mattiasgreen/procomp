@@ -57,7 +57,7 @@ function Render-Tui {
     [void]$sb.Append((Pad-Line "$script:C_DIM Keys: [Up/Down] Sel [s/S] Start [x/X] Stop [r] Rst [b] Build [t] Route [a] All [e] Err [z] Stack [/] Find [Space] Pause [c] Clr [q] Quit$script:C_RESET" $width) + "`n")
     [void]$sb.Append(("-" * $width) + "`n")
 
-    $hdr = "{0,-2} {1,-21} {2,-12} {3,-6} {4,-7} {5,-13} {6,-14} {7,-8} {8,-8} {9,-10}" -f "", "SERVICE", "TYPE", "PORT", "PID", "STATE", "ROUTING", "UPTIME", "MAXHEAP", "RAM USED"
+    $hdr = "{0,-2} {1,-21} {2,-12} {3,-6} {4,-7} {5,-13} {6,-13} {7,-12} {8,-7} {9,-8} {10,-9}" -f "", "SERVICE", "TYPE", "PORT", "PID", "STATE", "ROUTING", "GIT", "UPTIME", "MAXHEAP", "RAM USED"
     [void]$sb.Append((Pad-Line "$script:C_BOLD$hdr$script:C_RESET" $width) + "`n")
 
     for ($i = 0; $i -lt $Services.Count; $i++) {
@@ -72,20 +72,24 @@ function Render-Tui {
             "IDE-UP"        { $script:C_CYAN }
             "IDE-INIT"      { $script:C_YELLOW }
             "STARTING"      { $script:C_YELLOW }
+            "BUILDING"      { $script:C_YELLOW }
             "STOPPING"      { $script:C_YELLOW }
             "CRASHED"       { $script:C_RED }
+            "BUILD-FAIL"    { $script:C_RED }
             "PORT-CONFLICT" { $script:C_RED }
             default         { $script:C_DIM }
         }
 
         $routingStr = if ($svc.RoutingMode -eq "REMOTE") { "REMOTE" } else { "LOCAL :$($svc.Port)" }
+        $gitStr = if ($svc.PSObject.Properties["GitSummary"] -and $svc.GitSummary) { [string]$svc.GitSummary } else { "-" }
+        if ($gitStr.Length -gt 12) { $gitStr = $gitStr.Substring(0, 11) + "~" }
 
         $marker = if ($i -eq $SelectedIndex) { ">" } else { " " }
         $rowPrefix = if ($i -eq $SelectedIndex) { "$script:C_REV" } else { "" }
         $rowSuffix = if ($i -eq $SelectedIndex) { "$script:C_RESET" } else { "" }
 
-        $line = "{0,-2} {1,-21} {2,-12} {3,-6} {4,-7} {5}{6,-13}{7} {8,-14} {9,-8} {10,-8} {11,-10}" -f `
-            $marker, $svc.Name, $svc.Type, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $uptime, $svc.MaxHeap, $ram
+        $line = "{0,-2} {1,-21} {2,-12} {3,-6} {4,-7} {5}{6,-13}{7} {8,-13} {9,-12} {10,-7} {11,-8} {12,-9}" -f `
+            $marker, $svc.Name, $svc.Type, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $gitStr, $uptime, $svc.MaxHeap, $ram
 
         [void]$sb.Append((Pad-Line "$rowPrefix$line$rowSuffix" $width) + "`n")
     }

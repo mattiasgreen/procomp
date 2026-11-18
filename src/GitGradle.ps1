@@ -141,3 +141,23 @@ function Invoke-GradleBuildSync {
         $ErrorActionPreference = $prevEap
     }
 }
+
+function Refresh-GitSummaries {
+    param($Services, [string]$RootDir)
+    $cache = @{}
+    foreach ($svc in $Services) {
+        if (-not $svc.GitRepo) {
+            $svc.GitSummary = "-"
+            continue
+        }
+        $rp = Resolve-RepoPath -GitRepo $svc.GitRepo -RootDir $RootDir
+        if (-not $rp) {
+            $svc.GitSummary = "-"
+            continue
+        }
+        if (-not $cache.ContainsKey($rp)) {
+            $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp).Summary
+        }
+        $svc.GitSummary = $cache[$rp]
+    }
+}

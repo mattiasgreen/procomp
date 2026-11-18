@@ -161,7 +161,7 @@ $banner = "Booting enabled services..."
 foreach ($svc in $services) {
     if ($svc.Enabled) {
         try {
-            Start-ServiceProcess -Svc $svc -MockJarPath $MockJar
+            Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
         } catch {
             $banner = $_.Exception.Message
         }
@@ -176,6 +176,8 @@ Clear-Host
 try {
     $running = $true
     $lastRefresh = [datetime]::MinValue
+    $lastGitRefresh = [datetime]::MinValue
+    $wireMockSynced = $false
     $needsRender = $true
     $filterText = ""
     $filterInputMode = $false
@@ -185,9 +187,22 @@ try {
 
     while ($running) {
         $now = Get-Date
+        if (($now - $lastGitRefresh).TotalSeconds -ge 10) {
+            Refresh-GitSummaries -Services $services -RootDir $RootDir
+            $lastGitRefresh = $now
+            $needsRender = $true
+        }
         if (($now - $lastRefresh).TotalMilliseconds -ge 750) {
             Refresh-ProcessSnapshot -Services $services -DetectIde
             Poll-AsyncHealth -Services $services -HttpClient $HttpClient
+            if (-not $wireMockSynced -and $wireMockUrl) {
+                $wmSvc = $services | Where-Object { $_.Type -eq "wiremock" -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
+                if ($wmSvc) {
+                    $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $wireMockUrl
+                    $wireMockSynced = $true
+                    $banner = "WireMock synced ($cnt routes)"
+                }
+            }
             # Check any in-flight async Gradle builds
             foreach ($svc in $services) {
                 if ($svc.BuildProc -and $svc.BuildProc.HasExited) {

@@ -117,7 +117,20 @@ function Start-ServiceProcess {
             $argList += "-Dspring.profiles.active=local"
             $argList += "-jar"
             $argList += $realJar
-        } else {
+        } elseif (($Svc.Type -eq "wiremock") -and $RootDir -and (Test-Path (Join-Path $RootDir "wiremock"))) {
+            $wmJar = Get-ChildItem -Path (Join-Path $RootDir "wiremock") -Filter "wiremock*.jar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($wmJar) {
+                if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
+                $argList += "-jar"
+                $argList += $wmJar.FullName
+                $argList += "--port"
+                $argList += "$($Svc.Port)"
+                $argList += "--root-dir"
+                $argList += (Join-Path $RootDir "wiremock")
+            }
+        }
+
+        if ($argList.Count -eq 0) {
             if (-not (Test-Path $MockJarPath)) {
                 throw "No bootJar or Mock JAR found at $MockJarPath."
             }
