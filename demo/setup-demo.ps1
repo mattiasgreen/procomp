@@ -46,7 +46,7 @@ try {
     }
 
     function Ensure-DemoRepo {
-        param([string]$Name, [string]$Branch = "main", [switch]$MakeDirty)
+        param([string]$Name, [string]$Branch = "main", [switch]$MakeDirty, [switch]$AddRemoteCommit)
         $path = Join-Path $DemoRepos $Name
         $remotePath = Join-Path (Join-Path $DemoRepos "_remotes") "$Name.git"
         if ((Test-Path (Join-Path $path ".git")) -and (Test-Path $remotePath)) { return }
@@ -73,6 +73,19 @@ try {
             & git -C $path remote add origin $remotePath >$null 2>&1
             & git -C $path push -u origin main >$null 2>&1
 
+            if ($AddRemoteCommit) {
+                $tmpClone = Join-Path $DemoRepos "_tmp_$Name"
+                if (Test-Path $tmpClone) { Remove-Item -Recurse -Force $tmpClone }
+                & git clone --branch main $remotePath $tmpClone >$null 2>&1
+                & git -C $tmpClone config user.email "teammate@procomp.local" >$null 2>&1
+                & git -C $tmpClone config user.name "teammate" >$null 2>&1
+                "Upstream change ready to pull" | Set-Content (Join-Path $tmpClone "CHANGELOG.md") -Encoding UTF8
+                & git -C $tmpClone add CHANGELOG.md >$null 2>&1
+                & git -C $tmpClone commit -m "Upstream feature commit" >$null 2>&1
+                & git -C $tmpClone push origin main >$null 2>&1
+                Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
+            }
+
             if ($Branch -ne "main") {
                 & git -C $path checkout -b $Branch >$null 2>&1
             }
@@ -84,7 +97,7 @@ try {
         }
     }
 
-    Ensure-DemoRepo -Name "commerce-backend" -Branch "main"
+    Ensure-DemoRepo -Name "commerce-backend" -Branch "main" -AddRemoteCommit
     Ensure-DemoRepo -Name "billing-quarkus"  -Branch "feat/invoice-v2" -MakeDirty
     Ensure-DemoRepo -Name "web-bff"          -Branch "main"
 } catch {

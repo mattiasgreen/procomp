@@ -5,7 +5,7 @@
     Compatible with Windows PowerShell 5.1+ and PowerShell 7+.
 #>
 param(
-    [ValidateSet("tui", "up", "down", "status", "sync", "build", "doctor")]
+    [ValidateSet("tui", "up", "down", "status", "sync", "fetch", "clone", "build", "doctor")]
     [string]$Action = "tui",
     [string]$ConfigPath = (Join-Path $PSScriptRoot "procomp.json"),
     [string]$Profile = ""
@@ -84,6 +84,26 @@ if ($Action -eq "sync") {
     try {
         $syncRes = @(Sync-GitRepos -Services $services -RootDir $RootDir)
         $syncRes | Format-Table -AutoSize
+    } finally {
+        $HttpClient.Dispose()
+    }
+    exit 0
+}
+
+if ($Action -eq "fetch") {
+    try {
+        $fetchRes = @(Fetch-AllGitRepos -Services $services -RootDir $RootDir)
+        $fetchRes | Format-Table -AutoSize
+    } finally {
+        $HttpClient.Dispose()
+    }
+    exit 0
+}
+
+if ($Action -eq "clone") {
+    try {
+        $cloneRes = @(Invoke-GitCloneMissingRepos -Services $services -RootDir $RootDir)
+        $cloneRes | Format-Table -AutoSize
     } finally {
         $HttpClient.Dispose()
     }
@@ -363,6 +383,28 @@ try {
                 }
                 $sharedState.RefreshNow = $true
             }
+            "fetch" {
+                $svc = $services[$script:selected]
+                $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "FetchOne"; ServiceName = $svc.Name })
+                $sharedState.RefreshNow = $true
+                $script:banner = "Fetching $($svc.Name)..."
+            }
+            "fetch-all" {
+                $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "FetchAll"; ServiceName = "" })
+                $sharedState.RefreshNow = $true
+                $script:banner = "Fetching all repos..."
+            }
+            "pull" {
+                $svc = $services[$script:selected]
+                $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "PullOne"; ServiceName = $svc.Name })
+                $sharedState.RefreshNow = $true
+                $script:banner = "Pulling $($svc.Name) (--ff-only)..."
+            }
+            "pull-all" {
+                $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "PullAll"; ServiceName = "" })
+                $sharedState.RefreshNow = $true
+                $script:banner = "Pulling all clean repos (--ff-only)..."
+            }
             "detach" {
                 $script:detachOnExit = $true
                 $script:running = $false
@@ -377,6 +419,10 @@ try {
         if ($sharedState.SnapshotVersion -ne $lastSnapVer) {
             Apply-SharedSnapshot -Services $services -SharedState $sharedState
             $lastSnapVer = $sharedState.SnapshotVersion
+            if ($sharedState.BannerNotification) {
+                $banner = $sharedState.BannerNotification
+                $sharedState.BannerNotification = ""
+            }
 
             if (-not $gatewaySynced -and $gatewayUrl -and $gatewaySvcName) {
                 $gwSvc = $services | Where-Object { $_.Name -eq $gatewaySvcName -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
@@ -392,6 +438,7 @@ try {
                     $svc.BuildProc = $null
                     if ($exitCode -eq 0) {
                         try {
+                            $sharedState.StaleServices[$svc.Name] = $false
                             Start-ServiceProcess -Svc $svc -RootDir $RootDir
                             $sharedState.RefreshNow = $true
                             $banner = "Build succeeded; started $($svc.Name)"
@@ -564,6 +611,10 @@ try {
                         'X' { Invoke-UiAction -Cmd "stop-all"; $needsRender = $true }
                         'r' { Invoke-UiAction -Cmd "restart"; $needsRender = $true }
                         'b' { Invoke-UiAction -Cmd "build"; $needsRender = $true }
+                        'f' { Invoke-UiAction -Cmd "fetch"; $needsRender = $true }
+                        'F' { Invoke-UiAction -Cmd "fetch-all"; $needsRender = $true }
+                        'p' { Invoke-UiAction -Cmd "pull"; $needsRender = $true }
+                        'P' { Invoke-UiAction -Cmd "pull-all"; $needsRender = $true }
                         'd' { Invoke-UiAction -Cmd "detach" }
                     }
                 }

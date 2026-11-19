@@ -305,6 +305,58 @@ Describe 'procomp Unit Tests' {
             $st = Get-GitRepoStatus -RepoPath $script:RepoRoot
             Assert-Eq $st.Exists $true
             Assert-Neq $st.Branch "-"
+            $miss = Get-GitRepoStatus -RepoPath (Join-Path $TestDrive "does-not-exist") -HasRepoUrl $true
+            Assert-Eq $miss.Summary "MISSING"
+        }
+
+        It 'fetches remote commit, reports behind count, pulls --ff-only, and skips dirty repo' {
+            $remote = Join-Path $TestDrive "git-remote.git"
+            $local  = Join-Path $TestDrive "git-local"
+            $other  = Join-Path $TestDrive "git-other"
+            New-Item -ItemType Directory -Force -Path $remote, $local | Out-Null
+
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & git init --bare $remote >$null 2>&1
+                & git -C $local init >$null 2>&1
+                & git -C $local checkout -B main >$null 2>&1
+                & git -C $local config user.email "t@t.local" >$null 2>&1
+                & git -C $local config user.name "t" >$null 2>&1
+                "v1" | Set-Content (Join-Path $local "a.txt")
+                & git -C $local add a.txt >$null 2>&1
+                & git -C $local commit -m "c1" >$null 2>&1
+                & git -C $local remote add origin $remote >$null 2>&1
+                & git -C $local push -u origin main >$null 2>&1
+
+                # Push an upstream commit from another clone
+                & git clone --branch main $remote $other >$null 2>&1
+                & git -C $other config user.email "t@t.local" >$null 2>&1
+                & git -C $other config user.name "t" >$null 2>&1
+                "v2" | Set-Content (Join-Path $other "b.txt")
+                & git -C $other add b.txt >$null 2>&1
+                & git -C $other commit -m "c2" >$null 2>&1
+                & git -C $other push origin main >$null 2>&1
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+
+            $fr = Invoke-GitFetchRepo -RepoPath $local
+            Assert-Eq $fr.Action "FETCHED"
+            $stBehind = Get-GitRepoStatus -RepoPath $local
+            Assert-Eq $stBehind.Behind 1
+            Assert-Match $stBehind.Summary "main v1"
+
+            $pr = Invoke-GitPullRepo -RepoPath $local
+            Assert-Eq $pr.Action "PULLED"
+            Assert-Eq $pr.Commits 1
+            $stClean = Get-GitRepoStatus -RepoPath $local
+            Assert-Eq $stClean.Behind 0
+
+            # Dirty working tree must be skipped safely
+            "wip" | Set-Content (Join-Path $local "dirty.txt")
+            $prDirty = Invoke-GitPullRepo -RepoPath $local
+            Assert-Eq $prDirty.Action "SKIP"
         }
 
         It 'builds LOCAL and REMOTE WireMock proxy mappings with deterministic IDs' {

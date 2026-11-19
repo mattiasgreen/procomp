@@ -146,10 +146,10 @@ function Render-Tui {
             @{ Label = "[x]Stop";   Command = "stop";    Active = $false },
             @{ Label = "[r]Rst";    Command = "restart"; Active = $false },
             @{ Label = "[b]Build";  Command = "build";   Active = $false },
+            @{ Label = "[f]Fetch";  Command = "fetch";   Active = $false },
+            @{ Label = "[p]Pull";   Command = "pull";    Active = $false },
             @{ Label = "[t]Route";  Command = "route";   Active = $false },
             @{ Label = "[l]Logs";   Command = "logs";    Active = $false },
-            @{ Label = "[a]All";    Command = "all";     Active = $AllLogs },
-            @{ Label = "[e]Err";    Command = "err";     Active = $ErrorsOnly },
             @{ Label = "[q]Quit";   Command = "quit";    Active = $false }
         )
         $serviceStartY = 4
@@ -200,18 +200,26 @@ function Render-Tui {
                 default         { $script:C_DIM }
             }
 
-            $routingStr = if ($svc.RoutingMode -eq "REMOTE") { "REMOTE" } else { "LOCAL :$($svc.Port)" }
-            $gitStr = if ($svc.PSObject.Properties["GitSummary"] -and $svc.GitSummary) { [string]$svc.GitSummary } else { "-" }
-            if ($gitStr.Length -gt 12) { $gitStr = $gitStr.Substring(0, 11) + "~" }
-            $rtStr = if ($svc.PSObject.Properties["Runtime"] -and $svc.Runtime) { [string]$svc.Runtime } else { "-" }
-            $limStr = if ($svc.PSObject.Properties["MemLimit"] -and $svc.MemLimit) { [string]$svc.MemLimit } else { "-" }
-
             $marker = if ($i -eq $SelectedIndex) { ">" } else { " " }
             $rowPrefix = if ($i -eq $SelectedIndex) { "$script:C_REV" } else { "" }
             $rowSuffix = if ($i -eq $SelectedIndex) { "$script:C_RESET" } else { "" }
 
-            $line = "{0,-2} {1,-21} {2,-13} {3,-6} {4,-7} {5}{6,-13}{7} {8,-13} {9,-12} {10,-7} {11,-7} {12,-9}" -f `
-                $marker, $svc.Name, $rtStr, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $gitStr, $uptime, $limStr, $ram
+            $routingStr = if ($svc.RoutingMode -eq "REMOTE") { "REMOTE" } else { "LOCAL :$($svc.Port)" }
+            $gitStr = if ($svc.PSObject.Properties["GitSummary"] -and $svc.GitSummary) { [string]$svc.GitSummary } else { "-" }
+            if ($svc.PSObject.Properties["NeedsRebuild"] -and $svc.NeedsRebuild -and $gitStr -notlike "*...") {
+                $gitStr = "$gitStr[!]"
+            }
+            if ($gitStr.Length -gt 12) { $gitStr = $gitStr.Substring(0, 11) + "~" }
+            $gitColor = if ($gitStr -eq "MISSING") { $script:C_RED }
+                        elseif ($gitStr -match 'FETCH|PULL|\*|v\d+|\[!\]') { $script:C_YELLOW }
+                        else { "" }
+            $gitReset = if ($gitColor) { "$script:C_RESET$rowPrefix" } else { "" }
+
+            $rtStr = if ($svc.PSObject.Properties["Runtime"] -and $svc.Runtime) { [string]$svc.Runtime } else { "-" }
+            $limStr = if ($svc.PSObject.Properties["MemLimit"] -and $svc.MemLimit) { [string]$svc.MemLimit } else { "-" }
+
+            $line = "{0,-2} {1,-21} {2,-13} {3,-6} {4,-7} {5}{6,-13}{7} {8,-13} {9}{10,-12}{11} {12,-7} {13,-7} {14,-9}" -f `
+                $marker, $svc.Name, $rtStr, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $gitColor, $gitStr, $gitReset, $uptime, $limStr, $ram
 
             [void]$sb.Append((Pad-Line "$rowPrefix$line$rowSuffix" $width) + "`n")
         }

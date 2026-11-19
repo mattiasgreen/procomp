@@ -8,19 +8,23 @@ function New-SharedTuiState {
         [string]$LogDir
     )
     return [Hashtable]::Synchronized(@{
-        StopRequested    = $false
-        RootDir          = $RootDir
-        ConfigPath       = $ConfigPath
-        StateDir         = $StateDir
-        LogDir           = $LogDir
-        SnapshotVersion  = 0
-        RawMode          = $false
-        ClearLogEpoch    = 0
-        RefreshNow       = $true
-        LastError        = ""
-        ServiceOverrides = [Hashtable]::Synchronized(@{})
-        ServiceMetrics   = [Hashtable]::Synchronized(@{})
-        LogBuffers       = [Hashtable]::Synchronized(@{})
+        StopRequested      = $false
+        RootDir            = $RootDir
+        ConfigPath         = $ConfigPath
+        StateDir           = $StateDir
+        LogDir             = $LogDir
+        SnapshotVersion    = 0
+        RawMode            = $false
+        ClearLogEpoch      = 0
+        RefreshNow         = $true
+        LastError          = ""
+        BannerNotification = ""
+        GitJobQueue        = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        ActiveGitOps       = [Hashtable]::Synchronized(@{})
+        StaleServices      = [Hashtable]::Synchronized(@{})
+        ServiceOverrides   = [Hashtable]::Synchronized(@{})
+        ServiceMetrics     = [Hashtable]::Synchronized(@{})
+        LogBuffers         = [Hashtable]::Synchronized(@{})
     })
 }
 
@@ -70,9 +74,70 @@ function Start-BackgroundMonitor {
                         $lastClearEpoch = $State.ClearLogEpoch
                     }
 
+                    # Process any queued on-demand Git fetch/pull jobs without blocking the UI thread
+                    $job = $null
+                    while ($State.GitJobQueue.TryDequeue([ref]$job)) {
+                        $targetRepos = @()
+                        $seenR = @{}
+                        foreach ($svc in $bgServices) {
+                            if (-not $svc.Repo) { continue }
+                            if ($job.ServiceName -and ($svc.Name -ne $job.ServiceName)) { continue }
+                            $rp = Resolve-RepoPath -Repo $svc.Repo -RootDir $root
+                            if ($rp -and (-not $seenR.ContainsKey($rp))) {
+                                $seenR[$rp] = $true
+                                $targetRepos += $rp
+                            }
+                        }
+
+                        $opLabel = if ($job.Action -like "Pull*") { "PULLING..." } else { "FETCHING..." }
+                        foreach ($rp in $targetRepos) { $State.ActiveGitOps[$rp] = $opLabel }
+                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
+                        foreach ($svc in $bgServices) {
+                            if ($State.ServiceMetrics.ContainsKey($svc.Name)) {
+                                $State.ServiceMetrics[$svc.Name].GitSummary = $svc.GitSummary
+                            }
+                        }
+                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+
+                        $pulledTotal = 0
+                        $skippedNotes = @()
+                        foreach ($rp in $targetRepos) {
+                            if ($job.Action -like "Pull*") {
+                                $pr = Invoke-GitPullRepo -RepoPath $rp
+                                if ($pr.Action -eq "PULLED" -and $pr.Commits -gt 0) {
+                                    $pulledTotal += $pr.Commits
+                                    foreach ($svc in $bgServices) {
+                                        if ($svc.Repo -and ((Resolve-RepoPath -Repo $svc.Repo -RootDir $root) -eq $rp)) {
+                                            $State.StaleServices[$svc.Name] = $true
+                                        }
+                                    }
+                                } elseif ($pr.Action -ne "PULLED") {
+                                    $skippedNotes += "$(Split-Path -Leaf $rp): $($pr.Reason)"
+                                }
+                            } else {
+                                [void](Invoke-GitFetchRepo -RepoPath $rp)
+                            }
+                            $State.ActiveGitOps.Remove($rp)
+                        }
+
+                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
+                        $lastGit = Get-Date
+                        if ($job.Action -like "Pull*") {
+                            if ($pulledTotal -gt 0) {
+                                $State.BannerNotification = "Pulled $pulledTotal commit(s) - press [b] to rebuild"
+                            } elseif ($skippedNotes.Count -gt 0) {
+                                $State.BannerNotification = "Pull skipped: $($skippedNotes[0])"
+                            } else {
+                                $State.BannerNotification = "Already up to date."
+                            }
+                        } else {
+                            $State.BannerNotification = "Git fetch complete ($($targetRepos.Count) repo(s))."
+                        }
+                    }
+
                     $now = Get-Date
                     if (($now - $lastGit).TotalSeconds -ge 10) {
-                        Refresh-GitSummaries -Services $bgServices -RootDir $root
+                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
                         $lastGit = $now
                     }
 
@@ -159,6 +224,12 @@ function Apply-SharedSnapshot {
                 $svc.PortConflict = $m.PortConflict
             }
             $svc.GitSummary = $m.GitSummary
+            $isStale = ($SharedState.StaleServices.ContainsKey($svc.Name) -and [bool]$SharedState.StaleServices[$svc.Name])
+            if (-not $svc.PSObject.Properties["NeedsRebuild"]) {
+                $svc | Add-Member -NotePropertyName "NeedsRebuild" -NotePropertyValue $isStale -Force
+            } else {
+                $svc.NeedsRebuild = $isStale
+            }
             if (-not $svc.PSObject.Properties["UiPidStr"]) {
                 $svc | Add-Member -NotePropertyName "UiPidStr"  -NotePropertyValue $m.PidStr  -Force
                 $svc | Add-Member -NotePropertyName "UiUptime"  -NotePropertyValue $m.Uptime  -Force

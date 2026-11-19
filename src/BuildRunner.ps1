@@ -9,10 +9,31 @@ function Resolve-RepoPath {
     return [System.IO.Path]::GetFullPath((Join-Path $RootDir $Repo))
 }
 
+function Invoke-GitNonInteractive {
+    param([string[]]$GitArgs)
+    $prevPrompt = [System.Environment]::GetEnvironmentVariable("GIT_TERMINAL_PROMPT", "Process")
+    $prevSsh    = [System.Environment]::GetEnvironmentVariable("GIT_SSH_COMMAND", "Process")
+    $prevEap    = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        [System.Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", "0", "Process")
+        if (-not $prevSsh) {
+            [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=5", "Process")
+        }
+        $out = @(& git @GitArgs 2>&1)
+        return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join " ").Trim() }
+    } finally {
+        [System.Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", $prevPrompt, "Process")
+        [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", $prevSsh, "Process")
+        $ErrorActionPreference = $prevEap
+    }
+}
+
 function Get-GitRepoStatus {
-    param([string]$RepoPath)
+    param([string]$RepoPath, [bool]$HasRepoUrl = $false)
     if (-not $RepoPath -or -not (Test-Path (Join-Path $RepoPath ".git"))) {
-        return [PSCustomObject]@{ Exists = $false; Branch = "-"; Dirty = $false; Summary = "-" }
+        $sum = if ($HasRepoUrl) { "MISSING" } else { "-" }
+        return [PSCustomObject]@{ Exists = $false; Branch = "-"; Dirty = $false; Ahead = 0; Behind = 0; Summary = $sum }
     }
 
     $prevEap = $ErrorActionPreference
@@ -23,19 +44,32 @@ function Get-GitRepoStatus {
         $branch = $branch.Trim()
         $porcelain = @(& git -C $RepoPath status --porcelain 2>$null)
         $dirty = ($porcelain.Count -gt 0)
+
+        $ahead = 0
+        $behind = 0
+        $abLines = @(& git -C $RepoPath rev-list --left-right --count 'HEAD...@{u}' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $abLines.Count -gt 0 -and ($abLines[0].Trim() -match '^(\d+)\s+(\d+)$')) {
+            $ahead  = [int]$Matches[1]
+            $behind = [int]$Matches[2]
+        }
+
         $summary = if ($dirty) { "$branch*" } else { $branch }
-        return [PSCustomObject]@{ Exists = $true; Branch = $branch; Dirty = $dirty; Summary = $summary }
+        if ($behind -gt 0) { $summary += " v$behind" }
+        if ($ahead -gt 0)  { $summary += " ^$ahead" }
+
+        return [PSCustomObject]@{ Exists = $true; Branch = $branch; Dirty = $dirty; Ahead = $ahead; Behind = $behind; Summary = $summary }
     } finally {
         $ErrorActionPreference = $prevEap
     }
 }
 
 function Refresh-GitSummaries {
-    param($Services, [string]$RootDir)
+    param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null)
     $cache = @{}
     foreach ($svc in $Services) {
+        $hasUrl = ($svc.PSObject.Properties["ServiceRepositoryUrl"] -and [bool]$svc.ServiceRepositoryUrl)
         if (-not $svc.Repo) {
-            $svc.GitSummary = "-"
+            $svc.GitSummary = if ($hasUrl) { "MISSING" } else { "-" }
             continue
         }
         $rp = Resolve-RepoPath -Repo $svc.Repo -RootDir $RootDir
@@ -43,11 +77,57 @@ function Refresh-GitSummaries {
             $svc.GitSummary = "-"
             continue
         }
+        if ($ActiveOps -and $ActiveOps.ContainsKey($rp)) {
+            $svc.GitSummary = $ActiveOps[$rp]
+            continue
+        }
         if (-not $cache.ContainsKey($rp)) {
-            $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp).Summary
+            $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp -HasRepoUrl $hasUrl).Summary
         }
         $svc.GitSummary = $cache[$rp]
     }
+}
+
+function Invoke-GitFetchRepo {
+    param([string]$RepoPath)
+    if (-not $RepoPath -or -not (Test-Path (Join-Path $RepoPath ".git"))) {
+        return [PSCustomObject]@{ Repo = $RepoPath; Action = "SKIP"; Reason = "not cloned" }
+    }
+    $res = Invoke-GitNonInteractive -GitArgs @("-C", $RepoPath, "fetch", "--quiet")
+    if ($res.ExitCode -eq 0) {
+        return [PSCustomObject]@{ Repo = $RepoPath; Action = "FETCHED"; Reason = "ok" }
+    }
+    return [PSCustomObject]@{ Repo = $RepoPath; Action = "ERROR"; Reason = $res.Output }
+}
+
+function Invoke-GitPullRepo {
+    param([string]$RepoPath)
+    $st = Get-GitRepoStatus -RepoPath $RepoPath
+    if (-not $st.Exists) {
+        return [PSCustomObject]@{ Repo = $RepoPath; Action = "SKIP"; Commits = 0; Reason = "not cloned" }
+    }
+    if ($st.Dirty) {
+        return [PSCustomObject]@{ Repo = $RepoPath; Action = "SKIP"; Commits = 0; Reason = "dirty ($($st.Summary)) - resolve in IDE" }
+    }
+
+    $beforeRes = Invoke-GitNonInteractive -GitArgs @("-C", $RepoPath, "rev-parse", "HEAD")
+    $beforeSha = $beforeRes.Output
+    $pullRes = Invoke-GitNonInteractive -GitArgs @("-C", $RepoPath, "pull", "--ff-only")
+    if ($pullRes.ExitCode -ne 0) {
+        return [PSCustomObject]@{ Repo = $RepoPath; Action = "ERROR"; Commits = 0; Reason = "cannot fast-forward ($($pullRes.Output))" }
+    }
+    $afterRes = Invoke-GitNonInteractive -GitArgs @("-C", $RepoPath, "rev-parse", "HEAD")
+    $afterSha = $afterRes.Output
+    $count = 0
+    if ($beforeSha -and $afterSha -and ($beforeSha -ne $afterSha)) {
+        $cntRes = Invoke-GitNonInteractive -GitArgs @("-C", $RepoPath, "rev-list", "--count", "$beforeSha..$afterSha")
+        if ($cntRes.ExitCode -eq 0 -and $cntRes.Output -match '^\d+$') {
+            $count = [int]$cntRes.Output
+        } else {
+            $count = 1
+        }
+    }
+    return [PSCustomObject]@{ Repo = $RepoPath; Action = "PULLED"; Commits = $count; Reason = $pullRes.Output }
 }
 
 function Sync-GitRepos {
@@ -73,18 +153,48 @@ function Sync-GitRepos {
             $results += [PSCustomObject]@{ Repo = $repoPath; Action = "SKIP"; Reason = "feature branch ($($st.Branch))" }
             continue
         }
+        $pr = Invoke-GitPullRepo -RepoPath $repoPath
+        $results += [PSCustomObject]@{ Repo = $repoPath; Action = $pr.Action; Reason = $pr.Reason }
+    }
+    return $results
+}
 
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        try {
-            $out = (& git -C $repoPath pull --ff-only 2>&1) -join " "
-            if ($LASTEXITCODE -eq 0) {
-                $results += [PSCustomObject]@{ Repo = $repoPath; Action = "PULLED"; Reason = $out }
-            } else {
-                $results += [PSCustomObject]@{ Repo = $repoPath; Action = "ERROR"; Reason = $out }
-            }
-        } finally {
-            $ErrorActionPreference = $prevEap
+function Fetch-AllGitRepos {
+    param($Services, [string]$RootDir)
+    $seen = @{}
+    $results = @()
+    foreach ($svc in $Services) {
+        $repoPath = Resolve-RepoPath -Repo $svc.Repo -RootDir $RootDir
+        if (-not $repoPath -or $seen.ContainsKey($repoPath)) { continue }
+        $seen[$repoPath] = $true
+        $results += (Invoke-GitFetchRepo -RepoPath $repoPath)
+    }
+    return $results
+}
+
+function Invoke-GitCloneMissingRepos {
+    param($Services, [string]$RootDir)
+    $seen = @{}
+    $results = @()
+    foreach ($svc in $Services) {
+        $repoPath = Resolve-RepoPath -Repo $svc.Repo -RootDir $RootDir
+        $repoUrl = if ($svc.PSObject.Properties["ServiceRepositoryUrl"]) { [string]$svc.ServiceRepositoryUrl } else { "" }
+        if (-not $repoPath -or -not $repoUrl -or $seen.ContainsKey($repoPath)) { continue }
+        $seen[$repoPath] = $true
+
+        if (Test-Path (Join-Path $repoPath ".git")) {
+            $results += [PSCustomObject]@{ Repo = $repoPath; Action = "EXISTS"; Reason = "already cloned" }
+            continue
+        }
+        $parent = Split-Path -Parent $repoPath
+        if ($parent -and (-not (Test-Path $parent))) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+        $res = Invoke-GitNonInteractive -GitArgs @("clone", $repoUrl, $repoPath)
+        if ($res.ExitCode -eq 0) {
+            $results += [PSCustomObject]@{ Repo = $repoPath; Action = "CLONED"; Reason = $repoUrl }
+        } else {
+            $results += [PSCustomObject]@{ Repo = $repoPath; Action = "ERROR"; Reason = $res.Output }
         }
     }
     return $results
