@@ -280,7 +280,8 @@ function Get-UnifiedLogs {
             $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = $e.Text }
             if ($hasStack) {
                 foreach ($sl in $e.StackLines) {
-                    $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "    $sl" }
+                    $cleanSl = $sl.Replace("`t", "  ").Trim()
+                    $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "    $cleanSl" }
                 }
             }
         }

@@ -13,16 +13,17 @@ $script:C_REV     = "$script:ESC[7m"
 
 function Pad-Line {
     param([string]$Text, [int]$Width)
-    $plain = $Text -replace "$script:ESC\[[0-9;]*m", ""
+    # Replace literal tabs/CRs so terminal tab-stops never skip over previous frame chars or cause line-wrap
+    $clean = $Text.Replace("`t", "  ").Replace("`r", "")
+    $plain = $clean -replace "$script:ESC\[[0-9;]*m", ""
     if ($plain.Length -gt $Width) {
-        # Strip ANSI and truncate cleanly so the terminal never wraps and scrolls the viewport
         return $plain.Substring(0, $Width)
     }
     $pad = $Width - $plain.Length
     if ($pad -gt 0) {
-        return $Text + (" " * $pad)
+        return $clean + (" " * $pad)
     }
-    return $Text
+    return $clean
 }
 
 function Render-Tui {
