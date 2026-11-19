@@ -692,6 +692,49 @@ Describe 'procomp Unit Tests' {
             Assert-Eq (($res | Sort-Object) -join ",") "10,20,30,40,50,60"
         }
 
+        It 'synthesizes managed gateway service from gateway.port and gateway.command and keeps it LOCAL on wildcard profiles' {
+            $gwCfgPath = Join-Path $TestDrive "gw-cfg.json"
+            @'
+{
+  "reposRoot": "C:\\fake\\repos",
+  "runtimes": { "java": { "command": "java -jar app.jar" } },
+  "gateway": {
+    "type": "wiremock",
+    "port": 8089,
+    "command": "java -Xmx128m -jar {{reposRoot}}\\wiremock.jar --port {{port}}",
+    "workingDir": "{{reposRoot}}\\wm"
+  },
+  "profiles": {
+    "only-one": { "local": ["svc1"], "remote": ["*"] }
+  },
+  "apps": [
+    { "servicename": "svc1", "localport": "9001", "type": "java" },
+    { "servicename": "svc2", "localport": "9002", "type": "java" }
+  ]
+}
+'@ | Set-Content -Path $gwCfgPath -Encoding UTF8
+
+            $cfg = Load-ProcompConfig -ConfigPath $gwCfgPath -StateDir (Join-Path $TestDrive "gwst") -LogDir (Join-Path $TestDrive "gwlg")
+            Assert-Eq $cfg.Gateway.Port 8089
+            Assert-Eq $cfg.Gateway.AdminUrl "http://127.0.0.1:8089"
+            Assert-Eq $cfg.Gateway.ServiceName "wiremock-gateway"
+            Assert-Eq $cfg.Services.Count 3
+            $gw = $cfg.Services[0]
+            Assert-Eq $gw.Name "wiremock-gateway"
+            Assert-Eq $gw.Port 8089
+            Assert-Eq $gw.MemLimit "128M"
+            Assert-Eq $gw.Repo "C:\fake\repos\wm"
+
+            $vars = Build-ServiceTemplateVars -Svc $gw -RootDir $script:RepoRoot
+            Assert-Eq (Expand-Template -Template $gw.RuntimeDef.Command -Vars $vars) "java -Xmx128m -jar C:\fake\repos\wiremock.jar --port 8089"
+
+            $rFile = Join-Path $TestDrive "gw-routing.json"
+            Apply-RoutingProfile -Config $cfg -ProfileName "only-one" -RoutingFile $rFile
+            Assert-Eq $gw.RoutingMode "LOCAL"
+            Assert-Eq $gw.Enabled $true
+            Assert-Eq ($cfg.Services | Where-Object { $_.Name -eq "svc2" }).RoutingMode "REMOTE"
+        }
+
         It 'applies named routing profiles from procomp.json and persists routing.json' {
             $rFile = Join-Path $TestDrive "prof-routing.json"
             $polyPath = Join-Path $script:RepoRoot "examples\polyglot.procomp.json"

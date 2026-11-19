@@ -105,8 +105,19 @@ function Start-BackgroundMonitor {
                                 "Startup" {
                                     $buildingNames = @()
                                     $lastErr = ""
+                                    $externalGwReused = $false
+                                    if ($gwAdminUrl -and $gwSvcName -and (Test-WireMockReachable -WireMockBaseUrl $gwAdminUrl)) {
+                                        $gwTarget = $bgServices | Where-Object { $_.Name -eq $gwSvcName } | Select-Object -First 1
+                                        if ($gwTarget -and (-not (Read-PidFromFile -PidFile $gwTarget.PidFile))) {
+                                            $externalGwReused = $true
+                                            $gwTarget.ExternalIde = $true
+                                            $gwTarget.Healthy = $true
+                                            $gwTarget.StatusText = "IDE-UP"
+                                            Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $gwSvcName -Message "WireMock already reachable at $gwAdminUrl; reusing external instance"
+                                        }
+                                    }
                                     foreach ($svc in $bgServices) {
-                                        if ($svc.Enabled) {
+                                        if ($svc.Enabled -and (-not ($externalGwReused -and $svc.Name -eq $gwSvcName))) {
                                             $State.CurrentActivity = "Starting $($svc.Name) (port $($svc.Port))..."
                                             $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                             try {
@@ -118,11 +129,11 @@ function Start-BackgroundMonitor {
                                             }
                                         }
                                     }
-                                    if ($gwAdminUrl -and (-not $gwSvcName)) {
+                                    if ($gwAdminUrl -and ($externalGwReused -or (-not $gwSvcName))) {
                                         $State.CurrentActivity = "Syncing WireMock routes..."
                                         $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
-                                        $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl
-                                        if ($cnt -gt 0 -and (-not $lastErr)) { $State.BannerNotification = "External WireMock synced ($cnt routes)" }
+                                        $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl -GatewayServiceName $gwSvcName
+                                        if ($cnt -gt 0 -and (-not $lastErr)) { $State.BannerNotification = "WireMock synced ($cnt routes)" }
                                     }
                                     if ($lastErr) {
                                         $State.BannerNotification = $lastErr

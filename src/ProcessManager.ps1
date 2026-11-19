@@ -162,6 +162,12 @@ function Start-ServiceProcess {
             $Svc.ExternalIde = $true
             $Svc.StatusText = "IDE-UP"
             return
+        } elseif (($Svc.PSObject.Properties["IsGateway"] -and $Svc.IsGateway) -and (Get-Command Test-WireMockReachable -ErrorAction SilentlyContinue) -and (Test-WireMockReachable -WireMockBaseUrl "http://127.0.0.1:$($Svc.Port)")) {
+            Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "WireMock already running on port $($Svc.Port) (PID $listeningPid); reusing external instance"
+            $Svc.ExternalIde = $true
+            $Svc.Healthy = $true
+            $Svc.StatusText = "IDE-UP"
+            return
         } else {
             Write-ProcompTraceLog -Category "PORT" -ServiceName $Svc.Name -Message "Port $($Svc.Port) conflict with PID=$listeningPid -> PORT-CONFLICT"
             $Svc.PortConflict = $true

@@ -382,10 +382,32 @@ function Load-ProcompConfig {
     $gateway = $null
     if ($doc.PSObject.Properties["gateway"] -and $doc.gateway) {
         $g = $doc.gateway
+        $rawAdminUrl = if ($g.PSObject.Properties["adminUrl"] -and $g.adminUrl) { ([string]$g.adminUrl).TrimEnd('/') } else { "" }
+        $gwPort = if ($g.PSObject.Properties["port"] -and $g.port) {
+            [int]$g.port
+        } elseif ($rawAdminUrl) {
+            try { ([Uri]::new($rawAdminUrl)).Port } catch { 0 }
+        } else {
+            0
+        }
+        $gwAdminUrl = if ($rawAdminUrl) { $rawAdminUrl } elseif ($gwPort -gt 0) { "http://127.0.0.1:$gwPort" } else { "" }
+        $gwCmd = if ($g.PSObject.Properties["command"] -and $g.command) { [string]$g.command } else { "" }
+        $gwSvcName = if ($g.PSObject.Properties["serviceName"] -and $g.serviceName) { [string]$g.serviceName } elseif ($gwCmd) { "wiremock-gateway" } else { "" }
+        $cfgDirForGw = Split-Path -Parent $resolvedConfigPath
+        $gwWorkDir = if ($g.PSObject.Properties["workingDir"] -and $g.workingDir) {
+            Expand-Template -Template ([string]$g.workingDir) -Vars @{ reposRoot = $reposRoot; root = $cfgDirForGw }
+        } else {
+            ""
+        }
+        $gwHealth = if ($g.PSObject.Properties["healthPath"] -and $g.healthPath) { [string]$g.healthPath } else { "/__admin/health" }
         $gateway = [PSCustomObject]@{
             Type        = if ($g.PSObject.Properties["type"] -and $g.type) { [string]$g.type } else { "wiremock" }
-            AdminUrl    = if ($g.PSObject.Properties["adminUrl"] -and $g.adminUrl) { ([string]$g.adminUrl).TrimEnd('/') } else { "" }
-            ServiceName = if ($g.PSObject.Properties["serviceName"] -and $g.serviceName) { [string]$g.serviceName } else { "" }
+            Port        = $gwPort
+            AdminUrl    = $gwAdminUrl
+            ServiceName = $gwSvcName
+            Command     = $gwCmd
+            WorkingDir  = $gwWorkDir
+            HealthPath  = $gwHealth
         }
     }
 
@@ -565,6 +587,61 @@ function Load-ProcompConfig {
         }
     }
 
+    if ($gateway -and $gateway.Command -and ($gateway.Port -gt 0)) {
+        $hasExistingGw = (@($services | Where-Object { $_.Name -eq $gateway.ServiceName }).Count -gt 0)
+        if (-not $hasExistingGw) {
+            $gwRtDef = [PSCustomObject]@{
+                Name             = $gateway.Type
+                Command          = $gateway.Command
+                HealthPath       = $gateway.HealthPath
+                ArtifactGlob     = ""
+                ArtifactExclude  = ""
+                MemoryArgPattern = "-Xmx(\d+[kmgKMG]?)"
+            }
+            $gwSvc = [PSCustomObject]@{
+                Name                 = $gateway.ServiceName
+                Runtime              = $gateway.Type
+                RuntimeDef           = $gwRtDef
+                Builder              = ""
+                BuilderDef           = $null
+                Port                 = $gateway.Port
+                Repo                 = $gateway.WorkingDir
+                ReposRoot            = $reposRoot
+                ServiceRepositoryUrl = ""
+                Module               = ""
+                SwaggerUri           = ""
+                Vars                 = @{ port = [string]$gateway.Port; localport = [string]$gateway.Port; adminUrl = $gateway.AdminUrl }
+                HealthPath           = $gateway.HealthPath
+                MemLimit             = (Parse-MemoryLimit -Text $gateway.Command -Pattern "-Xmx(\d+[kmgKMG]?)")
+                LogFormat            = "text"
+                LogMapping           = @{}
+                Env                  = @{}
+                ProxyPath            = ""
+                RemoteUrl            = ""
+                RoutingMode          = "LOCAL"
+                Enabled              = $true
+                IsGateway            = $true
+                PidFile              = (Join-Path $StateDir "$($gateway.ServiceName).pid")
+                LogFile              = (Join-Path $LogDir "$($gateway.ServiceName).log")
+                ErrFile              = (Join-Path $LogDir "$($gateway.ServiceName).err.log")
+                Managed              = $false
+                ExternalIde          = $false
+                PortConflict         = $false
+                Healthy              = $false
+                Stopping             = $false
+                BuildProc            = $null
+                GitSummary           = "-"
+                LastHealthAt         = [datetime]::MinValue
+                HealthTask           = $null
+                CachedPid            = $null
+                CachedProc           = $null
+                CachedLogRawMode     = $null
+                StatusText           = "STOPPED"
+            }
+            $services = @($gwSvc) + $services
+        }
+    }
+
     $gwUrl = if ($gateway) { $gateway.AdminUrl } else { "" }
     Write-ProcompTraceLog -Category "CONFIG" -Message "Loaded config='$resolvedConfigPath' appsFile='$afPath' reposRoot='$reposRoot' services=$($services.Count) gateway='$gwUrl'"
 
@@ -643,6 +720,12 @@ function Apply-RoutingProfile {
     $rMap = @{}
     $remoteAllOthers = $remoteSet.ContainsKey("*")
     foreach ($svc in $Config.Services) {
+        if ($Config.Gateway -and $Config.Gateway.ServiceName -and ($svc.Name -eq $Config.Gateway.ServiceName)) {
+            $svc.RoutingMode = "LOCAL"
+            $svc.Enabled = $true
+            $rMap[$svc.Name] = "LOCAL"
+            continue
+        }
         if ($localSet.ContainsKey($svc.Name)) {
             $svc.RoutingMode = "LOCAL"
             $svc.Enabled = $true
