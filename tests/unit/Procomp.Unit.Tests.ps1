@@ -631,6 +631,30 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $resolved["SVC_ONLY"] "yes"
             Assert-Eq $resolved["INLINE_ONLY"] "1"
         }
+
+        It 'merges defaults.env, runtime.env, and app.env with template expansion' {
+            $eCfgPath = Join-Path $TestDrive "env-rt.json"
+            @'
+{
+  "defaults": { "env": { "SHARED_A": "def", "SHARED_B": "def" } },
+  "runtimes": {
+    "autotest": {
+      "command": "java -jar app.jar",
+      "env": { "local_port": "{{localport}}", "SHARED_B": "rt-{{servicename}}" }
+    }
+  },
+  "apps": [
+    { "servicename": "my-autotest", "localport": "1235", "type": "autotest", "env": { "SHARED_A": "app-override" } }
+  ]
+}
+'@ | Set-Content -Path $eCfgPath -Encoding UTF8
+
+            $cfg = Load-ProcompConfig -ConfigPath $eCfgPath -StateDir (Join-Path $TestDrive "est") -LogDir (Join-Path $TestDrive "elg")
+            $s = $cfg.Services[0]
+            Assert-Eq $s.Env["local_port"] "1235"
+            Assert-Eq $s.Env["SHARED_B"] "rt-my-autotest"
+            Assert-Eq $s.Env["SHARED_A"] "app-override"
+        }
     }
 
     Context 'Git & WireMockBridge & Profiles' {

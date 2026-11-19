@@ -368,6 +368,12 @@ function Load-ProcompConfig {
     if ($doc.PSObject.Properties["runtimes"] -and $doc.runtimes) {
         foreach ($rp in $doc.runtimes.PSObject.Properties) {
             $r = $rp.Value
+            $rtEnv = @{}
+            if ($r.PSObject.Properties["env"] -and $r.env) {
+                foreach ($ep in $r.env.PSObject.Properties) {
+                    $rtEnv[$ep.Name] = [string]$ep.Value
+                }
+            }
             $runtimes[$rp.Name] = [PSCustomObject]@{
                 Name             = $rp.Name
                 Command          = [string]$r.command
@@ -376,6 +382,7 @@ function Load-ProcompConfig {
                 ArtifactExclude  = if ($r.PSObject.Properties["artifactExclude"] -and $r.artifactExclude) { [string]$r.artifactExclude } else { "" }
                 MemoryArgPattern = if ($r.PSObject.Properties["memoryArgPattern"] -and $r.memoryArgPattern) { [string]$r.memoryArgPattern } else { "" }
                 WorkingDir       = if ($r.PSObject.Properties["workingDir"] -and $r.workingDir) { [string]$r.workingDir } else { "" }
+                Env              = $rtEnv
             }
         }
     }
@@ -533,10 +540,24 @@ function Load-ProcompConfig {
             }
         }
 
+        $envVarsCtx = @{}
+        foreach ($tk in $tmplVars.Keys) { $envVarsCtx[$tk] = $tmplVars[$tk] }
+        foreach ($vk in $vars.Keys) { $envVarsCtx[$vk] = $vars[$vk] }
+
         $envMap = @{}
+        if ($defaults -and $defaults.PSObject.Properties["env"] -and $defaults.env) {
+            foreach ($ep in $defaults.env.PSObject.Properties) {
+                $envMap[$ep.Name] = Expand-Template -Template ([string]$ep.Value) -Vars $envVarsCtx
+            }
+        }
+        if ($rt.PSObject.Properties["Env"] -and $rt.Env) {
+            foreach ($ek in $rt.Env.Keys) {
+                $envMap[$ek] = Expand-Template -Template ([string]$rt.Env[$ek]) -Vars $envVarsCtx
+            }
+        }
         if ($item.PSObject.Properties["env"] -and $item.env) {
             foreach ($ep in $item.env.PSObject.Properties) {
-                $envMap[$ep.Name] = [string]$ep.Value
+                $envMap[$ep.Name] = Expand-Template -Template ([string]$ep.Value) -Vars $envVarsCtx
             }
         }
 
