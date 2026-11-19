@@ -18,8 +18,33 @@ $RootDir     = $PSScriptRoot
 $StateDir    = Join-Path $RootDir ".stack_state"
 $LogDir      = Join-Path $RootDir "logs"
 $RoutingFile = Join-Path $StateDir "routing.json"
+$CrashLog    = Join-Path $LogDir "procomp-error.log"
 
 New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
+
+function Write-ProcompCrashLog {
+    param($ErrRecord)
+    $psVer = $PSVersionTable.PSVersion.ToString()
+    $msg = @"
+=== $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") [procomp.ps1] (PS $psVer, Action=$Action, Config=$ConfigPath) ===
+Message: $($ErrRecord.Exception.Message)
+Position: $($ErrRecord.InvocationInfo.PositionMessage)
+StackTrace:
+$($ErrRecord.ScriptStackTrace)
+
+"@
+    try { Add-Content -Path $CrashLog -Value $msg -Encoding UTF8 } catch { }
+    Write-Host ""
+    Write-Host "[procomp ERROR] $($ErrRecord.Exception.Message)" -ForegroundColor Red
+    Write-Host "Full details written to: $CrashLog" -ForegroundColor Yellow
+}
+
+trap {
+    try { [Console]::Write("$([char]27)[?1049l") } catch { }
+    try { [Console]::CursorVisible = $true } catch { }
+    Write-ProcompCrashLog -ErrRecord $_
+    exit 1
+}
 
 . (Join-Path $RootDir "src\Config.ps1")
 . (Join-Path $RootDir "src\EnvLoader.ps1")
@@ -188,6 +213,7 @@ $origCtrlC = [Console]::TreatControlCAsInput
 $mouseEnabled = Enable-ConsoleMouseInput
 [Console]::Write("$([char]27)[?1049h$([char]27)[2J$([char]27)[H")
 
+$tuiError = $null
 try {
     $running = $true
     $lastSnapVer = -1
@@ -547,6 +573,7 @@ try {
         }
     }
 
+    $tuiError = $null
     if (-not $detachOnExit) {
         foreach ($svc in $services) {
             if (($svc.Managed -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
@@ -559,6 +586,8 @@ try {
         Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "All services stopped. Exiting..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode "SERVICES" -LogBuffers $sharedState.LogBuffers
         Start-Sleep -Milliseconds 350
     }
+} catch {
+    $tuiError = $_
 } finally {
     Stop-BackgroundMonitor -Worker $bgWorker
     Restore-ConsoleInputMode
@@ -566,7 +595,7 @@ try {
     [Console]::CursorVisible = $true
     [Console]::TreatControlCAsInput = $origCtrlC
     $HttpClient.Dispose()
-    if ($detachOnExit) {
+    if ($detachOnExit -and (-not $tuiError)) {
         Write-Host "Detached. Services remain running in the background. Re-run .\procomp.cmd to re-attach, or .\procomp.cmd -Action down to stop all."
     } else {
         foreach ($svc in $services) {
@@ -574,6 +603,11 @@ try {
                 Stop-ServiceProcess -Svc $svc
             }
         }
-        Write-Host "All services stopped."
+        if ($tuiError) {
+            Write-ProcompCrashLog -ErrRecord $tuiError
+        } else {
+            Write-Host "All services stopped."
+        }
     }
 }
+if ($tuiError) { exit 1 }
