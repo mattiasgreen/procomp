@@ -99,7 +99,7 @@ function Split-CommandLine {
 }
 
 function Resolve-ServiceCommand {
-    param($Svc, [string]$RootDir)
+    param($Svc, [string]$RootDir, [switch]$AsyncBuild)
     $rt = $Svc.RuntimeDef
     if (-not $rt -or -not $rt.Command) {
         throw "Service '$($Svc.Name)' has no runtime command."
@@ -113,6 +113,10 @@ function Resolve-ServiceCommand {
         $expandedGlob = Expand-Template -Template $rt.ArtifactGlob -Vars $baseVars
         $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
         if (-not $artifact -and $Svc.BuilderDef) {
+            if ($AsyncBuild) {
+                Start-ServiceBuildAsync -Svc $Svc -RootDir $RootDir
+                return $null
+            }
             $ok = Invoke-ServiceBuildSync -Svc $Svc -RootDir $RootDir
             if ($ok) {
                 $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
@@ -129,7 +133,7 @@ function Resolve-ServiceCommand {
 }
 
 function Start-ServiceProcess {
-    param($Svc, [string]$RootDir)
+    param($Svc, [string]$RootDir, [switch]$AsyncBuild)
 
     $existingPid = Read-PidFromFile -PidFile $Svc.PidFile
     if ($existingPid) {
@@ -156,7 +160,17 @@ function Start-ServiceProcess {
         }
     }
 
-    $resolved = Resolve-ServiceCommand -Svc $Svc -RootDir $RootDir
+    if ($Svc.BuildProc) {
+        try {
+            if (-not $Svc.BuildProc.HasExited) { return }
+        } catch { }
+        $Svc.BuildProc = $null
+    }
+
+    $resolved = Resolve-ServiceCommand -Svc $Svc -RootDir $RootDir -AsyncBuild:$AsyncBuild
+    if ($null -eq $resolved) {
+        return
+    }
     $parsed = Split-CommandLine -CommandLine $resolved.CommandLine
     if (($parsed.FilePath -eq "java" -or $parsed.FilePath -eq "java.exe") -and (Get-Command Resolve-JavaTool -ErrorAction SilentlyContinue)) {
         $parsed.FilePath = Resolve-JavaTool -Tool "java"
@@ -212,6 +226,22 @@ function Stop-ServiceProcess {
     if ($Svc.ExternalIde) { return }
     $Svc.Stopping = $true
     $Svc.HealthTask = $null
+    if ($Svc.BuildProc) {
+        try {
+            if (-not $Svc.BuildProc.HasExited) {
+                $bPid = $Svc.BuildProc.Id
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                try {
+                    Write-ProcompDebugLog -Category "KILL" -ServiceName $Svc.Name -Message "taskkill.exe /F /T /PID $bPid (build)"
+                    & taskkill.exe /F /T /PID $bPid >$null 2>&1
+                } finally {
+                    $ErrorActionPreference = $prevEap
+                }
+            }
+        } catch { }
+        $Svc.BuildProc = $null
+    }
     if (Test-Path $Svc.PidFile) {
         $pidText = (Get-Content -Path $Svc.PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($pidText -and $pidText.Trim() -match '^\d+$') {

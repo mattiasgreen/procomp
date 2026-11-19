@@ -384,6 +384,46 @@ Describe 'procomp Unit Tests' {
             Assert-Match $frame "\[CONFIRM\]"
         }
 
+        It 'expands SERVICE column adaptively for long names and shifts RoutingStartX' {
+            $longName = "very-long-microservice-name-30"
+            $svcs = @(
+                [PSCustomObject]@{
+                    Name = $longName; Runtime = "java"; Port = 9018; MemLimit = "256M"; LogFormat = "text"
+                    RoutingMode = "LOCAL"; GitSummary = "main"; StatusText = "STOPPED"; CachedProc = $null
+                    LogFile = (Join-Path $TestDrive "long1.log"); ErrFile = (Join-Path $TestDrive "long1.err.log")
+                    CachedLogRawMode = $null
+                }
+            )
+            $lay = $null
+            $lRef = [ref]$lay
+            $frame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -LayoutOut $lRef -DryRun
+            Assert-Match $frame ([regex]::Escape($longName))
+            Assert-Gt $lay.RoutingStartX 67
+            $hit = Resolve-UiClick -Layout $lay -X $lay.RoutingStartX -Y $lay.ServiceStartY
+            Assert-Eq $hit.ToggleRoute $true
+        }
+
+        It 'starts missing-artifact build asynchronously when -AsyncBuild is passed' {
+            $asyncDir = Join-Path $TestDrive "asyncbuild"
+            New-Item -ItemType Directory -Force -Path $asyncDir | Out-Null
+            $svc = [PSCustomObject]@{
+                Name = "async-svc"; Runtime = "java"; Port = 19999; Repo = $asyncDir; Module = ""
+                RuntimeDef = [PSCustomObject]@{ Name = "java"; Command = "java -jar {{artifact}}"; ArtifactGlob = "build\libs\*.jar"; ArtifactExclude = ""; HealthPath = ""; MemoryArgPattern = "" }
+                BuilderDef = [PSCustomObject]@{ Name = "gradle"; Command = "echo async-build" }
+                Vars = @{}; HealthPath = ""; LogFormat = "text"; SwaggerUri = ""; ServiceRepositoryUrl = ""; ReposRoot = ""
+                PidFile = (Join-Path $asyncDir "async.pid"); LogFile = (Join-Path $asyncDir "async.log"); ErrFile = (Join-Path $asyncDir "async.err.log")
+                ExternalIde = $false; PortConflict = $false; Managed = $false; Stopping = $false; Healthy = $false; Enabled = $true
+                BuildProc = $null; HealthTask = $null; CachedPid = $null; CachedProc = $null; StatusText = "STOPPED"
+            }
+            Start-ServiceProcess -Svc $svc -RootDir $asyncDir -AsyncBuild
+            Assert-Eq $svc.StatusText "BUILDING"
+            Assert-NotNull $svc.BuildProc
+            if ($svc.BuildProc -and -not $svc.BuildProc.HasExited) {
+                $svc.BuildProc.WaitForExit(5000) | Out-Null
+            }
+            Stop-ServiceProcess -Svc $svc
+        }
+
         It 'scrolls log viewport, pauses follow when scrolled up, and expands specific clicked stack trace' {
             $entries = @(
                 [PSCustomObject]@{ EntryId = "e1"; SortKey = "1"; Level = "ERROR"; Text = "First err";  StackLines = @("at A", "at B") }

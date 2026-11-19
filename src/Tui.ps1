@@ -225,12 +225,21 @@ function Render-Tui {
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
     } else {
+        $svcColWidth = 21
+        foreach ($s in $Services) {
+            if ($s.Name -and ($s.Name.Length + 1) -gt $svcColWidth) {
+                $svcColWidth = $s.Name.Length + 1
+            }
+        }
+        $svcColWidth = [Math]::Min(36, [Math]::Max(21, $svcColWidth))
+
         $svcRangeTag = if ($Services.Count -gt $visibleSvcCount) { " ($($serviceScrollTop + 1)-$($serviceScrollTop + $visibleSvcCount)/$($Services.Count))" } else { "" }
         [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag$script:C_RESET $script:C_DIM| Services: $($Services.Count)$svcRangeTag | Log: $modeTag$script:C_RESET$locTag$rawTag$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
 
-        $hdr = "{0,-2} {1,-21} {2,-13} {3,-6} {4,-7} {5,-13} {6,-13} {7,-12} {8,-7} {9,-7} {10,-9}" -f "", "SERVICE", "RUNTIME", "PORT", "PID", "STATE", "ROUTING", "GIT", "UPTIME", "LIMIT", "RAM USED"
+        $rowFmtHdr = "{0,-2} {1,-$svcColWidth} {2,-13} {3,-6} {4,-7} {5,-13} {6,-13} {7,-12} {8,-7} {9,-7} {10,-9}"
+        $hdr = $rowFmtHdr -f "", "SERVICE", "RUNTIME", "PORT", "PID", "STATE", "ROUTING", "GIT", "UPTIME", "LIMIT", "RAM USED"
         [void]$sb.Append((Pad-Line "$script:C_BOLD$hdr$script:C_RESET" $width) + "`n")
 
         for ($i = $serviceScrollTop; $i -lt ($serviceScrollTop + $visibleSvcCount); $i++) {
@@ -270,9 +279,14 @@ function Render-Tui {
 
             $rtStr = if ($svc.PSObject.Properties["Runtime"] -and $svc.Runtime) { [string]$svc.Runtime } else { "-" }
             $limStr = if ($svc.PSObject.Properties["MemLimit"] -and $svc.MemLimit) { [string]$svc.MemLimit } else { "-" }
+            $svcDisplay = [string]$svc.Name
+            if ($svcDisplay.Length -gt $svcColWidth) {
+                $svcDisplay = $svcDisplay.Substring(0, $svcColWidth - 1) + "~"
+            }
 
-            $line = "{0,-2} {1,-21} {2,-13} {3,-6} {4,-7} {5}{6,-13}{7} {8,-13} {9}{10,-12}{11} {12,-7} {13,-7} {14,-9}" -f `
-                $marker, $svc.Name, $rtStr, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $gitColor, $gitStr, $gitReset, $uptime, $limStr, $ram
+            $rowFmt = "{0,-2} {1,-$svcColWidth} {2,-13} {3,-6} {4,-7} {5}{6,-13}{7} {8,-13} {9}{10,-12}{11} {12,-7} {13,-7} {14,-9}"
+            $line = $rowFmt -f `
+                $marker, $svcDisplay, $rtStr, $svc.Port, $pidStr, $stateColor, $svc.StatusText, "$script:C_RESET$rowPrefix", $routingStr, $gitColor, $gitStr, $gitReset, $uptime, $limStr, $ram
 
             [void]$sb.Append((Pad-Line "$rowPrefix$line$rowSuffix" $width) + "`n")
         }
@@ -309,6 +323,7 @@ function Render-Tui {
         [void]$sb.Append((Pad-Line "$script:C_DIM $BannerMsg$script:C_RESET" $width))
     }
 
+    $routingStartX = if ($ViewMode -eq "LOGS") { 67 } else { 46 + $svcColWidth }
     if ($null -ne $LayoutOut) {
         $LayoutOut.Value = [PSCustomObject]@{
             ViewMode         = $ViewMode
@@ -316,8 +331,8 @@ function Render-Tui {
             ServiceStartY    = $serviceStartY
             ServiceEndY      = $serviceEndY
             ServiceScrollTop = $serviceScrollTop
-            RoutingStartX    = 67
-            RoutingEndX      = 80
+            RoutingStartX    = $routingStartX
+            RoutingEndX      = ($routingStartX + 13)
             LogStartY      = $logStartY
             LogRows        = $entries
             TotalLogRows   = $vp.TotalRows

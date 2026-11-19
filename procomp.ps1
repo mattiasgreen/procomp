@@ -279,15 +279,22 @@ try {
 
     # Render initial TUI frame immediately so the user sees live startup progress instead of a blank screen
     Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Booting enabled services..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
+    $buildingSvcs = @()
     foreach ($svc in $services) {
         if ($svc.Enabled) {
             Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Starting $($svc.Name) (port $($svc.Port))..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
             try {
-                Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
+                if ($svc.BuildProc) {
+                    $buildingSvcs += $svc.Name
+                }
             } catch {
                 $banner = $_.Exception.Message
             }
         }
+    }
+    if ($buildingSvcs.Count -gt 0) {
+        $banner = "Building $($buildingSvcs -join ', ') in background..."
     }
     if ($gatewayUrl -and (-not $gatewaySvcName)) {
         $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl
@@ -395,8 +402,8 @@ try {
                 $svc.RoutingMode = "LOCAL"
                 $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
                 try {
-                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
-                    $script:banner = "Started $($svc.Name)"
+                    Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
+                    $script:banner = if ($svc.BuildProc) { "Building $($svc.Name) (will auto-start)..." } else { "Started $($svc.Name)" }
                 } catch {
                     $script:banner = $_.Exception.Message
                 }
@@ -405,7 +412,7 @@ try {
             "start-all" {
                 foreach ($s in $services) {
                     if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
-                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir } catch { }
+                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir -AsyncBuild } catch { }
                     }
                 }
                 $sharedState.RefreshNow = $true
@@ -443,9 +450,9 @@ try {
                     $svc.Enabled = $true
                     $svc.RoutingMode = "LOCAL"
                     $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                    Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
                     $sharedState.RefreshNow = $true
-                    $script:banner = "Restarted $($svc.Name)"
+                    $script:banner = if ($svc.BuildProc) { "Building $($svc.Name) (will auto-start)..." } else { "Restarted $($svc.Name)" }
                 }
             }
             "build" {
@@ -720,7 +727,7 @@ try {
     $tuiError = $null
     if (-not $detachOnExit) {
         foreach ($svc in $services) {
-            if (($svc.Managed -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
+            if (($svc.Managed -or $svc.BuildProc -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
                 $svc.StatusText = "STOPPING"
                 Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode "SERVICES" -LogBuffers $sharedState.LogBuffers
                 Stop-ServiceProcess -Svc $svc
@@ -743,7 +750,7 @@ try {
         Write-Host "Detached. Services remain running in the background. Re-run .\procomp.cmd to re-attach, or .\procomp.cmd -Action down to stop all."
     } else {
         foreach ($svc in $services) {
-            if (($svc.Managed -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
+            if (($svc.Managed -or $svc.BuildProc -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
                 Stop-ServiceProcess -Svc $svc
             }
         }
