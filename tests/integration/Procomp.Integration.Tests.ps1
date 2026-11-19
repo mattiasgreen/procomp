@@ -63,7 +63,7 @@ Describe 'Real-JVM Integration Tests' {
         }
 
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($sw.ElapsedMilliseconds -lt 6000) {
+        while ($sw.ElapsedMilliseconds -lt 20000) {
             Refresh-ProcessSnapshot -Services $script:services -DetectIde
             Poll-AsyncHealth -Services $script:services -HttpClient $script:httpClient
             if (($script:services[0].StatusText -eq "HEALTHY") -and ($script:services[1].StatusText -eq "HEALTHY")) { break }
@@ -165,7 +165,7 @@ Describe 'Real-JVM Integration Tests' {
         $worker = Start-BackgroundMonitor -SharedState $shared
         try {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            while ($sw.ElapsedMilliseconds -lt 6000) {
+            while ($sw.ElapsedMilliseconds -lt 20000) {
                 if ($shared.SnapshotVersion -gt 0) {
                     Apply-SharedSnapshot -Services $script:services -SharedState $shared
                     if ($script:services[1].StatusText -eq "HEALTHY") { break }

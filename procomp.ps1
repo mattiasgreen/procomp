@@ -244,7 +244,7 @@ $errorsOnly = $false
 $rawLogs = $false
 $confirmQuit = $false
 $detachOnExit = $false
-$banner = "Starting enabled services..."
+$banner = ""
 
 $sharedState = New-SharedTuiState -RootDir $RootDir -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir -ReposRoot $ReposRoot
 foreach ($svc in $services) {
@@ -309,7 +309,9 @@ try {
         if ($cnt -gt 0) { $banner = "External WireMock synced ($cnt routes)." }
     }
     $sharedState.RefreshNow = $true
-    if (-not $banner) { $banner = "All enabled services launched. Waiting for health checks..." }
+    if (-not $banner) { $banner = "Ready" }
+    $lastBannerText = $banner
+    $bannerSetAt = Get-Date
 
     function Invoke-UiAction {
         param([string]$Cmd)
@@ -589,6 +591,18 @@ try {
 
         $visServices = @(Get-VisibleServices)
         if ($selected -ge $visServices.Count) { $selected = [Math]::Max(0, $visServices.Count - 1) }
+
+        if ($banner -ne $lastBannerText) {
+            $lastBannerText = $banner
+            $bannerSetAt = Get-Date
+        } elseif ($banner -and $banner -ne "Ready" -and (((Get-Date) - $bannerSetAt).TotalSeconds -ge 6)) {
+            $hasActiveBuild = (@($services | Where-Object { $_.BuildProc }).Count -gt 0)
+            if (-not $hasActiveBuild -and ($sharedState.ActiveGitOps.Count -eq 0) -and ($banner -notmatch 'fail|error|conflict|cannot|not found|skipped')) {
+                $banner = "Ready"
+                $lastBannerText = "Ready"
+                $needsRender = $true
+            }
+        }
 
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
