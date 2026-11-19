@@ -24,14 +24,45 @@ function Expand-Template {
     return $result
 }
 
+function Read-ProcompJsonFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Label = "JSON file"
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "$Label not found: $Path"
+    }
+    $fullPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+    if (Test-Path -LiteralPath $fullPath -PathType Container) {
+        throw "$Label is a directory, not a file: $fullPath"
+    }
+    $raw = [System.IO.File]::ReadAllText($fullPath)
+    if ($null -ne $raw) {
+        $raw = $raw.TrimStart([char]0xFEFF)
+    }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "Failed to parse $Label '$fullPath': file is empty."
+    }
+    try {
+        $parsed = $raw | ConvertFrom-Json
+        return ,$parsed
+    } catch {
+        $preview = ($raw.Trim() -replace '[\r\n]+', ' ')
+        if ($preview.Length -gt 120) {
+            $preview = $preview.Substring(0, 120) + "..."
+        }
+        throw "Failed to parse $Label '$fullPath': $($_.Exception.Message) (starts with: '$preview')"
+    }
+}
+
 function Resolve-ProjectName {
     param([string]$ConfigPath, [string]$ProjectOverride = "")
     if ($ProjectOverride) {
         return ($ProjectOverride -replace '[^a-zA-Z0-9._-]', '_')
     }
-    if (Test-Path $ConfigPath) {
+    if (Test-Path -LiteralPath $ConfigPath) {
         try {
-            $doc = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
+            $doc = Read-ProcompJsonFile -Path $ConfigPath -Label "config file"
             if ($doc.PSObject.Properties["project"] -and $doc.project) {
                 return (([string]$doc.project) -replace '[^a-zA-Z0-9._-]', '_')
             }
@@ -96,9 +127,9 @@ function Parse-MemoryLimit {
 function Load-RoutingState {
     param([string]$RoutingFile)
     $map = @{}
-    if (Test-Path $RoutingFile) {
+    if (Test-Path -LiteralPath $RoutingFile) {
         try {
-            $raw = Get-Content -Path $RoutingFile -Raw | ConvertFrom-Json
+            $raw = Read-ProcompJsonFile -Path $RoutingFile -Label "routing file"
             if ($raw) {
                 foreach ($prop in $raw.PSObject.Properties) {
                     $map[$prop.Name] = [string]$prop.Value
@@ -125,11 +156,13 @@ function Load-ProcompConfig {
         [string]$LogDir,
         [string]$ReposRootOverride = ""
     )
-    if (-not (Test-Path $ConfigPath)) {
+    $script:LastResolvedAppsFile = ""
+    if (-not (Test-Path -LiteralPath $ConfigPath)) {
         throw "Config file not found: $ConfigPath"
     }
 
-    $doc = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
+    $resolvedConfigPath = (Resolve-Path -LiteralPath $ConfigPath).ProviderPath
+    $doc = Read-ProcompJsonFile -Path $resolvedConfigPath -Label "config file"
 
     $reposRoot = if ($ReposRootOverride) {
         $ReposRootOverride
@@ -188,14 +221,14 @@ function Load-ProcompConfig {
     $routingMap = Load-RoutingState -RoutingFile $routingFile
 
     $rawApps = @()
+    $afPath = ""
     if ($doc.PSObject.Properties["appsFile"] -and $doc.appsFile) {
         $afSpec = Expand-Template -Template ([string]$doc.appsFile) -Vars @{ reposRoot = $reposRoot }
-        $cfgDir = Split-Path -Parent $ConfigPath
-        $afPath = if ([System.IO.Path]::IsPathRooted($afSpec)) { $afSpec } else { [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($cfgDir, $afSpec)) }
-        if (-not (Test-Path $afPath)) {
-            throw "appsFile not found: $afPath"
-        }
-        $afDoc = Get-Content -Path $afPath -Raw | ConvertFrom-Json
+        $cfgDir = Split-Path -Parent $resolvedConfigPath
+        $combined = if ([System.IO.Path]::IsPathRooted($afSpec)) { $afSpec } else { [System.IO.Path]::Combine($cfgDir, $afSpec) }
+        $afPath = [System.IO.Path]::GetFullPath($combined)
+        $script:LastResolvedAppsFile = $afPath
+        $afDoc = Read-ProcompJsonFile -Path $afPath -Label "appsFile"
         if ($afDoc -is [System.Array]) {
             $rawApps += @($afDoc)
         } elseif ($afDoc.PSObject.Properties["apps"] -and $afDoc.apps) {
@@ -349,6 +382,7 @@ function Load-ProcompConfig {
     }
 
     return [PSCustomObject]@{
+        AppsFile  = $afPath
         ReposRoot = $reposRoot
         Builders  = $builders
         Runtimes  = $runtimes

@@ -20,14 +20,20 @@ $ErrorActionPreference = "Stop"
 $RootDir     = $PSScriptRoot
 $BaseLogDir  = Join-Path $RootDir "logs"
 $CrashLog    = Join-Path $BaseLogDir "procomp-error.log"
+$script:LastResolvedAppsFile = ""
 
 New-Item -ItemType Directory -Force -Path $BaseLogDir | Out-Null
 
 function Write-ProcompCrashLog {
     param($ErrRecord)
     $psVer = $PSVersionTable.PSVersion.ToString()
+    $appsFileInfo = ""
+    $appsVar = Get-Variable -Name LastResolvedAppsFile -Scope Script -ErrorAction SilentlyContinue
+    if ($appsVar -and $appsVar.Value) {
+        $appsFileInfo = ", AppsFile=$($appsVar.Value)"
+    }
     $msg = @"
-=== $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") [procomp.ps1] (PS $psVer, Action=$Action, Config=$ConfigPath) ===
+=== $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") [procomp.ps1] (PS $psVer, Action=$Action, Config=$ConfigPath$appsFileInfo) ===
 Message: $($ErrRecord.Exception.Message)
 Position: $($ErrRecord.InvocationInfo.PositionMessage)
 StackTrace:

@@ -156,6 +156,81 @@ Describe 'procomp Unit Tests' {
                 $env:JAVA_HOME = $prevJh
             }
         }
+
+        It 'reads UTF-8 BOM and non-BOM JSON with non-ASCII chars and single-element array appsFile' {
+            $svWord = "tj" + [char]0x00E4 + "nst-" + [char]0x00E5 + [char]0x00E4 + [char]0x00F6
+            $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+            $bomAppsPath = Join-Path $TestDrive "bom-apps.json"
+            $bomCfgPath = Join-Path $TestDrive "bom-cfg.json"
+            $bomAppsJson = '[{"servicename":"svc-one","localport":"9001","type":"java","vars":{"label":"' + $svWord + '"}}]'
+            $bomCfgJson = '{"appsFile":".\\bom-apps.json","runtimes":{"java":{"command":"java -jar {{servicename}}.jar"}}}'
+            [System.IO.File]::WriteAllText($bomAppsPath, $bomAppsJson, $utf8Bom)
+            [System.IO.File]::WriteAllText($bomCfgPath, $bomCfgJson, $utf8Bom)
+
+            $cfgBom = Load-ProcompConfig -ConfigPath $bomCfgPath -StateDir (Join-Path $TestDrive "bomst") -LogDir (Join-Path $TestDrive "bomlg")
+            Assert-Eq $cfgBom.Services.Count 1
+            Assert-Eq $cfgBom.Services[0].Vars["label"] $svWord
+            Assert-Eq $cfgBom.AppsFile ([System.IO.Path]::GetFullPath($bomAppsPath))
+
+            $noBomAppsPath = Join-Path $TestDrive "nobom-apps.json"
+            $noBomCfgPath = Join-Path $TestDrive "nobom-cfg.json"
+            $noBomAppsJson = '[{"servicename":"svc-two","localport":"9002","type":"java","vars":{"label":"' + $svWord + '"}}]'
+            $noBomCfgJson = '{"appsFile":".\\nobom-apps.json","runtimes":{"java":{"command":"java -jar {{servicename}}.jar"}}}'
+            [System.IO.File]::WriteAllText($noBomAppsPath, $noBomAppsJson, $utf8NoBom)
+            [System.IO.File]::WriteAllText($noBomCfgPath, $noBomCfgJson, $utf8NoBom)
+
+            $cfgNoBom = Load-ProcompConfig -ConfigPath $noBomCfgPath -StateDir (Join-Path $TestDrive "nbst") -LogDir (Join-Path $TestDrive "nblg")
+            Assert-Eq $cfgNoBom.Services.Count 1
+            Assert-Eq $cfgNoBom.Services[0].Vars["label"] $svWord
+            Assert-Eq $cfgNoBom.AppsFile ([System.IO.Path]::GetFullPath($noBomAppsPath))
+        }
+
+        It 'reports full appsFile path and preview when appsFile is invalid, empty, or a directory' {
+            $badAppsPath = [System.IO.Path]::GetFullPath((Join-Path $TestDrive "symlink-like.json"))
+            [System.IO.File]::WriteAllText($badAppsPath, "./target/service-index.json`n", (New-Object System.Text.UTF8Encoding($false)))
+            $badCfgPath = Join-Path $TestDrive "bad-cfg.json"
+            '{"appsFile":".\\symlink-like.json","runtimes":{"java":{"command":"java -jar app.jar"}}}' | Set-Content -Path $badCfgPath -Encoding UTF8
+
+            $badErr = ""
+            try {
+                Load-ProcompConfig -ConfigPath $badCfgPath -StateDir (Join-Path $TestDrive "badst") -LogDir (Join-Path $TestDrive "badlg") | Out-Null
+            } catch {
+                $badErr = $_.Exception.Message
+            }
+            Assert-Match $badErr ([regex]::Escape($badAppsPath))
+            Assert-Match $badErr "starts with: '\./target/service-index\.json'"
+            Assert-Eq $script:LastResolvedAppsFile $badAppsPath
+
+            $emptyAppsPath = [System.IO.Path]::GetFullPath((Join-Path $TestDrive "empty-apps.json"))
+            [System.IO.File]::WriteAllText($emptyAppsPath, "   ", (New-Object System.Text.UTF8Encoding($false)))
+            $emptyCfgPath = Join-Path $TestDrive "empty-cfg.json"
+            '{"appsFile":".\\empty-apps.json","runtimes":{"java":{"command":"java -jar app.jar"}}}' | Set-Content -Path $emptyCfgPath -Encoding UTF8
+
+            $emptyErr = ""
+            try {
+                Load-ProcompConfig -ConfigPath $emptyCfgPath -StateDir (Join-Path $TestDrive "empst") -LogDir (Join-Path $TestDrive "emplg") | Out-Null
+            } catch {
+                $emptyErr = $_.Exception.Message
+            }
+            Assert-Match $emptyErr ([regex]::Escape($emptyAppsPath))
+            Assert-Match $emptyErr "file is empty"
+
+            $dirAppsPath = [System.IO.Path]::GetFullPath((Join-Path $TestDrive "apps-dir"))
+            New-Item -ItemType Directory -Force -Path $dirAppsPath | Out-Null
+            $dirCfgPath = Join-Path $TestDrive "dir-cfg.json"
+            '{"appsFile":".\\apps-dir","runtimes":{"java":{"command":"java -jar app.jar"}}}' | Set-Content -Path $dirCfgPath -Encoding UTF8
+
+            $dirErr = ""
+            try {
+                Load-ProcompConfig -ConfigPath $dirCfgPath -StateDir (Join-Path $TestDrive "dirst") -LogDir (Join-Path $TestDrive "dirlg") | Out-Null
+            } catch {
+                $dirErr = $_.Exception.Message
+            }
+            Assert-Match $dirErr ([regex]::Escape($dirAppsPath))
+            Assert-Match $dirErr "is a directory, not a file"
+        }
     }
 
     Context 'IdeDetector' {
