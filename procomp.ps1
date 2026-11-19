@@ -507,7 +507,7 @@ try {
                 $sharedState.BannerNotification = ""
             }
 
-            if (-not $gatewaySynced -and $gatewayUrl -and $gatewaySvcName) {
+            if (-not $gatewaySynced -and (-not $sharedState.GatewaySynced) -and $gatewayUrl -and $gatewaySvcName) {
                 $gwSvc = $services | Where-Object { $_.Name -eq $gatewaySvcName -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
                 if ($gwSvc) {
                     $gatewaySynced = $true

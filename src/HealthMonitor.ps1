@@ -53,13 +53,18 @@ function Poll-AsyncHealth {
                 $svc.LastHealthAt = $now
             }
 
-            if ((-not $svc.HealthTask) -and (($now - $svc.LastHealthAt).TotalMilliseconds -ge 1200)) {
-                $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
-                try {
-                    $svc.HealthTask = $HttpClient.GetAsync($url)
-                } catch {
-                    $svc.Healthy = $false
-                    $svc.LastHealthAt = $now
+            if (-not $svc.HealthPath) {
+                $svc.Healthy = $true
+            } else {
+                $pollIntervalMs = if ($svc.Healthy) { 10000 } else { 1500 }
+                if ((-not $svc.HealthTask) -and (($now - $svc.LastHealthAt).TotalMilliseconds -ge $pollIntervalMs)) {
+                    $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
+                    try {
+                        $svc.HealthTask = $HttpClient.GetAsync($url)
+                    } catch {
+                        $svc.Healthy = $false
+                        $svc.LastHealthAt = $now
+                    }
                 }
             }
 

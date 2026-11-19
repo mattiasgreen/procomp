@@ -97,13 +97,36 @@ function Sync-WireMockMappings {
         Write-ProcompTraceLog -Category "WIREMOCK" -Message "WireMock not reachable at $WireMockBaseUrl; skipping route sync"
         return 0
     }
+
+    $existingById = @{}
+    try {
+        $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Get -TimeoutSec 2
+        if ($resp -and $resp.PSObject.Properties["mappings"] -and $resp.mappings) {
+            foreach ($m in $resp.mappings) {
+                if ($m.PSObject.Properties["id"] -and $m.id -and $m.PSObject.Properties["response"] -and $m.response.PSObject.Properties["proxyBaseUrl"]) {
+                    $existingById[[string]$m.id] = ([string]$m.response.proxyBaseUrl).TrimEnd('/')
+                }
+            }
+        }
+    } catch {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "GET mappings failed before sync: $($_.Exception.Message)"
+        return 0
+    }
+
     $targets = @()
     foreach ($svc in $Services) {
         if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
+        $expected = Build-WireMockMapping -Svc $svc
+        if ($existingById.ContainsKey($expected.id) -and ($existingById[$expected.id] -eq $expected.response.proxyBaseUrl)) {
+            continue
+        }
         $targets += [PSCustomObject]@{ Svc = $svc; BaseUrl = $WireMockBaseUrl; GwName = $GatewayServiceName }
     }
-    if ($targets.Count -eq 0) { return 0 }
-    Report-ProcompActivity -Category "WIREMOCK" -Message "Syncing $($targets.Count) WireMock route(s) (4 threads)..."
+    if ($targets.Count -eq 0) {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "All WireMock routes already in sync (0 PUTs needed)"
+        return 0
+    }
+    Report-ProcompActivity -Category "WIREMOCK" -Message "Syncing $($targets.Count) changed WireMock route(s) (4 threads)..."
     $initScripts = @((Join-Path $PSScriptRoot "Config.ps1"), (Join-Path $PSScriptRoot "WireMockBridge.ps1"))
     $res = @(Invoke-ParallelWork -Items $targets -MaxThreads 4 -InitScripts $initScripts -ScriptBlock {
         param($t)

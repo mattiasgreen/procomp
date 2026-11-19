@@ -33,6 +33,7 @@ function New-SharedTuiState {
         ActiveViewMode     = "SERVICES"
         WireMockSubMode    = "JOURNAL"
         WireMockEntries    = @()
+        GatewaySynced      = $false
     })
 }
 
@@ -158,6 +159,7 @@ function Start-BackgroundMonitor {
                                         $State.CurrentActivity = "Syncing WireMock routes..."
                                         $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                         $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl -GatewayServiceName $gwSvcName
+                                        $State.GatewaySynced = $true
                                         if ($cnt -gt 0 -and (-not $lastErr)) { $State.BannerNotification = "WireMock synced ($cnt routes)" }
                                     }
                                     if ($lastErr) {
@@ -256,10 +258,11 @@ function Start-BackgroundMonitor {
                                     }
                                 }
                                 "SyncGateway" {
-                                    if ($gwAdminUrl) {
+                                    if ($gwAdminUrl -and (-not $State.GatewaySynced)) {
                                         $State.CurrentActivity = "Syncing WireMock routes..."
                                         $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                         $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl -GatewayServiceName $gwSvcName
+                                        $State.GatewaySynced = $true
                                         $State.BannerNotification = "Gateway synced ($cnt routes)"
                                     }
                                 }
