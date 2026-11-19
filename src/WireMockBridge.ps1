@@ -74,8 +74,12 @@ function Sync-WireMockMappings {
     param($Services, [string]$WireMockBaseUrl, [string]$GatewayServiceName = "")
     if (-not $WireMockBaseUrl) { return 0 }
     $synced = 0
+    $total = @($Services).Count
+    $idx = 0
     foreach ($svc in $Services) {
+        $idx++
         if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
+        Report-ProcompActivity -ServiceName $svc.Name -Category "WIREMOCK" -Message "Syncing WireMock route ($idx/$total): $($svc.Name) -> $($svc.RoutingMode)..."
         if (Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $WireMockBaseUrl -GatewayServiceName $GatewayServiceName) {
             $synced++
         }

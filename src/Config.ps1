@@ -71,6 +71,25 @@ function Write-ProcompTraceLog {
     }
 }
 
+$script:ProcompActivityCallback = $null
+
+function Set-ProcompActivityCallback {
+    param([scriptblock]$Callback)
+    $script:ProcompActivityCallback = $Callback
+}
+
+function Report-ProcompActivity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$ServiceName = "",
+        [string]$Category = "STEP"
+    )
+    Write-ProcompTraceLog -Category $Category -ServiceName $ServiceName -Message $Message
+    if ($null -ne $script:ProcompActivityCallback) {
+        try { & $script:ProcompActivityCallback $Message } catch { }
+    }
+}
+
 function Read-ProcompTraceEntries {
     param([int]$TailCount = 400)
     $path = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")
@@ -84,7 +103,7 @@ function Read-ProcompTraceEntries {
     foreach ($ln in $lines) {
         if (-not $ln) { continue }
         $idx++
-        $lvl = if ($ln -match '\[BG-ERROR\]|\[BUILD-FAIL\]|\[PORT\]|CRASHED|\[EXIT\].*error=|\[WIREMOCK\].*failed') {
+        $lvl = if ($ln -match '\[BG-ERROR\]|\[BUILD-FAIL\]|\[START-ERR\]|\[CMD-ERR\]|\[PORT\]|CRASHED|\[EXIT\].*error=|\[WIREMOCK\].*failed') {
             "ERROR"
         } elseif ($ln -match '\[KILL\]|\[GIT\] git exit=|PORT-CONFLICT|BUILD-FAIL|\[WIREMOCK\].*falling back') {
             "WARN"

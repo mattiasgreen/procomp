@@ -75,7 +75,11 @@ function Get-GitRepoStatus {
 function Refresh-GitSummaries {
     param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null)
     $cache = @{}
-    foreach ($svc in $Services) {
+    $svcList = @($Services)
+    $total = $svcList.Count
+    $idx = 0
+    foreach ($svc in $svcList) {
+        $idx++
         $hasUrl = ($svc.PSObject.Properties["ServiceRepositoryUrl"] -and [bool]$svc.ServiceRepositoryUrl)
         if (-not $svc.Repo) {
             $svc.GitSummary = if ($hasUrl) { "MISSING" } else { "-" }
@@ -91,6 +95,7 @@ function Refresh-GitSummaries {
             continue
         }
         if (-not $cache.ContainsKey($rp)) {
+            Report-ProcompActivity -ServiceName $svc.Name -Category "GIT" -Message "Checking Git status ($idx/$total): $(Split-Path -Leaf $rp)..."
             $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp -HasRepoUrl $hasUrl).Summary
         }
         $svc.GitSummary = $cache[$rp]

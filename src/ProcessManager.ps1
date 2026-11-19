@@ -139,6 +139,7 @@ function Resolve-ServiceCommand {
 function Start-ServiceProcess {
     param($Svc, [string]$RootDir, [switch]$AsyncBuild)
 
+    Report-ProcompActivity -ServiceName $Svc.Name -Message "Checking PID file for $($Svc.Name)..."
     $existingPid = Read-PidFromFile -PidFile $Svc.PidFile
     if ($existingPid) {
         $existing = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
@@ -151,8 +152,10 @@ function Start-ServiceProcess {
         }
     }
 
+    Report-ProcompActivity -ServiceName $Svc.Name -Message "Checking if port $($Svc.Port) is listening ($($Svc.Name))..."
     $listeningPid = Get-ListeningPidByPort -Port $Svc.Port
     if ($listeningPid) {
+        Report-ProcompActivity -ServiceName $Svc.Name -Message "Port $($Svc.Port) in use by PID $listeningPid; inspecting process tree..."
         $hierarchy = Get-ProcessHierarchyMap
         if (Test-IsIdeDescendant -ProcessId $listeningPid -HierarchyMap $hierarchy) {
             Write-ProcompTraceLog -Category "IDE" -ServiceName $Svc.Name -Message "Port $($Svc.Port) owned by IDE descendant PID=$listeningPid -> IDE-UP"
@@ -174,6 +177,7 @@ function Start-ServiceProcess {
         $Svc.BuildProc = $null
     }
 
+    Report-ProcompActivity -ServiceName $Svc.Name -Message "Resolving command & artifact for $($Svc.Name)..."
     $resolved = Resolve-ServiceCommand -Svc $Svc -RootDir $RootDir -AsyncBuild:$AsyncBuild
     if ($null -eq $resolved) {
         return
@@ -185,6 +189,7 @@ function Start-ServiceProcess {
 
     $envToInject = @{}
     if ($RootDir -and (Get-Command Resolve-ServiceEnvironment -ErrorAction SilentlyContinue)) {
+        Report-ProcompActivity -ServiceName $Svc.Name -Message "Loading .env for $($Svc.Name)..."
         $envToInject = Resolve-ServiceEnvironment -Svc $Svc -RootDir $RootDir
     }
     $savedEnv = @{}
@@ -194,6 +199,7 @@ function Start-ServiceProcess {
     }
 
     try {
+        Report-ProcompActivity -ServiceName $Svc.Name -Message "Launching $($Svc.Name) on port $($Svc.Port)..."
         $argText = if ($parsed.ArgumentList.Count -gt 0) { " " + ($parsed.ArgumentList -join " ") } else { "" }
         Write-ProcompDebugLog -Category "EXEC" -ServiceName $Svc.Name -WorkingDirectory $resolved.WorkingDirectory -Message "`"$($parsed.FilePath)`"$argText"
         $startParams = @{
@@ -256,6 +262,7 @@ function Stop-ServiceProcess {
             $prevEap = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             try {
+                Report-ProcompActivity -ServiceName $Svc.Name -Message "Killing $($Svc.Name) (PID $procId)..."
                 Write-ProcompDebugLog -Category "KILL" -ServiceName $Svc.Name -Message "taskkill.exe /F /T /PID $procId"
                 & taskkill.exe /F /T /PID $procId >$null 2>&1
             } finally {

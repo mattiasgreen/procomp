@@ -60,6 +60,13 @@ function Start-BackgroundMonitor {
         . (Join-Path $root "src\WireMockBridge.ps1")
         . (Join-Path $root "src\LogViewer.ps1")
 
+        Set-ProcompActivityCallback -Callback {
+            param($msg)
+            $State.CurrentActivity = $msg
+            $State.ProcompLogEntries = @(Read-ProcompTraceEntries -TailCount 400)
+            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+        }
+
         $httpClient = New-HealthHttpClient -TimeoutMs 400
         try {
             $State.CurrentActivity = "Loading config..."
