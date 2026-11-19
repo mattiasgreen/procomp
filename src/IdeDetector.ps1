@@ -2,8 +2,43 @@ Set-StrictMode -Version Latest
 
 $script:IdeProcessNames = @("idea64", "idea", "eclipse", "eclipsec", "code", "devenv", "studio64")
 
+function Get-ActiveListeningPorts {
+    $set = @{}
+    try {
+        $props = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+        foreach ($ep in $props.GetActiveTcpListeners()) {
+            $set[$ep.Port] = $true
+        }
+    } catch { }
+    return $set
+}
+
+function Get-ListeningPortMap {
+    param([int[]]$TargetPorts = @())
+    $map = @{}
+    $active = Get-ActiveListeningPorts
+    if ($TargetPorts.Count -gt 0) {
+        $anyActive = $false
+        foreach ($tp in $TargetPorts) {
+            if ($active.ContainsKey($tp)) { $anyActive = $true; break }
+        }
+        if (-not $anyActive) { return $map }
+    }
+    try {
+        $conns = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)
+        foreach ($c in $conns) {
+            if ($c.OwningProcess -gt 0 -and -not $map.ContainsKey([int]$c.LocalPort)) {
+                $map[[int]$c.LocalPort] = [int]$c.OwningProcess
+            }
+        }
+    } catch { }
+    return $map
+}
+
 function Get-ListeningPidByPort {
     param([int]$Port)
+    $active = Get-ActiveListeningPorts
+    if (-not $active.ContainsKey($Port)) { return $null }
     try {
         $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($conn -and $conn.OwningProcess -gt 0) {

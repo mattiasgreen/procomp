@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 . (Join-Path $RootDir "src\HealthMonitor.ps1")
 . (Join-Path $RootDir "src\WireMockBridge.ps1")
 . (Join-Path $RootDir "src\LogViewer.ps1")
+. (Join-Path $RootDir "src\BackgroundWorker.ps1")
 . (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
@@ -174,6 +175,12 @@ foreach ($svc in $services) {
     }
 }
 
+$sharedState = New-SharedTuiState -RootDir $RootDir -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir
+foreach ($svc in $services) {
+    $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+}
+$bgWorker = Start-BackgroundMonitor -SharedState $sharedState
+
 $origCtrlC = [Console]::TreatControlCAsInput
 [Console]::TreatControlCAsInput = $true
 [Console]::CursorVisible = $false
@@ -181,8 +188,7 @@ Clear-Host
 
 try {
     $running = $true
-    $lastRefresh = [datetime]::MinValue
-    $lastGitRefresh = [datetime]::MinValue
+    $lastSnapVer = -1
     $gatewaySynced = $false
     $needsRender = $true
     $filterText = ""
@@ -192,15 +198,10 @@ try {
     $frozenEntries = $null
 
     while ($running) {
-        $now = Get-Date
-        if (($now - $lastGitRefresh).TotalSeconds -ge 10) {
-            Refresh-GitSummaries -Services $services -RootDir $RootDir
-            $lastGitRefresh = $now
-            $needsRender = $true
-        }
-        if (($now - $lastRefresh).TotalMilliseconds -ge 750) {
-            Refresh-ProcessSnapshot -Services $services -DetectIde
-            Poll-AsyncHealth -Services $services -HttpClient $HttpClient
+        if ($sharedState.SnapshotVersion -ne $lastSnapVer) {
+            Apply-SharedSnapshot -Services $services -SharedState $sharedState
+            $lastSnapVer = $sharedState.SnapshotVersion
+
             if (-not $gatewaySynced -and $gatewayUrl -and $gatewaySvcName) {
                 $gwSvc = $services | Where-Object { $_.Name -eq $gatewaySvcName -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
                 if ($gwSvc) {
@@ -216,6 +217,7 @@ try {
                     if ($exitCode -eq 0) {
                         try {
                             Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                            $sharedState.RefreshNow = $true
                             $banner = "Build succeeded; started $($svc.Name)"
                         } catch {
                             $banner = $_.Exception.Message
@@ -226,20 +228,11 @@ try {
                     }
                 }
             }
-            $lastRefresh = $now
             $needsRender = $true
-        } else {
-            foreach ($svc in $services) {
-                if ($svc.HealthTask -and $svc.HealthTask.IsCompleted) {
-                    Poll-AsyncHealth -Services $services -HttpClient $HttpClient
-                    $needsRender = $true
-                    break
-                }
-            }
         }
 
         if ($needsRender) {
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -PausedLogs $pausedLogs -FrozenEntries $frozenEntries
+            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -PausedLogs $pausedLogs -FrozenEntries $frozenEntries -LogBuffers $sharedState.LogBuffers
             $needsRender = $false
         }
 
@@ -293,7 +286,7 @@ try {
                     "Spacebar"  {
                         $pausedLogs = -not $pausedLogs
                         if ($pausedLogs) {
-                            $frozenEntries = @(Get-UnifiedLogs -Services $services -SelectedIndex $selected -AllMode $allLogs -ErrorsOnly $errorsOnly -RawMode $rawLogs -MaxRows 20 -FilterText $filterText -ExpandStacks $expandStacks)
+                            $frozenEntries = @(Get-UnifiedLogsFromMemory -Services $services -LogBuffers $sharedState.LogBuffers -SelectedIndex $selected -AllMode $allLogs -ErrorsOnly $errorsOnly -MaxRows 20 -FilterText $filterText -ExpandStacks $expandStacks)
                             $banner = "Log stream PAUSED"
                         } else {
                             $frozenEntries = $null
@@ -307,13 +300,15 @@ try {
                             'j' { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
                             'a' { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
                             'e' { $errorsOnly = -not $errorsOnly; $banner = if ($errorsOnly) { "Filter: WARN/ERROR only" } else { "Filter: All log levels" }; $needsRender = $true }
-                            'v' { $rawLogs = -not $rawLogs; $banner = if ($rawLogs) { "Log format: Raw" } else { "Log format: Unified/Normalized" }; $needsRender = $true }
+                            'v' { $rawLogs = -not $rawLogs; $sharedState.RawMode = $rawLogs; $sharedState.RefreshNow = $true; $banner = if ($rawLogs) { "Log format: Raw" } else { "Log format: Unified/Normalized" }; $needsRender = $true }
                             'z' { $expandStacks = -not $expandStacks; $banner = if ($expandStacks) { "Stack traces expanded" } else { "Stack traces folded" }; $needsRender = $true }
                             '/' { $filterInputMode = $true; $needsRender = $true }
-                            'c' { Clear-ServiceLogView -Services $services; $frozenEntries = $null; $banner = "Cleared log display buffer"; $needsRender = $true }
+                            'c' { $sharedState.ClearLogEpoch = [int]$sharedState.ClearLogEpoch + 1; $sharedState.RefreshNow = $true; $frozenEntries = $null; $banner = "Cleared log display buffer"; $needsRender = $true }
                             't' {
                                 $svc = $services[$selected]
                                 $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
+                                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+                                $sharedState.RefreshNow = $true
                                 $rMap = @{}
                                 foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
                                 Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
@@ -326,12 +321,14 @@ try {
                                 $svc = $services[$selected]
                                 $svc.Enabled = $true
                                 $svc.RoutingMode = "LOCAL"
+                                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
                                 try {
                                     Start-ServiceProcess -Svc $svc -RootDir $RootDir
                                     $banner = "Started $($svc.Name)"
                                 } catch {
                                     $banner = $_.Exception.Message
                                 }
+                                $sharedState.RefreshNow = $true
                                 $needsRender = $true
                             }
                             'S' {
@@ -340,6 +337,7 @@ try {
                                         try { Start-ServiceProcess -Svc $s -RootDir $RootDir } catch { }
                                     }
                                 }
+                                $sharedState.RefreshNow = $true
                                 $banner = "Started all enabled LOCAL services"
                                 $needsRender = $true
                             }
@@ -349,8 +347,9 @@ try {
                                     $banner = "$($svc.Name) is IDE-managed; stop it from your IDE."
                                 } else {
                                     $svc.StatusText = "STOPPING"
-                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false
+                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
                                     Stop-ServiceProcess -Svc $svc
+                                    $sharedState.RefreshNow = $true
                                     $banner = "Stopped $($svc.Name)"
                                 }
                                 $needsRender = $true
@@ -361,6 +360,7 @@ try {
                                         Stop-ServiceProcess -Svc $s
                                     }
                                 }
+                                $sharedState.RefreshNow = $true
                                 $banner = "Stopped all managed services"
                                 $needsRender = $true
                             }
@@ -370,11 +370,13 @@ try {
                                     $banner = "$($svc.Name) is IDE-managed; restart it from your IDE."
                                 } else {
                                     $svc.StatusText = "STOPPING"
-                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Restarting $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false
+                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Restarting $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
                                     Stop-ServiceProcess -Svc $svc
                                     $svc.Enabled = $true
                                     $svc.RoutingMode = "LOCAL"
+                                    $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
                                     Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                                    $sharedState.RefreshNow = $true
                                     $banner = "Restarted $($svc.Name)"
                                 }
                                 $needsRender = $true
@@ -388,6 +390,7 @@ try {
                                 } catch {
                                     $banner = $_.Exception.Message
                                 }
+                                $sharedState.RefreshNow = $true
                                 $needsRender = $true
                             }
                             'd' {
@@ -399,7 +402,7 @@ try {
                 }
             }
         } else {
-            Start-Sleep -Milliseconds 25
+            Start-Sleep -Milliseconds 15
         }
     }
 
@@ -407,15 +410,16 @@ try {
         foreach ($svc in $services) {
             if (($svc.Managed -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
                 $svc.StatusText = "STOPPING"
-                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false
+                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
                 Stop-ServiceProcess -Svc $svc
-                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopped $($svc.Name)." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false
+                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopped $($svc.Name)." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
             }
         }
-        Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "All services stopped. Exiting..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false
+        Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "All services stopped. Exiting..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
         Start-Sleep -Milliseconds 350
     }
 } finally {
+    Stop-BackgroundMonitor -Worker $bgWorker
     [Console]::CursorVisible = $true
     [Console]::TreatControlCAsInput = $origCtrlC
     $HttpClient.Dispose()

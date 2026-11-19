@@ -33,6 +33,16 @@ function Refresh-ProcessSnapshot {
     }
 
     $hierarchy = $null
+    $portMap = $null
+    $unmanagedLocalPorts = @()
+    if ($DetectIde) {
+        foreach ($s in $Services) {
+            if ((-not $s.CachedPid) -and ($s.RoutingMode -eq "LOCAL")) {
+                $unmanagedLocalPorts += $s.Port
+            }
+        }
+    }
+
     foreach ($svc in $Services) {
         $svc.ExternalIde = $false
         $svc.PortConflict = $false
@@ -44,7 +54,10 @@ function Refresh-ProcessSnapshot {
 
         $svc.CachedProc = $null
         if ($DetectIde -and (-not $svc.CachedPid) -and ($svc.RoutingMode -eq "LOCAL")) {
-            $listeningPid = Get-ListeningPidByPort -Port $svc.Port
+            if ($null -eq $portMap) {
+                $portMap = Get-ListeningPortMap -TargetPorts $unmanagedLocalPorts
+            }
+            $listeningPid = if ($portMap.ContainsKey($svc.Port)) { $portMap[$svc.Port] } else { $null }
             if ($listeningPid) {
                 if ($null -eq $hierarchy) {
                     $hierarchy = Get-ProcessHierarchyMap

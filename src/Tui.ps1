@@ -35,6 +35,7 @@ function Render-Tui {
         [bool]$ExpandStacks = $false,
         [bool]$PausedLogs = $false,
         $FrozenEntries = $null,
+        [hashtable]$LogBuffers = $null,
         [switch]$DryRun
     )
 
@@ -63,9 +64,9 @@ function Render-Tui {
     for ($i = 0; $i -lt $Services.Count; $i++) {
         $svc = $Services[$i]
         $proc = $svc.CachedProc
-        $pidStr = if ($proc) { [string]$proc.Id } else { "-" }
-        $uptime = Format-Uptime -Proc $proc
-        $ram = Format-RamMb -Proc $proc
+        $pidStr = if ($svc.PSObject.Properties["UiPidStr"]) { $svc.UiPidStr } elseif ($proc) { [string]$proc.Id } else { "-" }
+        $uptime = if ($svc.PSObject.Properties["UiUptime"]) { $svc.UiUptime } else { Format-Uptime -Proc $proc }
+        $ram = if ($svc.PSObject.Properties["UiRamUsed"]) { $svc.UiRamUsed } else { Format-RamMb -Proc $proc }
 
         $stateColor = switch ($svc.StatusText) {
             "HEALTHY"       { $script:C_GREEN }
@@ -105,6 +106,8 @@ function Render-Tui {
     $logRows = [Math]::Max(4, $height - $usedRows - 1)
     if ($PausedLogs -and $null -ne $FrozenEntries) {
         $entries = @($FrozenEntries)
+    } elseif ($null -ne $LogBuffers) {
+        $entries = @(Get-UnifiedLogsFromMemory -Services $Services -LogBuffers $LogBuffers -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -MaxRows $logRows -FilterText $FilterText -ExpandStacks $ExpandStacks)
     } else {
         $entries = @(Get-UnifiedLogs -Services $Services -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -RawMode $RawLogs -MaxRows $logRows -FilterText $FilterText -ExpandStacks $ExpandStacks)
     }

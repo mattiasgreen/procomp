@@ -12,6 +12,7 @@ Describe 'Real-JVM Integration Tests' {
         . (Join-Path $script:RepoRoot "src\HealthMonitor.ps1")
         . (Join-Path $script:RepoRoot "src\WireMockBridge.ps1")
         . (Join-Path $script:RepoRoot "src\LogViewer.ps1")
+        . (Join-Path $script:RepoRoot "src\BackgroundWorker.ps1")
         . (Join-Path $script:RepoRoot "src\Tui.ps1")
 
         $script:stateDir   = Join-Path $TestDrive ".stack_state"
@@ -152,6 +153,32 @@ Describe 'Real-JVM Integration Tests' {
             $listener.Stop()
             $listener.Close()
             $ps.Dispose()
+        }
+    }
+
+    It 'runs BackgroundMonitor Runspace asynchronously and populates ServiceMetrics and LogBuffers' {
+        $cfg = Load-ProcompConfig -ConfigPath $script:cfgPath -StateDir $script:stateDir -LogDir $script:logDir
+        $script:services = @($cfg.Services)
+        Start-ServiceProcess -Svc $script:services[1] -RootDir $script:RepoRoot
+
+        $shared = New-SharedTuiState -RootDir $script:RepoRoot -ConfigPath $script:cfgPath -StateDir $script:stateDir -LogDir $script:logDir
+        $worker = Start-BackgroundMonitor -SharedState $shared
+        try {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.ElapsedMilliseconds -lt 6000) {
+                if ($shared.SnapshotVersion -gt 0) {
+                    Apply-SharedSnapshot -Services $script:services -SharedState $shared
+                    if ($script:services[1].StatusText -eq "HEALTHY") { break }
+                }
+                Start-Sleep -Milliseconds 100
+            }
+
+            Assert-Eq $script:services[1].StatusText "HEALTHY"
+            Assert-Match $script:services[1].UiRamUsed "MB$"
+            $memLogs = @(Get-UnifiedLogsFromMemory -Services $script:services -LogBuffers $shared.LogBuffers -SelectedIndex 1 -AllMode $false -ErrorsOnly $false -MaxRows 10)
+            Assert-Gt $memLogs.Count 0
+        } finally {
+            Stop-BackgroundMonitor -Worker $worker
         }
     }
 }
