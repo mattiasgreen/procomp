@@ -116,6 +116,23 @@ Describe 'procomp Unit Tests' {
             Assert-Eq (Expand-Template -Template $cfg.Services[0].RuntimeDef.Command -Vars $vars) "java -jar $fakeRoot\service1.jar"
         }
 
+        It 'resolves project name from override, config field, or filename stem' {
+            Assert-Eq (Resolve-ProjectName -ConfigPath "C:\x\procomp.json" -ProjectOverride "custom") "custom"
+            Assert-Eq (Resolve-ProjectName -ConfigPath (Join-Path $script:RepoRoot "examples\using-service-index.procomp.json")) "acme"
+            Assert-Eq (Resolve-ProjectName -ConfigPath (Join-Path $script:RepoRoot "demo\demo.procomp.json")) "demo"
+            Assert-Eq (Resolve-ProjectName -ConfigPath (Join-Path $script:RepoRoot "procomp.json")) "default"
+        }
+
+        It 'builds gradleTaskPrefix for single-project and multi-project repos and resolves Swagger URLs' {
+            $single = [PSCustomObject]@{ Name = "s1"; Port = 9001; Runtime = "java"; Repo = ""; Module = ""; Vars = @{}; HealthPath = ""; LogFormat = "text"; SwaggerUri = "swagger-ui/index.html"; RoutingMode = "LOCAL"; RemoteUrl = "https://dev.corp/s1" }
+            $vSingle = Build-ServiceTemplateVars -Svc $single -RootDir $script:RepoRoot
+            Assert-Eq (Expand-Template "gradlew.bat {{gradleTaskPrefix}}assemble -q" $vSingle) "gradlew.bat assemble -q"
+            Assert-Eq (Get-ServiceSwaggerUrl -Svc $single) "http://127.0.0.1:9001/swagger-ui/index.html"
+
+            $single.RoutingMode = "REMOTE"
+            Assert-Eq (Get-ServiceSwaggerUrl -Svc $single) "https://dev.corp/s1/swagger-ui/index.html"
+        }
+
         It 'round-trips routing.json state' {
             $rFile = Join-Path $TestDrive "state\routing.json"
             Save-RoutingState -RoutingMap @{ "order-service" = "REMOTE"; "auth-service" = "LOCAL" } -RoutingFile $rFile
@@ -337,6 +354,23 @@ Describe 'procomp Unit Tests' {
             $logFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "LOGS" -LayoutOut $llRef -DryRun
             Assert-Match $logFrame "procomp LOGS"
             Assert-Eq $logLayout.ToolbarButtons[0].Command "back"
+        }
+
+        It 'windows large service tables (25 apps) and renders the help overlay' {
+            $many = @()
+            for ($n = 1; $n -le 25; $n++) {
+                $many += [PSCustomObject]@{ Name = "svc-$n"; Runtime = "java"; Port = (9000 + $n); MemLimit = "256M"; LogFormat = "text"; RoutingMode = "REMOTE"; GitSummary = "main"; StatusText = "REMOTE"; CachedProc = $null; LogFile = (Join-Path $TestDrive "m$n.log"); ErrFile = (Join-Path $TestDrive "m$n.err"); CachedLogRawMode = $null }
+            }
+            $lay = $null
+            $lRef = [ref]$lay
+            $frame = Render-Tui -Services $many -SelectedIndex 20 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "SERVICES" -ProjectName "acme" -LayoutOut $lRef -DryRun
+            Assert-Gt $lay.ServiceScrollTop 0
+            Assert-Match $frame "\[acme\]"
+            $hitRow = Resolve-UiClick -Layout $lay -X 5 -Y $lay.ServiceStartY
+            Assert-Eq $hitRow.Index $lay.ServiceScrollTop
+
+            $helpFrame = Render-Tui -Services $many -SelectedIndex 0 -BannerMsg "" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ShowHelp $true -DryRun
+            Assert-Match $helpFrame "Keyboard & Mouse Cheat Sheet"
         }
     }
 

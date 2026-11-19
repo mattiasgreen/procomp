@@ -1,9 +1,10 @@
 Set-StrictMode -Version Latest
 
 function Invoke-ProcompDoctor {
-    param($Config, [string]$RootDir)
+    param($Config, [string]$RootDir, $TargetServices = $null)
 
     $checks = @()
+    $svcList = if ($null -ne $TargetServices) { @($TargetServices) } else { @($Config.Services) }
 
     # 1. Check unique runtime executables on PATH
     $checkedExes = @{}
@@ -50,7 +51,7 @@ function Invoke-ProcompDoctor {
 
     # 4. Per-service checks
     $hierarchy = $null
-    foreach ($svc in $Config.Services) {
+    foreach ($svc in $svcList) {
         $portPid = Get-ListeningPidByPort -Port $svc.Port
         $portNote = "port $($svc.Port) free"
         $status = "OK"
@@ -80,6 +81,20 @@ function Invoke-ProcompDoctor {
             Check  = "svc:$($svc.Name)"
             Status = $status
             Detail = "rt=$($svc.Runtime) | $portNote | $repoNote | route=$($svc.RoutingMode)"
+        }
+    }
+
+    # 5. Gateway / WireMock drift check (if reachable)
+    if ($Config.Gateway -and $Config.Gateway.AdminUrl -and (Get-Command Get-WireMockDrift -ErrorAction SilentlyContinue)) {
+        $drift = @(Get-WireMockDrift -Services $svcList -WireMockBaseUrl $Config.Gateway.AdminUrl -GatewayServiceName $Config.Gateway.ServiceName)
+        if ($drift.Count -eq 0) {
+            $checks += [PSCustomObject]@{ Check = "gateway"; Status = "OK"; Detail = "WireMock routes in sync ($($Config.Gateway.AdminUrl))" }
+        } elseif ($drift.Count -eq 1 -and $drift[0].Status -eq "UNREACHABLE") {
+            $checks += [PSCustomObject]@{ Check = "gateway"; Status = "INFO"; Detail = "$($drift[0].Detail) (not running yet)" }
+        } else {
+            foreach ($d in $drift) {
+                $checks += [PSCustomObject]@{ Check = "gateway:$($d.Service)"; Status = "WARN"; Detail = "$($d.Status): $($d.Detail)" }
+            }
         }
     }
 

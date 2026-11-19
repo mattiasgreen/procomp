@@ -67,7 +67,8 @@ function Resolve-UiClick {
 
     # 2. Service table rows (SERVICES mode)
     if ($Layout.ViewMode -eq "SERVICES" -and $Y -ge $Layout.ServiceStartY -and $Y -le $Layout.ServiceEndY) {
-        $idx = $Y - $Layout.ServiceStartY
+        $scrollTop = if ($Layout.PSObject.Properties["ServiceScrollTop"]) { [int]$Layout.ServiceScrollTop } else { 0 }
+        $idx = $scrollTop + ($Y - $Layout.ServiceStartY)
         if ($IsDoubleClick) {
             return [PSCustomObject]@{ Action = "OpenLogs"; Index = $idx }
         }
@@ -99,6 +100,9 @@ function Render-Tui {
         [bool]$RawLogs,
         [bool]$ConfirmQuit,
         [string]$ViewMode = "SERVICES",
+        [string]$ProjectName = "",
+        [bool]$LocalOnly = $false,
+        [bool]$ShowHelp = $false,
         [string]$FilterText = "",
         [bool]$FilterInputMode = $false,
         [bool]$ExpandStacks = $false,
@@ -117,14 +121,54 @@ function Render-Tui {
     } catch { }
 
     $sb = New-Object System.Text.StringBuilder
+    $projTag = if ($ProjectName) { " [$ProjectName]" } else { "" }
+
+    if ($ShowHelp) {
+        $helpLines = @(
+            "$script:C_BOLD$script:C_CYAN procomp$projTag — Keyboard & Mouse Cheat Sheet$script:C_RESET",
+            ("-" * $width),
+            "$script:C_BOLD SERVICES MODE (Split View)$script:C_RESET",
+            "  Up/Down or j/k    Select service         Enter / l / Dbl-Click  Full-screen Log Viewer",
+            "  s / S             Start one / all LOCAL  x / X                  Stop one / all managed",
+            "  r                 Restart selected       b                      Rebuild selected",
+            "  f / F             Git fetch one / all    p / P                  Git pull (--ff-only) one / all",
+            "  t / Click ROUTING Toggle LOCAL <-> REMOTE  o                    Open Swagger URI in browser",
+            "  g                 Toggle LOCAL-only view   d                    Detach (keep running)",
+            "",
+            "$script:C_BOLD LOG VIEWER MODE (Full-Screen)$script:C_RESET",
+            "  Esc / l           Return to Services     Left / Right           Switch service logs",
+            "  Wheel / Up / Down Scroll logs (auto-pauses FOLLOW)              PgUp / PgDn / Home  Page / Top",
+            "  End / G           Jump to bottom & resume FOLLOW                Click stack line    Expand/collapse trace",
+            "  a / Tab           All services merged    e                      Warn / Error only",
+            "  v                 Unified vs Raw JSON    z                      Toggle latest stack trace",
+            "  /                 Filter text / traceId  c                      Clear log display buffer",
+            "",
+            "$script:C_BOLD MOUSE & GENERAL$script:C_RESET",
+            "  Click toolbar buttons on Row 1, service rows, ROUTING column, or [+N stack lines] rows.",
+            "  Hold Shift + Drag in Windows Terminal to highlight and copy text.",
+            "  q / Ctrl+C        Confirm & stop all managed services           ?  Close this help"
+        )
+        for ($r = 0; $r -lt ($height - 1); $r++) {
+            $ln = if ($r -lt $helpLines.Count) { $helpLines[$r] } else { "" }
+            [void]$sb.Append((Pad-Line $ln $width) + "`n")
+        }
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_YELLOW Press any key or click anywhere to close help...$script:C_RESET" $width))
+        if ($DryRun) { return $sb.ToString() }
+        [Console]::Write("$script:ESC[H" + $sb.ToString() + "$script:ESC[J")
+        return
+    }
+
     $sel = $Services[$SelectedIndex]
     $modeTag = if ($AllLogs) { "ALL" } else { $sel.Name }
     $errTag  = if ($ErrorsOnly) { " | ${script:C_YELLOW}WARN/ERR${script:C_RESET}" } else { "" }
     $rawTag  = if ($RawLogs) { " | ${script:C_MAGENTA}RAW${script:C_RESET}" } else { " | ${script:C_GREEN}UNIFIED${script:C_RESET}" }
+    $locTag  = if ($LocalOnly) { " | ${script:C_CYAN}LOCAL-ONLY${script:C_RESET}" } else { "" }
     $filtTag = if ($FilterText) { " | ${script:C_CYAN}Filter:'$FilterText'${script:C_RESET}" } else { "" }
 
     $serviceStartY = -1
     $serviceEndY = -1
+    $serviceScrollTop = 0
+    $visibleSvcCount = $Services.Count
     $logStartY = 3
     $logRows = 4
 
@@ -136,7 +180,8 @@ function Render-Tui {
             @{ Label = "[v]Raw";        Command = "raw";    Active = $RawLogs },
             @{ Label = "[/]Find";       Command = "find";   Active = ($FilterText -ne "") },
             @{ Label = "[c]Clear";      Command = "clear";  Active = $false },
-            @{ Label = "[End]Follow";   Command = "follow"; Active = ($ScrollOffset -eq 0) }
+            @{ Label = "[End]Follow";   Command = "follow"; Active = ($ScrollOffset -eq 0) },
+            @{ Label = "[?]Help";       Command = "help";   Active = $false }
         )
         $logStartY = 3
         $logRows = [Math]::Max(4, $height - 4)
@@ -150,11 +195,18 @@ function Render-Tui {
             @{ Label = "[p]Pull";   Command = "pull";    Active = $false },
             @{ Label = "[t]Route";  Command = "route";   Active = $false },
             @{ Label = "[l]Logs";   Command = "logs";    Active = $false },
+            @{ Label = "[o]Docs";   Command = "swagger"; Active = $false },
+            @{ Label = "[?]Help";   Command = "help";    Active = $false },
             @{ Label = "[q]Quit";   Command = "quit";    Active = $false }
         )
+        $maxSvcRows = [Math]::Max(4, [int][Math]::Floor($height * 0.45))
+        $visibleSvcCount = [Math]::Min($Services.Count, $maxSvcRows)
+        if ($Services.Count -gt $visibleSvcCount) {
+            $serviceScrollTop = [Math]::Max(0, [Math]::Min($SelectedIndex - [int][Math]::Floor($visibleSvcCount / 2), $Services.Count - $visibleSvcCount))
+        }
         $serviceStartY = 4
-        $serviceEndY = 4 + $Services.Count - 1
-        $logStartY = 6 + $Services.Count
+        $serviceEndY = 4 + $visibleSvcCount - 1
+        $logStartY = 6 + $visibleSvcCount
         $logRows = [Math]::Max(4, $height - $logStartY - 1)
     }
 
@@ -169,18 +221,19 @@ function Render-Tui {
     $followTag = if ($vp.IsFollowing) { " | ${script:C_GREEN}FOLLOW${script:C_RESET}" } else { " | ${script:C_YELLOW}PAUSED ^$($vp.ClampedOffset)/$($vp.TotalRows)${script:C_RESET}" }
 
     if ($ViewMode -eq "LOGS") {
-        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp LOGS$script:C_RESET $script:C_DIM| Scope: $modeTag (Left/Right: switch, Wheel/PgUp/PgDn: scroll)$script:C_RESET$rawTag$errTag$followTag$filtTag" $width) + "`n")
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag LOGS$script:C_RESET $script:C_DIM| Scope: $modeTag (Left/Right: switch, Wheel/PgUp/PgDn: scroll)$script:C_RESET$rawTag$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
     } else {
-        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$script:C_RESET $script:C_DIM| Services: $($Services.Count) | Log: $modeTag$script:C_RESET$rawTag$errTag$followTag$filtTag" $width) + "`n")
+        $svcRangeTag = if ($Services.Count -gt $visibleSvcCount) { " ($($serviceScrollTop + 1)-$($serviceScrollTop + $visibleSvcCount)/$($Services.Count))" } else { "" }
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag$script:C_RESET $script:C_DIM| Services: $($Services.Count)$svcRangeTag | Log: $modeTag$script:C_RESET$locTag$rawTag$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
 
         $hdr = "{0,-2} {1,-21} {2,-13} {3,-6} {4,-7} {5,-13} {6,-13} {7,-12} {8,-7} {9,-7} {10,-9}" -f "", "SERVICE", "RUNTIME", "PORT", "PID", "STATE", "ROUTING", "GIT", "UPTIME", "LIMIT", "RAM USED"
         [void]$sb.Append((Pad-Line "$script:C_BOLD$hdr$script:C_RESET" $width) + "`n")
 
-        for ($i = 0; $i -lt $Services.Count; $i++) {
+        for ($i = $serviceScrollTop; $i -lt ($serviceScrollTop + $visibleSvcCount); $i++) {
             $svc = $Services[$i]
             $proc = $svc.CachedProc
             $pidStr = if ($svc.PSObject.Properties["UiPidStr"]) { $svc.UiPidStr } elseif ($proc) { [string]$proc.Id } else { "-" }
@@ -258,12 +311,13 @@ function Render-Tui {
 
     if ($null -ne $LayoutOut) {
         $LayoutOut.Value = [PSCustomObject]@{
-            ViewMode       = $ViewMode
-            ToolbarButtons = $toolbar.Buttons
-            ServiceStartY  = $serviceStartY
-            ServiceEndY    = $serviceEndY
-            RoutingStartX  = 67
-            RoutingEndX    = 80
+            ViewMode         = $ViewMode
+            ToolbarButtons   = $toolbar.Buttons
+            ServiceStartY    = $serviceStartY
+            ServiceEndY      = $serviceEndY
+            ServiceScrollTop = $serviceScrollTop
+            RoutingStartX    = 67
+            RoutingEndX      = 80
             LogStartY      = $logStartY
             LogRows        = $entries
             TotalLogRows   = $vp.TotalRows

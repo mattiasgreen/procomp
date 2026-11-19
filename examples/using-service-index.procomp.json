@@ -1,4 +1,5 @@
 {
+  "project": "acme",
   "appsFile": "./service-index.json",
   "defaults": {
     "builder": "gradle",
@@ -11,7 +12,7 @@
     }
   },
   "builders": {
-    "gradle": { "command": "gradlew.bat :{{subproject}}:assemble -q" }
+    "gradle": { "command": "gradlew.bat {{gradleTaskPrefix}}assemble -q" }
   },
   "runtimes": {
     "java": {

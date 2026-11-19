@@ -76,3 +76,37 @@ function Sync-WireMockMappings {
     }
     return $synced
 }
+
+function Get-WireMockDrift {
+    param($Services, [string]$WireMockBaseUrl, [string]$GatewayServiceName = "")
+    $report = @()
+    if (-not $WireMockBaseUrl) { return $report }
+
+    try {
+        $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Get -TimeoutSec 2
+    } catch {
+        return @([PSCustomObject]@{ Service = "gateway"; Status = "UNREACHABLE"; Detail = "Cannot reach $WireMockBaseUrl/__admin/mappings" })
+    }
+
+    $actualById = @{}
+    if ($resp -and $resp.PSObject.Properties["mappings"] -and $resp.mappings) {
+        foreach ($m in $resp.mappings) {
+            if ($m.PSObject.Properties["id"] -and $m.id -and $m.PSObject.Properties["response"] -and $m.response.PSObject.Properties["proxyBaseUrl"]) {
+                $actualById[[string]$m.id] = ([string]$m.response.proxyBaseUrl).TrimEnd('/')
+            }
+        }
+    }
+
+    foreach ($svc in $Services) {
+        if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
+        $expected = Build-WireMockMapping -Svc $svc
+        $id = $expected.id
+        $expTarget = $expected.response.proxyBaseUrl
+        if (-not $actualById.ContainsKey($id)) {
+            $report += [PSCustomObject]@{ Service = $svc.Name; Status = "MISSING"; Detail = "No procomp mapping in WireMock (expected $expTarget)" }
+        } elseif ($actualById[$id] -ne $expTarget) {
+            $report += [PSCustomObject]@{ Service = $svc.Name; Status = "DRIFT"; Detail = "WireMock=$($actualById[$id]) vs procomp=$expTarget" }
+        }
+    }
+    return $report
+}

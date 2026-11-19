@@ -9,6 +9,8 @@ param(
     [string]$Action = "tui",
     [string]$ConfigPath = (Join-Path $PSScriptRoot "procomp.json"),
     [string]$ReposRoot = "",
+    [string]$Project = "",
+    [string]$Service = "",
     [string]$Profile = ""
 )
 
@@ -16,12 +18,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RootDir     = $PSScriptRoot
-$StateDir    = Join-Path $RootDir ".stack_state"
-$LogDir      = Join-Path $RootDir "logs"
-$RoutingFile = Join-Path $StateDir "routing.json"
-$CrashLog    = Join-Path $LogDir "procomp-error.log"
+$BaseLogDir  = Join-Path $RootDir "logs"
+$CrashLog    = Join-Path $BaseLogDir "procomp-error.log"
 
-New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $BaseLogDir | Out-Null
 
 function Write-ProcompCrashLog {
     param($ErrRecord)
@@ -59,18 +59,31 @@ trap {
 . (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
+$ProjectName = Resolve-ProjectName -ConfigPath $ConfigPath -ProjectOverride $Project
+$StateDir    = Join-Path (Join-Path $RootDir ".stack_state") $ProjectName
+$LogDir      = Join-Path (Join-Path $RootDir "logs") $ProjectName
+$RoutingFile = Join-Path $StateDir "routing.json"
+New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
+
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
 $config = Load-ProcompConfig -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir -ReposRootOverride $ReposRoot
 if ($Profile) {
     Apply-RoutingProfile -Config $config -ProfileName $Profile -RoutingFile $RoutingFile
 }
 $services = @($config.Services)
+$cliServices = if ($Service) {
+    $matched = @($services | Where-Object { $_.Name -eq $Service })
+    if ($matched.Count -eq 0) { throw "Service '$Service' not found in config." }
+    $matched
+} else {
+    $services
+}
 $gatewayUrl = Get-GatewayAdminUrl -Config $config
 $gatewaySvcName = if ($config.Gateway) { $config.Gateway.ServiceName } else { "" }
 
 if ($Action -eq "doctor") {
     try {
-        $checks = @(Invoke-ProcompDoctor -Config $config -RootDir $RootDir)
+        $checks = @(Invoke-ProcompDoctor -Config $config -RootDir $RootDir -TargetServices $cliServices)
         $checks | Format-Table -AutoSize
         $fails = @($checks | Where-Object { $_.Status -eq "FAIL" }).Count
         if ($fails -gt 0) { exit 1 }
@@ -112,7 +125,7 @@ if ($Action -eq "clone") {
 
 if ($Action -eq "build") {
     try {
-        foreach ($svc in $services) {
+        foreach ($svc in $cliServices) {
             if ($svc.BuilderDef) {
                 Write-Host "Building $($svc.Name) ($($svc.Builder))..."
                 $ok = Invoke-ServiceBuildSync -Svc $svc -RootDir $RootDir
@@ -127,13 +140,17 @@ if ($Action -eq "build") {
 
 if ($Action -eq "up") {
     try {
-        foreach ($svc in $services) {
-            if ($svc.Enabled) {
+        foreach ($svc in $cliServices) {
+            if ($svc.Enabled -or $Service) {
                 Start-ServiceProcess -Svc $svc -RootDir $RootDir
                 Write-Host "Started $($svc.Name) (port $($svc.Port))"
             } else {
                 Write-Host "Skipped $($svc.Name) (disabled)"
             }
+        }
+        if ($gatewayUrl -and (-not $gatewaySvcName)) {
+            $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl
+            if ($cnt -gt 0) { Write-Host "Synced $cnt route(s) to external WireMock ($gatewayUrl)" }
         }
     } finally {
         $HttpClient.Dispose()
@@ -143,7 +160,7 @@ if ($Action -eq "up") {
 
 if ($Action -eq "down") {
     try {
-        foreach ($svc in $services) {
+        foreach ($svc in $cliServices) {
             Stop-ServiceProcess -Svc $svc
             Write-Host "Stopped $($svc.Name)"
         }
@@ -155,9 +172,9 @@ if ($Action -eq "down") {
 
 if ($Action -eq "status") {
     try {
-        Refresh-ProcessSnapshot -Services $services -DetectIde
-        Refresh-GitSummaries -Services $services -RootDir $RootDir
-        foreach ($svc in $services) {
+        Refresh-ProcessSnapshot -Services $cliServices -DetectIde
+        Refresh-GitSummaries -Services $cliServices -RootDir $RootDir
+        foreach ($svc in $cliServices) {
             if ($svc.PortConflict) {
                 $svc.StatusText = "PORT-CONFLICT"
             } elseif ($svc.CachedProc) {
@@ -182,7 +199,7 @@ if ($Action -eq "status") {
                 $svc.StatusText = if ($svc.CachedPid) { "CRASHED" } elseif ($svc.RoutingMode -eq "REMOTE") { "REMOTE" } elseif ($svc.Enabled) { "STOPPED" } else { "DISABLED" }
             }
         }
-        $rows = foreach ($svc in $services) {
+        $rows = foreach ($svc in $cliServices) {
             [PSCustomObject]@{
                 Service = $svc.Name
                 Runtime = $svc.Runtime
@@ -233,6 +250,8 @@ try {
     $gatewaySynced = $false
     $needsRender = $true
     $viewMode = "SERVICES"
+    $localOnly = $false
+    $showHelp = $false
     $filterText = ""
     $filterInputMode = $false
     $expandStacks = $false
@@ -240,11 +259,19 @@ try {
     $expandedEntryIds = @{}
     $uiLayout = $null
 
+    function Get-VisibleServices {
+        if ($script:localOnly) {
+            $subset = @($services | Where-Object { $_.RoutingMode -eq "LOCAL" -or $_.Managed -or $_.ExternalIde })
+            if ($subset.Count -gt 0) { return $subset }
+        }
+        return $services
+    }
+
     # Render initial TUI frame immediately so the user sees live startup progress instead of a blank screen
-    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Booting enabled services..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -LogBuffers $sharedState.LogBuffers
+    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Booting enabled services..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
     foreach ($svc in $services) {
         if ($svc.Enabled) {
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Starting $($svc.Name) (port $($svc.Port))..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -LogBuffers $sharedState.LogBuffers
+            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Starting $($svc.Name) (port $($svc.Port))..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
             try {
                 Start-ServiceProcess -Svc $svc -RootDir $RootDir
             } catch {
@@ -252,16 +279,46 @@ try {
             }
         }
     }
+    if ($gatewayUrl -and (-not $gatewaySvcName)) {
+        $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl
+        $gatewaySynced = $true
+        if ($cnt -gt 0) { $banner = "External WireMock synced ($cnt routes)." }
+    }
     $sharedState.RefreshNow = $true
-    $banner = "All enabled services launched. Waiting for health checks..."
+    if (-not $banner) { $banner = "All enabled services launched. Waiting for health checks..." }
 
     function Invoke-UiAction {
         param([string]$Cmd)
+        $vis = @(Get-VisibleServices)
+        if ($script:selected -ge $vis.Count) { $script:selected = [Math]::Max(0, $vis.Count - 1) }
+        $curSvc = $vis[$script:selected]
         switch ($Cmd) {
+            "help" {
+                $script:showHelp = -not $script:showHelp
+            }
+            "local-only" {
+                $script:localOnly = -not $script:localOnly
+                $script:selected = 0
+                $script:scrollOffset = 0
+                $script:banner = if ($script:localOnly) { "Showing LOCAL / active services only (press [g] for all)" } else { "Showing all $($services.Count) services" }
+            }
+            "swagger" {
+                $url = Get-ServiceSwaggerUrl -Svc $curSvc
+                if (-not $url) {
+                    $script:banner = "No swaggeruri configured for $($curSvc.Name)"
+                } else {
+                    try {
+                        Start-Process $url
+                        $script:banner = "Opened Swagger: $url"
+                    } catch {
+                        $script:banner = "Failed to open $url : $($_.Exception.Message)"
+                    }
+                }
+            }
             "logs" {
                 $script:viewMode = "LOGS"
                 $script:scrollOffset = 0
-                $script:banner = "Log Viewer: $($services[$script:selected].Name) (Wheel/PgUp/PgDn to scroll, Esc to return)"
+                $script:banner = "Log Viewer: $($curSvc.Name) (Wheel/PgUp/PgDn to scroll, Esc to return)"
             }
             "back" {
                 $script:viewMode = "SERVICES"
@@ -310,7 +367,7 @@ try {
                 }
             }
             "route" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
                 $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
                 $sharedState.RefreshNow = $true
@@ -322,7 +379,7 @@ try {
                 $script:banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$gwNote"
             }
             "start" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 $svc.Enabled = $true
                 $svc.RoutingMode = "LOCAL"
                 $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
@@ -344,7 +401,7 @@ try {
                 $script:banner = "Started all enabled LOCAL services"
             }
             "stop" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 if ($svc.ExternalIde) {
                     $script:banner = "$($svc.Name) is IDE-managed; stop it from your IDE."
                 } else {
@@ -365,7 +422,7 @@ try {
                 $script:banner = "Stopped all managed services"
             }
             "restart" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 if ($svc.ExternalIde) {
                     $script:banner = "$($svc.Name) is IDE-managed; restart it from your IDE."
                 } else {
@@ -381,7 +438,7 @@ try {
                 }
             }
             "build" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 Stop-ServiceProcess -Svc $svc
                 try {
                     Start-ServiceBuildAsync -Svc $svc -RootDir $RootDir
@@ -392,7 +449,7 @@ try {
                 $sharedState.RefreshNow = $true
             }
             "fetch" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "FetchOne"; ServiceName = $svc.Name })
                 $sharedState.RefreshNow = $true
                 $script:banner = "Fetching $($svc.Name)..."
@@ -403,7 +460,7 @@ try {
                 $script:banner = "Fetching all repos..."
             }
             "pull" {
-                $svc = $services[$script:selected]
+                $svc = $curSvc
                 $sharedState.GitJobQueue.Enqueue([PSCustomObject]@{ Action = "PullOne"; ServiceName = $svc.Name })
                 $sharedState.RefreshNow = $true
                 $script:banner = "Pulling $($svc.Name) (--ff-only)..."
@@ -462,9 +519,12 @@ try {
             $needsRender = $true
         }
 
+        $visServices = @(Get-VisibleServices)
+        if ($selected -ge $visServices.Count) { $selected = [Math]::Max(0, $visServices.Count - 1) }
+
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -LayoutOut $layoutRef
+            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -LayoutOut $layoutRef
             if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }
@@ -474,6 +534,12 @@ try {
             foreach ($ev in $events) {
                 if (-not $running) { break }
 
+                if ($showHelp) {
+                    $showHelp = $false
+                    $needsRender = $true
+                    continue
+                }
+
                 if ($ev.Kind -eq "WheelUp" -or $ev.Kind -eq "WheelDown") {
                     $delta = if ($ev.Kind -eq "WheelUp") { 3 } else { -3 }
                     $inLogArea = ($viewMode -eq "LOGS") -or ($uiLayout -and $ev.Y -ge $uiLayout.LogStartY)
@@ -481,9 +547,9 @@ try {
                         $scrollOffset = [Math]::Max(0, $scrollOffset + $delta)
                     } else {
                         $step = if ($ev.Kind -eq "WheelUp") { -1 } else { 1 }
-                        $selected = [Math]::Max(0, [Math]::Min($services.Count - 1, $selected + $step))
+                        $selected = [Math]::Max(0, [Math]::Min($visServices.Count - 1, $selected + $step))
                         $scrollOffset = 0
-                        $banner = "Selected $($services[$selected].Name)"
+                        $banner = "Selected $($visServices[$selected].Name)"
                     }
                     $needsRender = $true
                     continue
@@ -496,16 +562,16 @@ try {
                         switch ($hit.Action) {
                             "Toolbar" { Invoke-UiAction -Cmd $hit.Command }
                             "OpenLogs" {
-                                $selected = $hit.Index
+                                $selected = [Math]::Max(0, [Math]::Min($visServices.Count - 1, $hit.Index))
                                 Invoke-UiAction -Cmd "logs"
                             }
                             "SelectService" {
-                                $selected = $hit.Index
+                                $selected = [Math]::Max(0, [Math]::Min($visServices.Count - 1, $hit.Index))
                                 $scrollOffset = 0
                                 if ($hit.ToggleRoute) {
                                     Invoke-UiAction -Cmd "route"
                                 } else {
-                                    $banner = "Selected $($services[$selected].Name)"
+                                    $banner = "Selected $($visServices[$selected].Name)"
                                 }
                             }
                             "ToggleStack" {
@@ -567,6 +633,12 @@ try {
                     continue
                 }
 
+                if ($ch -eq '?') {
+                    Invoke-UiAction -Cmd "help"
+                    $needsRender = $true
+                    continue
+                }
+
                 $pageStep = if ($uiLayout -and $uiLayout.PageHeight -gt 2) { $uiLayout.PageHeight - 2 } else { 10 }
 
                 if ($viewMode -eq "LOGS") {
@@ -578,8 +650,8 @@ try {
                         0x22 { $scrollOffset = [Math]::Max(0, $scrollOffset - $pageStep); $needsRender = $true; continue } # PgDn
                         0x24 { $scrollOffset = 999999; $needsRender = $true; continue }       # Home
                         0x23 { Invoke-UiAction -Cmd "follow"; $needsRender = $true; continue } # End
-                        0x25 { $selected = ($selected - 1 + $services.Count) % $services.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($services[$selected].Name)"; $needsRender = $true; continue } # Left
-                        0x27 { $selected = ($selected + 1) % $services.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($services[$selected].Name)"; $needsRender = $true; continue } # Right
+                        0x25 { $selected = ($selected - 1 + $visServices.Count) % $visServices.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($visServices[$selected].Name)"; $needsRender = $true; continue } # Left
+                        0x27 { $selected = ($selected + 1) % $visServices.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($visServices[$selected].Name)"; $needsRender = $true; continue } # Right
                         0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
                     }
                     switch -CaseSensitive ($ch) {
@@ -597,14 +669,16 @@ try {
                     }
                 } else {
                     switch ($vk) {
-                        0x26 { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true; continue } # Up
-                        0x28 { $selected = [Math]::Min($services.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true; continue } # Down
+                        0x26 { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true; continue } # Up
+                        0x28 { $selected = [Math]::Min($visServices.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true; continue } # Down
                         0x0D { Invoke-UiAction -Cmd "logs"; $needsRender = $true; continue }  # Enter
                         0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
                     }
                     switch -CaseSensitive ($ch) {
-                        'k' { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
-                        'j' { $selected = [Math]::Min($services.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
+                        'k' { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true }
+                        'j' { $selected = [Math]::Min($visServices.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true }
+                        'g' { Invoke-UiAction -Cmd "local-only"; $needsRender = $true }
+                        'o' { Invoke-UiAction -Cmd "swagger"; $needsRender = $true }
                         'l' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
                         'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
                         'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }

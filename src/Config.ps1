@@ -24,6 +24,25 @@ function Expand-Template {
     return $result
 }
 
+function Resolve-ProjectName {
+    param([string]$ConfigPath, [string]$ProjectOverride = "")
+    if ($ProjectOverride) {
+        return ($ProjectOverride -replace '[^a-zA-Z0-9._-]', '_')
+    }
+    if (Test-Path $ConfigPath) {
+        try {
+            $doc = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
+            if ($doc.PSObject.Properties["project"] -and $doc.project) {
+                return (([string]$doc.project) -replace '[^a-zA-Z0-9._-]', '_')
+            }
+        } catch { }
+    }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ConfigPath)
+    if ($leaf -match '^(.+)\.procomp$') { $leaf = $Matches[1] }
+    if (-not $leaf -or $leaf -eq "procomp") { return "default" }
+    return ($leaf -replace '[^a-zA-Z0-9._-]', '_')
+}
+
 function Resolve-ModulePath {
     param([string]$Module)
     if (-not $Module) { return "" }
@@ -346,6 +365,7 @@ function Build-ServiceTemplateVars {
         $repoAbs = if ([System.IO.Path]::IsPathRooted($Svc.Repo)) { $Svc.Repo } else { [System.IO.Path]::GetFullPath((Join-Path $RootDir $Svc.Repo)) }
     }
     $modPath = Resolve-ModulePath -Module $Svc.Module
+    $gradlePrefix = if ($Svc.Module) { ":" + $Svc.Module.TrimStart(':') + ":" } else { "" }
     $swagger = if ($Svc.PSObject.Properties["SwaggerUri"]) { [string]$Svc.SwaggerUri } else { "" }
     $repoUrl = if ($Svc.PSObject.Properties["ServiceRepositoryUrl"]) { [string]$Svc.ServiceRepositoryUrl } else { "" }
     $rRoot   = if ($Svc.PSObject.Properties["ReposRoot"]) { [string]$Svc.ReposRoot } else { "" }
@@ -364,6 +384,7 @@ function Build-ServiceTemplateVars {
         subproject           = $Svc.Module
         module               = $Svc.Module
         modulePath           = $modPath
+        gradleTaskPrefix     = $gradlePrefix
         swaggeruri           = $swagger
         healthPath           = $Svc.HealthPath
         logFormat            = $Svc.LogFormat
@@ -413,4 +434,16 @@ function Apply-RoutingProfile {
         $rMap[$svc.Name] = $svc.RoutingMode
     }
     Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
+}
+
+function Get-ServiceSwaggerUrl {
+    param($Svc)
+    if (-not $Svc -or (-not $Svc.PSObject.Properties["SwaggerUri"]) -or (-not $Svc.SwaggerUri)) {
+        return $null
+    }
+    $path = ([string]$Svc.SwaggerUri).TrimStart('/')
+    if (($Svc.RoutingMode -eq "REMOTE") -and $Svc.RemoteUrl) {
+        return "$($Svc.RemoteUrl.TrimEnd('/'))/$path"
+    }
+    return "http://127.0.0.1:$($Svc.Port)/$path"
 }
