@@ -1,6 +1,6 @@
 # `procomp` Architecture
 
-`procomp` (Process Composer) is a lightweight, zero-dependency PowerShell TUI and process orchestrator for running, monitoring, and routing Spring Boot microservices, ActiveMQ, and WireMock locally on Windows.
+`procomp` (Process Composer) is a lightweight, zero-dependency, language-agnostic PowerShell TUI and process orchestrator for running, monitoring, and routing local microservices (Spring Boot, Quarkus, Node, .NET, ActiveMQ, WireMock, etc.) on Windows.
 
 It is compatible with both **Windows PowerShell 5.1+** and **PowerShell 7+**, requiring no external binaries or compilation step.
 
@@ -8,11 +8,12 @@ It is compatible with both **Windows PowerShell 5.1+** and **PowerShell 7+**, re
 
 ## 1. Core Architectural Decisions
 
-### Direct `java -jar` over `./gradlew bootRun`
-Running 10+ Spring Boot services via `./gradlew bootRun` on Windows causes severe resource and lifecycle issues:
-1. **Double-JVM Overhead:** Each `bootRun` spawns a Gradle daemon/worker JVM plus a forked application JVM (20+ JVMs for 10 services). `procomp` separates build time (`bootJar`) from run time (`java -jar`), maintaining a strict 1:1 process mapping.
-2. **Orphaned Processes:** Terminating a Gradle wrapper on Windows frequently leaves child `java.exe` processes bound to ports `808x`. Direct `java.exe` execution paired with `taskkill.exe /F /T /PID` guarantees clean process-tree teardown.
-3. **Explicit Memory Bounding:** Each JVM is launched with explicit `-Xmx` limits (e.g. `-Xmx256m`–`-Xmx384m`), and the TUI surfaces both configured `MAXHEAP` and live Windows `WorkingSet64` (`RAM USED`).
+### Data-Driven `builders` & `runtimes` (Zero Hardcoded Presets)
+Rather than hardcoding Spring Boot, Quarkus, Gradle, Maven, or Node logic into the orchestrator, `procomp.json` declares reusable `builders` and `runtimes` aliases backed by simple `{{var}}` command templates and optional `artifactGlob` / `artifactExclude` resolution.
+
+* **Direct 1:1 Execution (e.g., `java -jar` over `./gradlew bootRun`):** Separating `builders` from `runtimes` eliminates double-JVM overhead, Gradle/Maven daemon lock contention, and orphaned child processes on Windows.
+* **Clean Teardown:** Direct process execution paired with `taskkill.exe /F /T /PID` guarantees clean process-tree teardown.
+* **Memory Visibility:** Runtimes can define an optional `memoryArgPattern` (such as `-Xmx(\d+[kmgKMG]?)`) alongside live Windows `WorkingSet64` (`RAM USED`).
 
 ### Parallel Startup & Non-Blocking Health Polling
 `procomp` does not enforce a strict sequential startup order:

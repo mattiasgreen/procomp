@@ -1,17 +1,17 @@
 # `procomp` (Process Composer)
 
-A lightweight, Process-Compose-inspired PowerShell TUI and process orchestrator for running, monitoring, and routing Spring Boot microservices, ActiveMQ, and WireMock locally on Windows—without Docker overhead or orphaned `./gradlew bootRun` JVMs.
+A lightweight, language-agnostic PowerShell TUI and process orchestrator for running, monitoring, and routing local microservices (Spring Boot, Quarkus, Node, .NET, ActiveMQ, WireMock, etc.) on Windows—with zero external dependencies.
 
 ## Why `procomp`?
-* **1:1 JVM Process Model:** Runs flat `java -jar` processes with explicit `-Xmx` bounds instead of `./gradlew bootRun` (avoiding double JVMs, Gradle daemon lock contention, and orphaned child processes).
-* **Hybrid 3-Mode Routing via WireMock:** Run only the 1–2 services you're actively working on (either as a `LOCAL-JAR` or `LOCAL-IDE` debugger in IntelliJ/Eclipse) while WireMock bridges the rest to a `REMOTE` shared dev environment.
+* **Data-Driven `builders` & `runtimes` (`procomp.json`):** Zero hardcoded framework presets. Pair any build tool (Gradle, Maven, npm, dotnet) and runtime via `{{var}}` command templates and `artifactGlob` resolution. See [examples/polyglot.procomp.json](examples/polyglot.procomp.json).
+* **Hybrid 3-Mode Routing via WireMock:** Run only the 1–2 services you're actively working on (either as a local process or `LOCAL-IDE` debugger in IntelliJ/Eclipse) while WireMock bridges the rest to a `REMOTE` shared dev environment.
 * **IDE Process Detection:** Automatically detects IDE-launched processes bound to a service's port via `Get-NetTCPConnection` + parent PID inspection (`IDE-UP`), surfacing their RAM/uptime without ever killing them on exit.
-* **Unified Log Viewer:** Tails and merges JSON (UTC/offset) and plain-text logs in real time with `WARN`/`ERROR` filtering.
+* **Unified Log Viewer:** Tails and merges JSON (UTC/offset) and plain-text logs incrementally with stack-trace folding, `WARN`/`ERROR` filtering, and `/` live search.
 * **Zero Dependencies:** Pure PowerShell (compatible with Windows PowerShell 5.1+ and PowerShell 7+).
 
 ## Documentation
 * [Architecture & Design](docs/ARCHITECTURE.md)
-* [Configuration Schema (`services.json`)](docs/CONFIG_SCHEMA.md)
+* [Configuration Schema (`procomp.json`)](docs/CONFIG_SCHEMA.md)
 * [Unified Log Viewer Design](docs/LOG_VIEWER.md)
 * [PowerShell Best Practices & Agentic Guidelines](docs/POWERSHELL_GUIDELINES.md)
 

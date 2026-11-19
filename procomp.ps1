@@ -1,15 +1,14 @@
 <#
 .SYNOPSIS
-    procomp (Process Composer) - Lightweight TUI & orchestrator for local Java/Spring Boot microservices.
+    procomp (Process Composer) - Language-agnostic TUI & process orchestrator for Windows.
 .DESCRIPTION
     Compatible with Windows PowerShell 5.1+ and PowerShell 7+.
 #>
 param(
     [ValidateSet("tui", "up", "down", "status", "sync", "build", "doctor")]
     [string]$Action = "tui",
-    [string]$ConfigPath = (Join-Path $PSScriptRoot "services.json"),
-    [string]$Profile = "",
-    [string]$ProfilesPath = (Join-Path $PSScriptRoot "profiles.json")
+    [string]$ConfigPath = (Join-Path $PSScriptRoot "procomp.json"),
+    [string]$Profile = ""
 )
 
 Set-StrictMode -Version Latest
@@ -19,13 +18,12 @@ $RootDir     = $PSScriptRoot
 $StateDir    = Join-Path $RootDir ".stack_state"
 $LogDir      = Join-Path $RootDir "logs"
 $RoutingFile = Join-Path $StateDir "routing.json"
-$MockJar     = Join-Path $RootDir "mock-service\mock-service.jar"
 
 New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 
 . (Join-Path $RootDir "src\Config.ps1")
 . (Join-Path $RootDir "src\EnvLoader.ps1")
-. (Join-Path $RootDir "src\GitGradle.ps1")
+. (Join-Path $RootDir "src\BuildRunner.ps1")
 . (Join-Path $RootDir "src\IdeDetector.ps1")
 . (Join-Path $RootDir "src\ProcessManager.ps1")
 . (Join-Path $RootDir "src\HealthMonitor.ps1")
@@ -35,15 +33,17 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 . (Join-Path $RootDir "src\Tui.ps1")
 
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
-$services = @(Load-Services -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir)
+$config = Load-ProcompConfig -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir
 if ($Profile) {
-    Apply-RoutingProfile -Services $services -ProfileName $Profile -ProfilesPath $ProfilesPath -RoutingFile $RoutingFile
+    Apply-RoutingProfile -Config $config -ProfileName $Profile -RoutingFile $RoutingFile
 }
-$wireMockUrl = Get-WireMockServiceUrl -Services $services
+$services = @($config.Services)
+$gatewayUrl = Get-GatewayAdminUrl -Config $config
+$gatewaySvcName = if ($config.Gateway) { $config.Gateway.ServiceName } else { "" }
 
 if ($Action -eq "doctor") {
     try {
-        $checks = @(Invoke-ProcompDoctor -Services $services -RootDir $RootDir -MockJarPath $MockJar)
+        $checks = @(Invoke-ProcompDoctor -Config $config -RootDir $RootDir)
         $checks | Format-Table -AutoSize
         $fails = @($checks | Where-Object { $_.Status -eq "FAIL" }).Count
         if ($fails -gt 0) { exit 1 }
@@ -66,9 +66,9 @@ if ($Action -eq "sync") {
 if ($Action -eq "build") {
     try {
         foreach ($svc in $services) {
-            if ($svc.GitRepo) {
-                Write-Host "Building $($svc.Name)..."
-                $ok = Invoke-GradleBuildSync -Svc $svc -RootDir $RootDir
+            if ($svc.BuilderDef) {
+                Write-Host "Building $($svc.Name) ($($svc.Builder))..."
+                $ok = Invoke-ServiceBuildSync -Svc $svc -RootDir $RootDir
                 Write-Host "  $($svc.Name): $(if ($ok) { 'OK' } else { 'SKIPPED/FAILED' })"
             }
         }
@@ -82,7 +82,7 @@ if ($Action -eq "up") {
     try {
         foreach ($svc in $services) {
             if ($svc.Enabled) {
-                Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+                Start-ServiceProcess -Svc $svc -RootDir $RootDir
                 Write-Host "Started $($svc.Name) (port $($svc.Port))"
             } else {
                 Write-Host "Skipped $($svc.Name) (disabled)"
@@ -109,17 +109,22 @@ if ($Action -eq "down") {
 if ($Action -eq "status") {
     try {
         Refresh-ProcessSnapshot -Services $services -DetectIde
+        Refresh-GitSummaries -Services $services -RootDir $RootDir
         foreach ($svc in $services) {
             if ($svc.PortConflict) {
                 $svc.StatusText = "PORT-CONFLICT"
             } elseif ($svc.CachedProc) {
-                $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
-                try {
-                    $resp = $HttpClient.GetAsync($url).GetAwaiter().GetResult()
-                    $svc.Healthy = ([int]$resp.StatusCode -ge 200 -and [int]$resp.StatusCode -lt 300)
-                    $resp.Dispose()
-                } catch {
-                    $svc.Healthy = $false
+                if ($svc.HealthPath) {
+                    $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
+                    try {
+                        $resp = $HttpClient.GetAsync($url).GetAwaiter().GetResult()
+                        $svc.Healthy = ([int]$resp.StatusCode -ge 200 -and [int]$resp.StatusCode -lt 300)
+                        $resp.Dispose()
+                    } catch {
+                        $svc.Healthy = $false
+                    }
+                } else {
+                    $svc.Healthy = $true
                 }
                 if ($svc.ExternalIde) {
                     $svc.StatusText = if ($svc.Healthy) { "IDE-UP" } else { "IDE-INIT" }
@@ -133,12 +138,13 @@ if ($Action -eq "status") {
         $rows = foreach ($svc in $services) {
             [PSCustomObject]@{
                 Service = $svc.Name
-                Type    = $svc.Type
+                Runtime = $svc.Runtime
                 Port    = $svc.Port
                 PID     = if ($svc.CachedProc) { $svc.CachedProc.Id } else { "-" }
                 State   = $svc.StatusText
                 Routing = if ($svc.RoutingMode -eq "REMOTE") { "REMOTE" } else { "LOCAL :$($svc.Port)" }
-                MaxHeap = $svc.MaxHeap
+                Git     = $svc.GitSummary
+                Limit   = $svc.MemLimit
                 RamUsed = (Format-RamMb -Proc $svc.CachedProc)
             }
         }
@@ -161,7 +167,7 @@ $banner = "Booting enabled services..."
 foreach ($svc in $services) {
     if ($svc.Enabled) {
         try {
-            Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+            Start-ServiceProcess -Svc $svc -RootDir $RootDir
         } catch {
             $banner = $_.Exception.Message
         }
@@ -177,7 +183,7 @@ try {
     $running = $true
     $lastRefresh = [datetime]::MinValue
     $lastGitRefresh = [datetime]::MinValue
-    $wireMockSynced = $false
+    $gatewaySynced = $false
     $needsRender = $true
     $filterText = ""
     $filterInputMode = $false
@@ -195,22 +201,21 @@ try {
         if (($now - $lastRefresh).TotalMilliseconds -ge 750) {
             Refresh-ProcessSnapshot -Services $services -DetectIde
             Poll-AsyncHealth -Services $services -HttpClient $HttpClient
-            if (-not $wireMockSynced -and $wireMockUrl) {
-                $wmSvc = $services | Where-Object { $_.Type -eq "wiremock" -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
-                if ($wmSvc) {
-                    $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $wireMockUrl
-                    $wireMockSynced = $true
-                    $banner = "WireMock synced ($cnt routes)"
+            if (-not $gatewaySynced -and $gatewayUrl -and $gatewaySvcName) {
+                $gwSvc = $services | Where-Object { $_.Name -eq $gatewaySvcName -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
+                if ($gwSvc) {
+                    $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
+                    $gatewaySynced = $true
+                    $banner = "Gateway synced ($cnt routes)"
                 }
             }
-            # Check any in-flight async Gradle builds
             foreach ($svc in $services) {
                 if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
                     $exitCode = $svc.BuildProc.ExitCode
                     $svc.BuildProc = $null
                     if ($exitCode -eq 0) {
                         try {
-                            Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+                            Start-ServiceProcess -Svc $svc -RootDir $RootDir
                             $banner = "Build succeeded; started $($svc.Name)"
                         } catch {
                             $banner = $_.Exception.Message
@@ -312,9 +317,9 @@ try {
                                 $rMap = @{}
                                 foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
                                 Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
-                                $wmSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $wireMockUrl
-                                $wmNote = if ($wmSynced) { " (WireMock updated)" } else { "" }
-                                $banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$wmNote"
+                                $gwSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
+                                $gwNote = if ($gwSynced) { " (Gateway updated)" } else { "" }
+                                $banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$gwNote"
                                 $needsRender = $true
                             }
                             's' {
@@ -322,7 +327,7 @@ try {
                                 $svc.Enabled = $true
                                 $svc.RoutingMode = "LOCAL"
                                 try {
-                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+                                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
                                     $banner = "Started $($svc.Name)"
                                 } catch {
                                     $banner = $_.Exception.Message
@@ -332,7 +337,7 @@ try {
                             'S' {
                                 foreach ($s in $services) {
                                     if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
-                                        try { Start-ServiceProcess -Svc $s -MockJarPath $MockJar -RootDir $RootDir } catch { }
+                                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir } catch { }
                                     }
                                 }
                                 $banner = "Started all enabled LOCAL services"
@@ -369,7 +374,7 @@ try {
                                     Stop-ServiceProcess -Svc $svc
                                     $svc.Enabled = $true
                                     $svc.RoutingMode = "LOCAL"
-                                    Start-ServiceProcess -Svc $svc -MockJarPath $MockJar -RootDir $RootDir
+                                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
                                     $banner = "Restarted $($svc.Name)"
                                 }
                                 $needsRender = $true
@@ -378,8 +383,8 @@ try {
                                 $svc = $services[$selected]
                                 Stop-ServiceProcess -Svc $svc
                                 try {
-                                    Start-GradleBuildAsync -Svc $svc -RootDir $RootDir
-                                    $banner = "Building $($svc.Name)..."
+                                    Start-ServiceBuildAsync -Svc $svc -RootDir $RootDir
+                                    $banner = "Building $($svc.Name) ($($svc.Builder))..."
                                 } catch {
                                     $banner = $_.Exception.Message
                                 }

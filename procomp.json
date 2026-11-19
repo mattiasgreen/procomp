@@ -1,0 +1,87 @@
+{
+  "builders": {},
+  "runtimes": {
+    "mock-broker": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=activemq -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\\mock-service.jar",
+      "healthPath": "/api/jolokia",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    },
+    "mock-service": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=spring-boot -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\\mock-service.jar",
+      "healthPath": "/actuator/health",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    }
+  },
+  "gateway": {
+    "type": "wiremock",
+    "adminUrl": "http://127.0.0.1:8080"
+  },
+  "profiles": {
+    "checkout": {
+      "local":  ["activemq-broker", "order-service", "payment-service"],
+      "remote": ["auth-service", "inventory-service", "notification-service"]
+    }
+  },
+  "services": [
+    {
+      "name": "activemq-broker",
+      "runtime": "mock-broker",
+      "port": 8161,
+      "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "1800" },
+      "proxyPath": "/activemq",
+      "remoteUrl": "https://shared-dev.example.com/activemq",
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "auth-service",
+      "runtime": "mock-service",
+      "port": 8091,
+      "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "3000" },
+      "proxyPath": "/auth",
+      "remoteUrl": "https://shared-dev.example.com/auth",
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "order-service",
+      "runtime": "mock-service",
+      "port": 8082,
+      "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "4200" },
+      "proxyPath": "/orders",
+      "remoteUrl": "https://shared-dev.example.com/orders",
+      "logFormat": "json",
+      "enabled": true
+    },
+    {
+      "name": "payment-service",
+      "runtime": "mock-service",
+      "port": 8083,
+      "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "3500" },
+      "proxyPath": "/payments",
+      "remoteUrl": "https://shared-dev.example.com/payments",
+      "logFormat": "json",
+      "enabled": true
+    },
+    {
+      "name": "inventory-service",
+      "runtime": "mock-service",
+      "port": 8084,
+      "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "2800" },
+      "proxyPath": "/inventory",
+      "remoteUrl": "https://shared-dev.example.com/inventory",
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "notification-service",
+      "runtime": "mock-service",
+      "port": 8085,
+      "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "2500" },
+      "proxyPath": "/notifications",
+      "remoteUrl": "https://shared-dev.example.com/notifications",
+      "logFormat": "text",
+      "enabled": false
+    }
+  ]
+}

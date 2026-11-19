@@ -1,17 +1,15 @@
 Set-StrictMode -Version Latest
 
-function Get-WireMockServiceUrl {
-    param($Services)
-    $wm = $Services | Where-Object { $_.Type -eq "wiremock" } | Select-Object -First 1
-    if ($wm) {
-        return "http://127.0.0.1:$($wm.Port)"
+function Get-GatewayAdminUrl {
+    param($Config)
+    if ($Config -and $Config.Gateway -and $Config.Gateway.AdminUrl) {
+        return $Config.Gateway.AdminUrl
     }
     return $null
 }
 
 function Get-WireMockMappingId {
     param([string]$ServiceName)
-    # Deterministic UUID v5-like hex from MD5 of service name so PUT /__admin/mappings/{id} is idempotent
     $md5 = [System.Security.Cryptography.MD5]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes("procomp:$ServiceName")
@@ -41,15 +39,15 @@ function Build-WireMockMapping {
             urlPathPattern = "$prefix/(.*)"
         }
         response = @{
-            proxyBaseUrl             = $targetBase
-            proxyUrlPrefixToRemove   = $prefix
+            proxyBaseUrl           = $targetBase
+            proxyUrlPrefixToRemove = $prefix
         }
     }
 }
 
 function Set-ServiceWireMockRoute {
-    param($Svc, [string]$WireMockBaseUrl)
-    if (-not $WireMockBaseUrl -or $Svc.Type -eq "wiremock") { return $false }
+    param($Svc, [string]$WireMockBaseUrl, [string]$GatewayServiceName = "")
+    if (-not $WireMockBaseUrl -or ($GatewayServiceName -and $Svc.Name -eq $GatewayServiceName)) { return $false }
     $mapping = Build-WireMockMapping -Svc $Svc
     $json = $mapping | ConvertTo-Json -Depth 5
     $id = $mapping.id
@@ -67,12 +65,12 @@ function Set-ServiceWireMockRoute {
 }
 
 function Sync-WireMockMappings {
-    param($Services, [string]$WireMockBaseUrl)
+    param($Services, [string]$WireMockBaseUrl, [string]$GatewayServiceName = "")
     if (-not $WireMockBaseUrl) { return 0 }
     $synced = 0
     foreach ($svc in $Services) {
-        if ($svc.Type -eq "wiremock") { continue }
-        if (Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $WireMockBaseUrl) {
+        if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
+        if (Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $WireMockBaseUrl -GatewayServiceName $GatewayServiceName) {
             $synced++
         }
     }

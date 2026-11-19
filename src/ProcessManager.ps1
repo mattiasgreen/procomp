@@ -63,8 +63,60 @@ function Refresh-ProcessSnapshot {
     }
 }
 
+function Split-CommandLine {
+    param([string]$CommandLine)
+    $trimmed = $CommandLine.Trim()
+    if ($trimmed -match '[|&><]') {
+        return @{ FilePath = "cmd.exe"; ArgumentList = @("/c", $trimmed) }
+    }
+    $tokens = @()
+    $matches = [regex]::Matches($trimmed, '("[^"]*"|\S+)')
+    foreach ($m in $matches) {
+        $tok = $m.Value
+        if ($tok.Length -ge 2 -and $tok.StartsWith('"') -and $tok.EndsWith('"')) {
+            $tok = $tok.Substring(1, $tok.Length - 2)
+        }
+        $tokens += $tok
+    }
+    if ($tokens.Count -eq 0) {
+        throw "Empty command line."
+    }
+    $args = if ($tokens.Count -gt 1) { @($tokens[1..($tokens.Count - 1)]) } else { @() }
+    return @{ FilePath = $tokens[0]; ArgumentList = $args }
+}
+
+function Resolve-ServiceCommand {
+    param($Svc, [string]$RootDir)
+    $rt = $Svc.RuntimeDef
+    if (-not $rt -or -not $rt.Command) {
+        throw "Service '$($Svc.Name)' has no runtime command."
+    }
+
+    $workDir = if ($Svc.Repo) { Resolve-RepoPath -Repo $Svc.Repo -RootDir $RootDir } else { $RootDir }
+    $baseVars = Build-ServiceTemplateVars -Svc $Svc -RootDir $RootDir
+    $artifact = ""
+
+    if ($rt.ArtifactGlob) {
+        $expandedGlob = Expand-Template -Template $rt.ArtifactGlob -Vars $baseVars
+        $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
+        if (-not $artifact -and $Svc.BuilderDef) {
+            $ok = Invoke-ServiceBuildSync -Svc $Svc -RootDir $RootDir
+            if ($ok) {
+                $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
+            }
+        }
+        if (-not $artifact) {
+            throw "Artifact not found for $($Svc.Name) (glob: $expandedGlob in $workDir)"
+        }
+    }
+
+    $fullVars = Build-ServiceTemplateVars -Svc $Svc -RootDir $RootDir -Artifact $artifact
+    $cmdStr = Expand-Template -Template $rt.Command -Vars $fullVars
+    return @{ CommandLine = $cmdStr; WorkingDirectory = $workDir }
+}
+
 function Start-ServiceProcess {
-    param($Svc, [string]$MockJarPath, [string]$RootDir = "")
+    param($Svc, [string]$RootDir)
 
     $existingPid = Read-PidFromFile -PidFile $Svc.PidFile
     if ($existingPid) {
@@ -77,7 +129,6 @@ function Start-ServiceProcess {
         }
     }
 
-    # Check if an IDE or another process already owns the port
     $listeningPid = Get-ListeningPidByPort -Port $Svc.Port
     if ($listeningPid) {
         $hierarchy = Get-ProcessHierarchyMap
@@ -92,61 +143,9 @@ function Start-ServiceProcess {
         }
     }
 
-    $exePath = "java"
-    $argList = @()
+    $resolved = Resolve-ServiceCommand -Svc $Svc -RootDir $RootDir
+    $parsed = Split-CommandLine -CommandLine $resolved.CommandLine
 
-    if ($Svc.PSObject.Properties["Command"] -and $Svc.Command) {
-        $exePath = "cmd.exe"
-        $argList = @("/c", $Svc.Command)
-    } else {
-        $realJar = $null
-        if ($RootDir -and (Get-Command Resolve-RepoPath -ErrorAction SilentlyContinue)) {
-            $repoPath = Resolve-RepoPath -GitRepo $Svc.GitRepo -RootDir $RootDir
-            if ($repoPath -and (Test-Path $repoPath)) {
-                $realJar = Find-ServiceBootJar -RepoPath $repoPath -GradleSubproj $Svc.GradleSubproj
-                if (-not $realJar) {
-                    $ok = Invoke-GradleBuildSync -Svc $Svc -RootDir $RootDir
-                    if ($ok) { $realJar = Find-ServiceBootJar -RepoPath $repoPath -GradleSubproj $Svc.GradleSubproj }
-                }
-            }
-        }
-
-        if ($realJar) {
-            if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
-            $argList += "-Dserver.port=$($Svc.Port)"
-            $argList += "-Dspring.profiles.active=local"
-            $argList += "-jar"
-            $argList += $realJar
-        } elseif (($Svc.Type -eq "wiremock") -and $RootDir -and (Test-Path (Join-Path $RootDir "wiremock"))) {
-            $wmJar = Get-ChildItem -Path (Join-Path $RootDir "wiremock") -Filter "wiremock*.jar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($wmJar) {
-                if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
-                $argList += "-jar"
-                $argList += $wmJar.FullName
-                $argList += "--port"
-                $argList += "$($Svc.Port)"
-                $argList += "--root-dir"
-                $argList += (Join-Path $RootDir "wiremock")
-            }
-        }
-
-        if ($argList.Count -eq 0) {
-            if (-not (Test-Path $MockJarPath)) {
-                throw "No bootJar or Mock JAR found at $MockJarPath."
-            }
-            if ($Svc.JvmArgs) { $argList += ($Svc.JvmArgs -split '\s+' | Where-Object { $_ -ne "" }) }
-            $argList += "-Dservice.name=$($Svc.Name)"
-            $argList += "-Dservice.type=$($Svc.Type)"
-            $argList += "-Dserver.port=$($Svc.Port)"
-            $argList += "-Dhealth.path=$($Svc.HealthPath)"
-            $argList += "-Dstartup.delay.ms=$($Svc.StartupDelayMs)"
-            $argList += "-Dlog.format=$($Svc.LogFormat)"
-            $argList += "-jar"
-            $argList += $MockJarPath
-        }
-    }
-
-    # Inject .env / service env vars temporarily so Start-Process child inherits them (PS 5.1+ compatible)
     $envToInject = @{}
     if ($RootDir -and (Get-Command Resolve-ServiceEnvironment -ErrorAction SilentlyContinue)) {
         $envToInject = Resolve-ServiceEnvironment -Svc $Svc -RootDir $RootDir
@@ -158,12 +157,18 @@ function Start-ServiceProcess {
     }
 
     try {
-        $proc = Start-Process -FilePath $exePath `
-            -ArgumentList $argList `
-            -RedirectStandardOutput $Svc.LogFile `
-            -RedirectStandardError $Svc.ErrFile `
-            -WindowStyle Hidden `
-            -PassThru
+        $startParams = @{
+            FilePath               = $parsed.FilePath
+            WorkingDirectory       = $resolved.WorkingDirectory
+            RedirectStandardOutput = $Svc.LogFile
+            RedirectStandardError  = $Svc.ErrFile
+            WindowStyle            = "Hidden"
+            PassThru               = $true
+        }
+        if ($parsed.ArgumentList.Count -gt 0) {
+            $startParams["ArgumentList"] = $parsed.ArgumentList
+        }
+        $proc = Start-Process @startParams
     } finally {
         foreach ($k in $savedEnv.Keys) {
             [System.Environment]::SetEnvironmentVariable($k, $savedEnv[$k], "Process")
@@ -185,9 +190,7 @@ function Start-ServiceProcess {
 
 function Stop-ServiceProcess {
     param($Svc)
-    if ($Svc.ExternalIde) {
-        return
-    }
+    if ($Svc.ExternalIde) { return }
     $Svc.Stopping = $true
     $Svc.HealthTask = $null
     if (Test-Path $Svc.PidFile) {

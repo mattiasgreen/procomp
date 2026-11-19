@@ -1,16 +1,25 @@
 Set-StrictMode -Version Latest
 
 function Invoke-ProcompDoctor {
-    param($Services, [string]$RootDir, [string]$MockJarPath)
+    param($Config, [string]$RootDir)
 
     $checks = @()
 
-    # 1. Java
-    $javaCmd = Get-Command "java" -ErrorAction SilentlyContinue
-    if ($javaCmd) {
-        $checks += [PSCustomObject]@{ Check = "java"; Status = "OK"; Detail = $javaCmd.Source }
-    } else {
-        $checks += [PSCustomObject]@{ Check = "java"; Status = "FAIL"; Detail = "java not found on PATH" }
+    # 1. Check unique runtime executables on PATH
+    $checkedExes = @{}
+    foreach ($rtName in $Config.Runtimes.Keys) {
+        $rt = $Config.Runtimes[$rtName]
+        $parsed = Split-CommandLine -CommandLine $rt.Command
+        $exe = $parsed.FilePath
+        if ($checkedExes.ContainsKey($exe)) { continue }
+        $checkedExes[$exe] = $true
+
+        $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "OK"; Detail = $cmd.Source }
+        } else {
+            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "FAIL"; Detail = "'$exe' not found on PATH" }
+        }
     }
 
     # 2. Git
@@ -29,40 +38,38 @@ function Invoke-ProcompDoctor {
         $checks += [PSCustomObject]@{ Check = ".env"; Status = "INFO"; Detail = "No global .env file (optional)" }
     }
 
-    # 4. Per-service repo / JAR / port checks
+    # 4. Per-service checks
     $hierarchy = $null
-    foreach ($svc in $Services) {
+    foreach ($svc in $Config.Services) {
         $portPid = Get-ListeningPidByPort -Port $svc.Port
         $portNote = "port $($svc.Port) free"
-        $portStatus = "OK"
+        $status = "OK"
         if ($portPid) {
             if ($null -eq $hierarchy) { $hierarchy = Get-ProcessHierarchyMap }
             if (Test-IsIdeDescendant -ProcessId $portPid -HierarchyMap $hierarchy) {
                 $portNote = "port $($svc.Port) IDE-UP (PID $portPid)"
             } else {
                 $portNote = "port $($svc.Port) IN USE (PID $portPid)"
-                $portStatus = "WARN"
+                $status = "WARN"
             }
         }
 
-        $repoNote = "mock-jar"
-        if ($svc.GitRepo) {
-            $rp = Resolve-RepoPath -GitRepo $svc.GitRepo -RootDir $RootDir
+        $repoNote = "workspace"
+        if ($svc.Repo) {
+            $rp = Resolve-RepoPath -Repo $svc.Repo -RootDir $RootDir
             $st = Get-GitRepoStatus -RepoPath $rp
             if ($st.Exists) {
                 $repoNote = "git:$($st.Summary)"
-            } elseif (Test-Path $MockJarPath) {
-                $repoNote = "repo missing (using mock-jar)"
             } else {
-                $repoNote = "repo missing & no mock-jar"
-                $portStatus = "FAIL"
+                $repoNote = "repo missing ($($svc.Repo))"
+                $status = "WARN"
             }
         }
 
         $checks += [PSCustomObject]@{
             Check  = "svc:$($svc.Name)"
-            Status = $portStatus
-            Detail = "$portNote | $repoNote | route=$($svc.RoutingMode)"
+            Status = $status
+            Detail = "rt=$($svc.Runtime) | $portNote | $repoNote | route=$($svc.RoutingMode)"
         }
     }
 

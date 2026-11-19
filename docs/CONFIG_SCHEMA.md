@@ -1,106 +1,105 @@
-# `procomp` Configuration Schema
+# `procomp` Configuration Schema (`procomp.json`)
 
-`procomp` is configured declaratively via `services.json` in the workspace root, with runtime state persisted under `.stack_state/`.
-
----
-
-## 1. `services.json`
-
-`services.json` is a JSON array of service objects. Startup order is not significant; enabled services boot in parallel.
-
-### Service Object Fields
-
-| Field | Type | Required | Default (by `type`) | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `name` | `string` | Yes | — | Unique service identifier (used for logs, PIDs, and WireMock mapping IDs). |
-| `type` | `string` | No | `"spring-boot"` | One of `"spring-boot"`, `"activemq"`, `"wiremock"`, `"exec"`. |
-| `localport` | `integer` | Yes | — | Local TCP port the service listens on. |
-| `gitrepo` | `string` | No | `null` | Path to the Git repository (relative to `services.json` or absolute). Multiple services may share one monorepo. |
-| `gradlesubproject` | `string` | No | `null` | Gradle subproject path (e.g. `":services:order-service"`), or `null` for single-project repos. |
-| `command` | `string` | No | `null` | Custom launch command for `"exec"` or standalone `"activemq"` binaries. |
-| `healthPath` | `string` | No | See Type Defaults | HTTP path polled for readiness (`2xx` = `HEALTHY`). |
-| `jvmArgs` | `string` | No | See Type Defaults | JVM flags (e.g. `"-Xmx384m -Dspring.profiles.active=local"`). `-Xmx` is parsed for `MAXHEAP`. |
-| `proxyPath` | `string` | No | `"/<name>"` | Context prefix exposed on WireMock (`localhost:8080<proxyPath>/...`). |
-| `remoteUrl` | `string` | No | `null` | Upstream URL used by WireMock when the service's routing mode is `REMOTE`. |
-| `logFormat` | `string` | No | `"text"` | Hint for log viewer (`"text"` or `"json"`). JSON auto-detection still applies. |
-| `logMapping` | `object` | No | `null` | Optional JSON field-name overrides (`timestamp`, `level`, `logger`, `message`, `traceId`, `stack_trace`). |
-| `env` | `object` | No | `{}` | Non-secret environment variables injected at process launch (overridden by `.env.<name>`). |
-| `enabled` | `boolean` | No | `true` | Whether `up` / TUI launch starts this service automatically. |
+`procomp` is completely language- and framework-agnostic with **zero built-in presets**. Every build tool (`builders`), runtime (`runtimes`), gateway, routing profile, and service is declared transparently in a single **`procomp.json`**.
 
 ---
 
-### Type Defaults
-
-| `type` | Default `healthPath` | Default `jvmArgs` | Execution Model |
-| :--- | :--- | :--- | :--- |
-| `"spring-boot"` | `"/actuator/health"` | `"-Xmx384m"` | `java <jvmArgs> -Dserver.port=<localport> -jar <bootJar>` |
-| `"activemq"` | `"/api/jolokia"` | `"-Xmx256m"` | `command` if set, otherwise `java -jar` |
-| `"wiremock"` | `"/__admin/health"` | `"-Xmx256m"` | `java <jvmArgs> -jar <wiremockJar> --port <localport>` |
-| `"exec"` | `"/health"` | `""` | Executes `command` directly |
-
----
-
-### Example `services.json`
-
-```json
-[
-  {
-    "name": "wiremock-gateway",
-    "type": "wiremock",
-    "localport": 8080,
-    "healthPath": "/__admin/health",
-    "jvmArgs": "-Xmx256m",
-    "enabled": true
-  },
-  {
-    "name": "activemq-broker",
-    "type": "activemq",
-    "localport": 8161,
-    "command": "C:\\tools\\apache-activemq\\bin\\activemq.bat start",
-    "healthPath": "/api/jolokia",
-    "remoteUrl": "https://shared-dev.mycorp/activemq",
-    "enabled": true
-  },
-  {
-    "name": "order-service",
-    "type": "spring-boot",
-    "localport": 8082,
-    "gitrepo": "../commerce-backend",
-    "gradlesubproject": ":services:order-service",
-    "healthPath": "/actuator/health",
-    "jvmArgs": "-Xmx384m",
-    "proxyPath": "/orders",
-    "remoteUrl": "https://shared-dev.mycorp/orders",
-    "logFormat": "json",
-    "enabled": true
-  }
-]
-```
-
----
-
-## 2. `profiles.json` (Optional Scenario Presets)
-
-Define named routing presets (`.\procomp.cmd -Profile checkout`) that specify which services run `LOCAL` vs. `REMOTE`:
+## 1. Top-Level Structure
 
 ```json
 {
-  "checkout": {
-    "local": ["activemq-broker", "order-service", "payment-service"],
-    "remote": ["auth-service", "inventory-service"]
-  }
+  "builders": { ... },
+  "runtimes": { ... },
+  "gateway":  { ... },
+  "profiles": { ... },
+  "services": [ ... ]
 }
 ```
 
 ---
 
-## 3. Environment & Secrets (`.env`)
+## 2. Template Variables (`{{var}}`)
 
-Untracked `.env` (global) and `.env.<service>` (per-service) files in the workspace root are loaded at process launch (precedence: `.env` < `services.json` `env` < `.env.<service>`).
+Both `builders.<name>.command` and `runtimes.<name>.command` (as well as `artifactGlob`) support `{{var}}` interpolation:
+
+| Variable | Description |
+| :--- | :--- |
+| `{{name}}` | Service `name` |
+| `{{port}}` | Service `port` |
+| `{{repo}}` | Resolved path to `repo` |
+| `{{module}}` | Raw `module` string (e.g. `:services:order-service` or `billing-api`) |
+| `{{modulePath}}` | Filesystem path derived from `module` (`:` converted to `\`) |
+| `{{artifact}}` | Newest file matching `runtimes.<name>.artifactGlob` (excluding `artifactExclude`) |
+| `{{<custom>}}` | Any key defined in `service.vars` (e.g. `{{jvmArgs}}`, `{{profile}}`) |
+
+---
+
+## 3. Section Reference
+
+### `builders` *(optional)*
+Map of named build aliases to command templates executed inside the service's `repo`:
+```json
+"builders": {
+  "gradle-boot":   { "command": "gradlew.bat {{module}}:bootJar -q" },
+  "maven-quarkus": { "command": "mvnw.cmd -pl {{module}} package -DskipTests -q" },
+  "npm":           { "command": "npm run build" }
+}
+```
+
+### `runtimes` *(required)*
+Map of named runtime aliases:
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `command` | `string` | Yes | Command template to launch the process. |
+| `healthPath` | `string` | No | Default HTTP readiness path (`2xx` = `HEALTHY`). |
+| `artifactGlob` | `string` | No | Glob pattern (relative to `repo` or workspace) used to resolve `{{artifact}}`. |
+| `artifactExclude` | `string` | No | Wildcard pattern excluded from `artifactGlob` (e.g. `"*-plain.jar"`). |
+| `memoryArgPattern` | `string` | No | Optional regex to extract a memory limit for the `LIMIT` column (e.g. `"-Xmx(\\d+[kmgKMG]?)"`). |
+
+### `gateway` *(optional)*
+WireMock admin bridge configuration for `LOCAL` ↔ `REMOTE` routing:
+```json
+"gateway": {
+  "type": "wiremock",
+  "adminUrl": "http://127.0.0.1:8080",
+  "serviceName": "wiremock-gateway"
+}
+```
+
+### `profiles` *(optional)*
+Named routing presets activated via `.\procomp.cmd -Profile <name>`:
+```json
+"profiles": {
+  "checkout": {
+    "local":  ["order-service", "billing-quarkus"],
+    "remote": ["frontend-bff"]
+  }
+}
+```
+
+### `services` *(required)*
+Array of application definitions:
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `name` | `string` | Yes | — | Unique service name. |
+| `runtime` | `string` | Yes | — | Key in top-level `runtimes`. |
+| `builder` | `string` | No | `null` | Key in top-level `builders`. |
+| `port` | `integer` | Yes | — | Local TCP port the service listens on. |
+| `repo` | `string` | No | `null` | Path to the Git repository (relative to `procomp.json` or absolute). |
+| `module` | `string` | No | `""` | Subproject / module path within `repo`. |
+| `vars` | `object` | No | `{}` | Custom template variables (e.g. `{"jvmArgs": "-Xmx384m"}`). |
+| `healthPath` | `string` | No | From runtime | Overrides runtime `healthPath`. |
+| `proxyPath` | `string` | No | `"/<name>"` | Context prefix on the gateway (`localhost:8080<proxyPath>/...`). |
+| `remoteUrl` | `string` | No | `null` | Upstream URL used by the gateway when routing mode is `REMOTE`. |
+| `logFormat` | `string` | No | `"text"` | Display hint (`"text"` or `"json"`). |
+| `logMapping` | `object` | No | `{}` | Custom JSON log field overrides. |
+| `env` | `object` | No | `{}` | Inline environment variables (precedence: `.env` < `env` < `.env.<name>`). |
+| `enabled` | `boolean` | No | `true` | Whether `up` / TUI launch starts this service automatically. |
 
 ---
 
 ## 4. Runtime State (`.stack_state/`)
-
-* **`.stack_state/<name>.pid`**: Stores the Windows `PID` of processes launched by `procomp`, enabling detach (`d`), re-attach, and clean `taskkill /F /T` teardown.
-* **`.stack_state/routing.json`**: Persists each service's active WireMock routing mode (`"LOCAL"` or `"REMOTE"`) across TUI restarts.
+* **`.stack_state/<name>.pid`**: Windows PID of `procomp`-managed processes.
+* **`.stack_state/routing.json`**: Persisted `LOCAL` / `REMOTE` routing choices.
