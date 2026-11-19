@@ -63,7 +63,9 @@ function Start-BackgroundMonitor {
         Set-ProcompActivityCallback -Callback {
             param($msg)
             $State.CurrentActivity = $msg
-            $State.ProcompLogEntries = @(Read-ProcompTraceEntries -TailCount 400)
+            if ($State.ActiveViewMode -eq "PROCOMP") {
+                $State.ProcompLogEntries = @(Read-ProcompTraceEntries -TailCount 400)
+            }
             $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
         }
 
@@ -136,6 +138,18 @@ function Start-BackgroundMonitor {
                                                 $lastErr = $_.Exception.Message
                                                 Write-ProcompTraceLog -Category "START-ERR" -ServiceName $svc.Name -Message $lastErr
                                             }
+                                            $p = $svc.CachedProc
+                                            $State.ServiceMetrics[$svc.Name] = @{
+                                                PidStr       = if ($p) { [string]$p.Id } else { "-" }
+                                                StatusText   = $svc.StatusText
+                                                RamUsed      = (Format-RamMb -Proc $p)
+                                                Uptime       = (Format-Uptime -Proc $p)
+                                                ExternalIde  = $svc.ExternalIde
+                                                PortConflict = $svc.PortConflict
+                                                GitSummary   = $svc.GitSummary
+                                                Healthy      = $svc.Healthy
+                                            }
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                         }
                                     }
                                     if ($gwAdminUrl -and ($externalGwReused -or (-not $gwSvcName))) {
@@ -360,14 +374,29 @@ function Start-BackgroundMonitor {
                         $State.CurrentActivity = ""
                     }
 
+                    Refresh-ProcessSnapshot -Services $bgServices -DetectIde
+                    Poll-AsyncHealth -Services $bgServices -HttpClient $httpClient
+
                     $now = Get-Date
                     if (($now - $lastGit).TotalMinutes -ge 30) {
+                        $State.ServiceMetrics.Keys | Out-Null
+                        foreach ($svc in $bgServices) {
+                            $proc = $svc.CachedProc
+                            $State.ServiceMetrics[$svc.Name] = @{
+                                PidStr       = if ($proc) { [string]$proc.Id } else { "-" }
+                                StatusText   = $svc.StatusText
+                                RamUsed      = (Format-RamMb -Proc $proc)
+                                Uptime       = (Format-Uptime -Proc $proc)
+                                ExternalIde  = $svc.ExternalIde
+                                PortConflict = $svc.PortConflict
+                                GitSummary   = $svc.GitSummary
+                                Healthy      = $svc.Healthy
+                            }
+                        }
+                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                         Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
                         $lastGit = $now
                     }
-
-                    Refresh-ProcessSnapshot -Services $bgServices -DetectIde
-                    Poll-AsyncHealth -Services $bgServices -HttpClient $httpClient
 
                     $rawMode = [bool]$State.RawMode
                     foreach ($svc in $bgServices) {

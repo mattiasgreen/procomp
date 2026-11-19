@@ -74,6 +74,15 @@ function Test-WireMockReachable {
     param([string]$WireMockBaseUrl)
     if (-not $WireMockBaseUrl) { return $false }
     try {
+        $uri = [Uri]::new($WireMockBaseUrl)
+        if ($uri.Host -in @("127.0.0.1", "localhost", "::1")) {
+            $listening = $false
+            $props = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+            foreach ($ep in $props.GetActiveTcpListeners()) {
+                if ($ep.Port -eq $uri.Port) { $listening = $true; break }
+            }
+            if (-not $listening) { return $false }
+        }
         $null = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings?limit=1" -Method Get -TimeoutSec 1
         return $true
     } catch {
