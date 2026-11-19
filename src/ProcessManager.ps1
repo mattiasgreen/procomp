@@ -114,17 +114,21 @@ function Resolve-ServiceCommand {
         $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
         if (-not $artifact -and $Svc.BuilderDef) {
             if ($AsyncBuild) {
+                Write-ProcompTraceLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "Artifact missing ($expandedGlob); starting async build"
                 Start-ServiceBuildAsync -Svc $Svc -RootDir $RootDir
                 return $null
             }
+            Write-ProcompTraceLog -Category "BUILD" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "Artifact missing ($expandedGlob); starting sync build"
             $ok = Invoke-ServiceBuildSync -Svc $Svc -RootDir $RootDir
             if ($ok) {
                 $artifact = Resolve-Artifact -BaseDir $workDir -Glob $expandedGlob -Exclude $rt.ArtifactExclude
             }
         }
         if (-not $artifact) {
+            Write-ProcompTraceLog -Category "ARTIFACT" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "Artifact not found (glob: $expandedGlob)"
             throw "Artifact not found for $($Svc.Name) (glob: $expandedGlob in $workDir)"
         }
+        Write-ProcompTraceLog -Category "ARTIFACT" -ServiceName $Svc.Name -Message "Resolved artifact='$artifact'"
     }
 
     $fullVars = Build-ServiceTemplateVars -Svc $Svc -RootDir $RootDir -Artifact $artifact
@@ -139,6 +143,7 @@ function Start-ServiceProcess {
     if ($existingPid) {
         $existing = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
         if ($existing -and -not $existing.HasExited) {
+            Write-ProcompTraceLog -Category "EXEC" -ServiceName $Svc.Name -Message "Already running PID=$($existing.Id)"
             $Svc.Managed = $true
             $Svc.CachedPid = $existing.Id
             $Svc.CachedProc = $existing
@@ -150,10 +155,12 @@ function Start-ServiceProcess {
     if ($listeningPid) {
         $hierarchy = Get-ProcessHierarchyMap
         if (Test-IsIdeDescendant -ProcessId $listeningPid -HierarchyMap $hierarchy) {
+            Write-ProcompTraceLog -Category "IDE" -ServiceName $Svc.Name -Message "Port $($Svc.Port) owned by IDE descendant PID=$listeningPid -> IDE-UP"
             $Svc.ExternalIde = $true
             $Svc.StatusText = "IDE-UP"
             return
         } else {
+            Write-ProcompTraceLog -Category "PORT" -ServiceName $Svc.Name -Message "Port $($Svc.Port) conflict with PID=$listeningPid -> PORT-CONFLICT"
             $Svc.PortConflict = $true
             $Svc.StatusText = "PORT-CONFLICT"
             throw "Port $($Svc.Port) for $($Svc.Name) is already in use by PID $listeningPid."

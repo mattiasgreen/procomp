@@ -232,27 +232,46 @@ Describe 'procomp Unit Tests' {
             Assert-Match $dirErr "is a directory, not a file"
         }
 
-        It 'logs executed commands to procomp-debug.log when Set-ProcompDebugLogPath is active' {
+        It 'logs executed commands to procomp-debug.log and full trace to procomp-trace.log' {
             $dbgLog = Join-Path $TestDrive "procomp-debug.log"
+            $trcLog = Join-Path $TestDrive "procomp-trace.log"
             $prevDbg = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
+            $prevTrc = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")
             try {
                 Set-ProcompDebugLogPath -Path $dbgLog
+                Set-ProcompTraceLogPath -Path $trcLog
                 [void](Invoke-GitNonInteractive -GitArgs @("--version"))
 
                 $fakeSvc = [PSCustomObject]@{
                     Name = "dbg-svc"; Repo = $TestDrive; Module = ""
                     BuilderDef = [PSCustomObject]@{ Name = "b"; Command = "echo building" }
-                    Vars = @{}; HealthPath = ""; LogFormat = "text"; Port = 9999; Runtime = "java"
+                    Vars = @{}; Env = @{ SECRET_TOKEN = "super-secret-value" }
+                    HealthPath = ""; LogFormat = "text"; Port = 9999; Runtime = "java"
                     SwaggerUri = ""; ServiceRepositoryUrl = ""; ReposRoot = ""
+                    Stopping = $false; PortConflict = $false; CachedProc = $null; CachedPid = $null
+                    HealthTask = $null; RoutingMode = "LOCAL"; Enabled = $false; StatusText = "STOPPED"; Healthy = $false
                 }
+                [void](Resolve-ServiceEnvironment -Svc $fakeSvc -RootDir $TestDrive)
                 [void](Invoke-ServiceBuildSync -Svc $fakeSvc -RootDir $TestDrive)
+                Poll-AsyncHealth -Services @($fakeSvc) -HttpClient $null
 
                 Assert-Eq (Test-Path $dbgLog) $true
+                Assert-Eq (Test-Path $trcLog) $true
                 $dbgContent = Get-Content -Path $dbgLog -Raw
+                $trcContent = Get-Content -Path $trcLog -Raw
+
                 Assert-Match $dbgContent "\[GIT\].*git --version"
                 Assert-Match $dbgContent "\[BUILD\] svc=dbg-svc.*cmd\.exe /c echo building"
+
+                # Trace log gets both commands and detailed trace events (and never secret values)
+                Assert-Match $trcContent "\[GIT\].*git --version"
+                Assert-Match $trcContent "\[ENV\] svc=dbg-svc.*SECRET_TOKEN"
+                Assert-Eq ($trcContent.Contains("super-secret-value")) $false
+                Assert-Match $trcContent "\[BUILD\] svc=dbg-svc.*Sync build exited with code=0"
+                Assert-Match $trcContent "\[STATE\] svc=dbg-svc.*STOPPED -> DISABLED"
             } finally {
                 Set-ProcompDebugLogPath -Path $prevDbg
+                Set-ProcompTraceLogPath -Path $prevTrc
             }
         }
     }

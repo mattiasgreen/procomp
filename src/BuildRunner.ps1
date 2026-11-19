@@ -22,7 +22,12 @@ function Invoke-GitNonInteractive {
         }
         Write-ProcompDebugLog -Category "GIT" -Message ("git " + ($GitArgs -join " "))
         $out = @(& git @GitArgs 2>&1)
-        return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join " ").Trim() }
+        $exitCode = $LASTEXITCODE
+        $outText = ($out -join " ").Trim()
+        if ($exitCode -ne 0) {
+            Write-ProcompTraceLog -Category "GIT" -Message "git exit=$exitCode output='$outText'"
+        }
+        return [PSCustomObject]@{ ExitCode = $exitCode; Output = $outText }
     } finally {
         [System.Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", $prevPrompt, "Process")
         [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", $prevSsh, "Process")
@@ -248,7 +253,9 @@ function Invoke-ServiceBuildSync {
         Push-Location $workDir
         Write-ProcompDebugLog -Category "BUILD" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "cmd.exe /c $cmdLine"
         & cmd.exe /c $cmdLine
-        return ($LASTEXITCODE -eq 0)
+        $bExit = $LASTEXITCODE
+        Write-ProcompTraceLog -Category "BUILD" -ServiceName $Svc.Name -Message "Sync build exited with code=$bExit"
+        return ($bExit -eq 0)
     } finally {
         Pop-Location
         $ErrorActionPreference = $prevEap

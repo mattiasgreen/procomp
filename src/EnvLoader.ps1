@@ -40,5 +40,9 @@ function Resolve-ServiceEnvironment {
     $svcEnv = Read-DotEnvFile -Path (Join-Path $RootDir ".env.$($Svc.Name)")
     foreach ($k in $svcEnv.Keys) { $merged[$k] = $svcEnv[$k] }
 
+    if ($merged.Count -gt 0 -and (Get-Command Write-ProcompTraceLog -ErrorAction SilentlyContinue)) {
+        $keysStr = (@($merged.Keys) | Sort-Object) -join ","
+        Write-ProcompTraceLog -Category "ENV" -ServiceName $Svc.Name -Message "Injecting $($merged.Count) env var(s): $keysStr"
+    }
     return $merged
 }

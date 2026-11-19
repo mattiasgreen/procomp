@@ -57,6 +57,7 @@ function Start-BackgroundMonitor {
         try {
             $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir -ReposRootOverride $State.ReposRoot
             $bgServices = @($cfg.Services)
+            Write-ProcompTraceLog -Category "BG" -Message "BackgroundMonitor started ($($bgServices.Count) service(s))"
             $lastGit = [datetime]::MinValue
             $lastClearEpoch = 0
 
@@ -179,6 +180,7 @@ function Start-BackgroundMonitor {
                     $State.RefreshNow = $false
                 } catch {
                     $State.LastError = $_.Exception.Message
+                    Write-ProcompTraceLog -Category "BG-ERROR" -Message "$($_.Exception.Message) ($($_.InvocationInfo.PositionMessage -replace '[\r\n]+', ' '))"
                 }
 
                 # Sleep in short slices so RefreshNow or StopRequested wakes up quickly

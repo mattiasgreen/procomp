@@ -54,13 +54,17 @@ function Set-ServiceWireMockRoute {
     try {
         Write-ProcompDebugLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "PUT $WireMockBaseUrl/__admin/mappings/$id -> $($Svc.RoutingMode)"
         Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings/$id" -Method Put -Body $json -ContentType "application/json" -TimeoutSec 2 | Out-Null
+        Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "PUT mapping ok ($($Svc.ProxyPath) -> $($mapping.response.proxyBaseUrl))"
         return $true
     } catch {
+        Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "PUT failed ($($_.Exception.Message)); falling back to POST"
         try {
             Write-ProcompDebugLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "POST $WireMockBaseUrl/__admin/mappings -> $($Svc.RoutingMode)"
             Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Post -Body $json -ContentType "application/json" -TimeoutSec 2 | Out-Null
+            Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "POST mapping ok ($($Svc.ProxyPath) -> $($mapping.response.proxyBaseUrl))"
             return $true
         } catch {
+            Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "POST mapping failed: $($_.Exception.Message)"
             return $false
         }
     }
@@ -85,8 +89,10 @@ function Get-WireMockDrift {
     if (-not $WireMockBaseUrl) { return $report }
 
     try {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "GET $WireMockBaseUrl/__admin/mappings (drift check)"
         $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Get -TimeoutSec 2
     } catch {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "GET mappings failed: $($_.Exception.Message)"
         return @([PSCustomObject]@{ Service = "gateway"; Status = "UNREACHABLE"; Detail = "Cannot reach $WireMockBaseUrl/__admin/mappings" })
     }
 

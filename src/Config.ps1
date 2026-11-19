@@ -5,17 +5,22 @@ function Set-ProcompDebugLogPath {
     [System.Environment]::SetEnvironmentVariable("PROCOMP_DEBUG_LOG", $Path, "Process")
 }
 
-function Write-ProcompDebugLog {
+function Set-ProcompTraceLogPath {
+    param([string]$Path)
+    [System.Environment]::SetEnvironmentVariable("PROCOMP_TRACE_LOG", $Path, "Process")
+}
+
+function Write-ProcompLogLine {
     param(
-        [Parameter(Mandatory = $true)][string]$Category,
-        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$LogPath,
+        [string]$Category,
+        [string]$Message,
         [string]$WorkingDirectory = "",
         [string]$ServiceName = ""
     )
-    $logPath = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
-    if (-not $logPath) { return }
+    if (-not $LogPath) { return }
     try {
-        $dir = Split-Path -Parent $logPath
+        $dir = Split-Path -Parent $LogPath
         if ($dir -and (-not (Test-Path -LiteralPath $dir))) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
@@ -28,12 +33,42 @@ function Write-ProcompDebugLog {
         $acquired = $false
         try {
             $acquired = $mtx.WaitOne(2000)
-            [System.IO.File]::AppendAllText($logPath, $line, (New-Object System.Text.UTF8Encoding($false)))
+            [System.IO.File]::AppendAllText($LogPath, $line, (New-Object System.Text.UTF8Encoding($false)))
         } finally {
             if ($acquired) { $mtx.ReleaseMutex() }
             $mtx.Dispose()
         }
     } catch { }
+}
+
+function Write-ProcompDebugLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$WorkingDirectory = "",
+        [string]$ServiceName = ""
+    )
+    $dbgPath = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
+    if ($dbgPath) {
+        Write-ProcompLogLine -LogPath $dbgPath -Category $Category -Message $Message -WorkingDirectory $WorkingDirectory -ServiceName $ServiceName
+    }
+    $tracePath = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")
+    if ($tracePath -and ($tracePath -ne $dbgPath)) {
+        Write-ProcompLogLine -LogPath $tracePath -Category $Category -Message $Message -WorkingDirectory $WorkingDirectory -ServiceName $ServiceName
+    }
+}
+
+function Write-ProcompTraceLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$WorkingDirectory = "",
+        [string]$ServiceName = ""
+    )
+    $tracePath = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")
+    if ($tracePath) {
+        Write-ProcompLogLine -LogPath $tracePath -Category $Category -Message $Message -WorkingDirectory $WorkingDirectory -ServiceName $ServiceName
+    }
 }
 
 function Resolve-JavaTool {
@@ -417,6 +452,9 @@ function Load-ProcompConfig {
         }
     }
 
+    $gwUrl = if ($gateway) { $gateway.AdminUrl } else { "" }
+    Write-ProcompTraceLog -Category "CONFIG" -Message "Loaded config='$resolvedConfigPath' appsFile='$afPath' reposRoot='$reposRoot' services=$($services.Count) gateway='$gwUrl'"
+
     return [PSCustomObject]@{
         AppsFile  = $afPath
         ReposRoot = $reposRoot
@@ -504,6 +542,7 @@ function Apply-RoutingProfile {
         $rMap[$svc.Name] = $svc.RoutingMode
     }
     Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
+    Write-ProcompTraceLog -Category "PROFILE" -Message "Applied profile='$ProfileName' to $($Config.Services.Count) services -> '$RoutingFile'"
 }
 
 function Get-ServiceSwaggerUrl {

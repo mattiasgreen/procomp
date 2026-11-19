@@ -11,7 +11,8 @@ param(
     [string]$ReposRoot = "",
     [string]$Project = "",
     [string]$Service = "",
-    [string]$Profile = ""
+    [string]$Profile = "",
+    [switch]$NoTrace
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +22,7 @@ $RootDir     = $PSScriptRoot
 $BaseLogDir  = Join-Path $RootDir "logs"
 $CrashLog    = Join-Path $BaseLogDir "procomp-error.log"
 $DebugLog    = Join-Path $BaseLogDir "procomp-debug.log"
+$TraceLog    = Join-Path $BaseLogDir "procomp-trace.log"
 $script:LastResolvedAppsFile = ""
 
 New-Item -ItemType Directory -Force -Path $BaseLogDir | Out-Null
@@ -67,6 +69,9 @@ trap {
 . (Join-Path $RootDir "src\Tui.ps1")
 
 Set-ProcompDebugLogPath -Path $DebugLog
+if (-not $NoTrace -and ([System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE", "Process") -ne "0")) {
+    Set-ProcompTraceLogPath -Path $TraceLog
+}
 Write-ProcompDebugLog -Category "START" -WorkingDirectory (Get-Location).Path -Message "Action=$Action Config=$ConfigPath ReposRoot=$ReposRoot Project=$Project Service=$Service Profile=$Profile"
 
 $ProjectName = Resolve-ProjectName -ConfigPath $ConfigPath -ProjectOverride $Project
@@ -309,6 +314,7 @@ try {
         $vis = @(Get-VisibleServices)
         if ($script:selected -ge $vis.Count) { $script:selected = [Math]::Max(0, $vis.Count - 1) }
         $curSvc = $vis[$script:selected]
+        Write-ProcompTraceLog -Category "UI" -ServiceName $curSvc.Name -Message "action=$Cmd"
         switch ($Cmd) {
             "help" {
                 $script:showHelp = -not $script:showHelp
@@ -519,6 +525,7 @@ try {
                 if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
                     $exitCode = $svc.BuildProc.ExitCode
                     $svc.BuildProc = $null
+                    Write-ProcompTraceLog -Category "BUILD-DONE" -ServiceName $svc.Name -Message "exitCode=$exitCode"
                     if ($exitCode -eq 0) {
                         try {
                             $sharedState.StaleServices[$svc.Name] = $false
@@ -755,8 +762,10 @@ try {
             }
         }
         if ($tuiError) {
+            Write-ProcompTraceLog -Category "EXIT" -Message "detach=$detachOnExit error=$($tuiError.Exception.Message)"
             Write-ProcompCrashLog -ErrRecord $tuiError
         } else {
+            Write-ProcompTraceLog -Category "EXIT" -Message "detach=$detachOnExit ok"
             Write-Host "All services stopped."
         }
     }

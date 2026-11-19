@@ -13,18 +13,13 @@ function Poll-AsyncHealth {
     param($Services, $HttpClient)
     $now = Get-Date
     foreach ($svc in $Services) {
+        $prevStatus = $svc.StatusText
         if ($svc.Stopping) {
             $svc.StatusText = "STOPPING"
-            continue
-        }
-
-        if ($svc.PortConflict) {
+        } elseif ($svc.PortConflict) {
             $svc.StatusText = "PORT-CONFLICT"
             $svc.Healthy = $false
-            continue
-        }
-
-        if (-not $svc.CachedProc) {
+        } elseif (-not $svc.CachedProc) {
             if ($svc.HealthTask) { $svc.HealthTask = $null }
             if ($svc.CachedPid) {
                 $svc.StatusText = "CRASHED"
@@ -36,40 +31,43 @@ function Poll-AsyncHealth {
                 $svc.StatusText = if ($svc.Enabled) { "STOPPED" } else { "DISABLED" }
                 $svc.Healthy = $false
             }
-            continue
-        }
-
-        if ($svc.HealthTask -and $svc.HealthTask.IsCompleted) {
-            try {
-                if ($svc.HealthTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
-                    $resp = $svc.HealthTask.Result
-                    $code = [int]$resp.StatusCode
-                    $resp.Dispose()
-                    $svc.Healthy = ($code -ge 200 -and $code -lt 300)
-                } else {
+        } else {
+            if ($svc.HealthTask -and $svc.HealthTask.IsCompleted) {
+                try {
+                    if ($svc.HealthTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                        $resp = $svc.HealthTask.Result
+                        $code = [int]$resp.StatusCode
+                        $resp.Dispose()
+                        $svc.Healthy = ($code -ge 200 -and $code -lt 300)
+                    } else {
+                        $svc.Healthy = $false
+                    }
+                } catch {
                     $svc.Healthy = $false
                 }
-            } catch {
-                $svc.Healthy = $false
-            }
-            $svc.HealthTask = $null
-            $svc.LastHealthAt = $now
-        }
-
-        if ((-not $svc.HealthTask) -and (($now - $svc.LastHealthAt).TotalMilliseconds -ge 1200)) {
-            $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
-            try {
-                $svc.HealthTask = $HttpClient.GetAsync($url)
-            } catch {
-                $svc.Healthy = $false
+                $svc.HealthTask = $null
                 $svc.LastHealthAt = $now
             }
+
+            if ((-not $svc.HealthTask) -and (($now - $svc.LastHealthAt).TotalMilliseconds -ge 1200)) {
+                $url = "http://127.0.0.1:$($svc.Port)$($svc.HealthPath)"
+                try {
+                    $svc.HealthTask = $HttpClient.GetAsync($url)
+                } catch {
+                    $svc.Healthy = $false
+                    $svc.LastHealthAt = $now
+                }
+            }
+
+            if ($svc.ExternalIde) {
+                $svc.StatusText = if ($svc.Healthy) { "IDE-UP" } else { "IDE-INIT" }
+            } else {
+                $svc.StatusText = if ($svc.Healthy) { "HEALTHY" } else { "STARTING" }
+            }
         }
 
-        if ($svc.ExternalIde) {
-            $svc.StatusText = if ($svc.Healthy) { "IDE-UP" } else { "IDE-INIT" }
-        } else {
-            $svc.StatusText = if ($svc.Healthy) { "HEALTHY" } else { "STARTING" }
+        if ($svc.StatusText -ne $prevStatus -and (Get-Command Write-ProcompTraceLog -ErrorAction SilentlyContinue)) {
+            Write-ProcompTraceLog -Category "STATE" -ServiceName $svc.Name -Message "$prevStatus -> $($svc.StatusText)"
         }
     }
 }
