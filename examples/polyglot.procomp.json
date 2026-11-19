@@ -1,7 +1,7 @@
 {
   "reposRoot": "..",
   "builders": {
-    "gradle-boot":   { "command": "gradlew.bat {{subproject}}:bootJar -q" },
+    "gradle-boot":   { "command": "gradlew.bat {{subproject}}:assemble -q" },
     "maven-quarkus": { "command": "mvnw.cmd -pl {{subproject}} package -DskipTests -q" },
     "npm":           { "command": "npm run build" }
   },

@@ -8,6 +8,7 @@ param(
     [ValidateSet("tui", "up", "down", "status", "sync", "fetch", "clone", "build", "doctor")]
     [string]$Action = "tui",
     [string]$ConfigPath = (Join-Path $PSScriptRoot "procomp.json"),
+    [string]$ReposRoot = "",
     [string]$Profile = ""
 )
 
@@ -59,7 +60,7 @@ trap {
 . (Join-Path $RootDir "src\Tui.ps1")
 
 $HttpClient = New-HealthHttpClient -TimeoutMs 400
-$config = Load-ProcompConfig -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir
+$config = Load-ProcompConfig -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir -ReposRootOverride $ReposRoot
 if ($Profile) {
     Apply-RoutingProfile -Config $config -ProfileName $Profile -RoutingFile $RoutingFile
 }
@@ -213,7 +214,7 @@ $confirmQuit = $false
 $detachOnExit = $false
 $banner = "Starting enabled services..."
 
-$sharedState = New-SharedTuiState -RootDir $RootDir -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir
+$sharedState = New-SharedTuiState -RootDir $RootDir -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir -ReposRoot $ReposRoot
 foreach ($svc in $services) {
     $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
 }

@@ -5,7 +5,8 @@ function New-SharedTuiState {
         [string]$RootDir,
         [string]$ConfigPath,
         [string]$StateDir,
-        [string]$LogDir
+        [string]$LogDir,
+        [string]$ReposRoot = ""
     )
     return [Hashtable]::Synchronized(@{
         StopRequested      = $false
@@ -13,6 +14,7 @@ function New-SharedTuiState {
         ConfigPath         = $ConfigPath
         StateDir           = $StateDir
         LogDir             = $LogDir
+        ReposRoot          = $ReposRoot
         SnapshotVersion    = 0
         RawMode            = $false
         ClearLogEpoch      = 0
@@ -53,7 +55,7 @@ function Start-BackgroundMonitor {
 
         $httpClient = New-HealthHttpClient -TimeoutMs 400
         try {
-            $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir
+            $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir -ReposRootOverride $State.ReposRoot
             $bgServices = @($cfg.Services)
             $lastGit = [datetime]::MinValue
             $lastClearEpoch = 0

@@ -103,7 +103,8 @@ function Load-ProcompConfig {
     param(
         [string]$ConfigPath,
         [string]$StateDir,
-        [string]$LogDir
+        [string]$LogDir,
+        [string]$ReposRootOverride = ""
     )
     if (-not (Test-Path $ConfigPath)) {
         throw "Config file not found: $ConfigPath"
@@ -111,7 +112,13 @@ function Load-ProcompConfig {
 
     $doc = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
 
-    $reposRoot = if ($doc.PSObject.Properties["reposRoot"] -and $doc.reposRoot) { [string]$doc.reposRoot } else { "" }
+    $reposRoot = if ($ReposRootOverride) {
+        $ReposRootOverride
+    } elseif ($doc.PSObject.Properties["reposRoot"] -and $doc.reposRoot) {
+        [string]$doc.reposRoot
+    } else {
+        ""
+    }
 
     $builders = @{}
     if ($doc.PSObject.Properties["builders"] -and $doc.builders) {
@@ -209,7 +216,7 @@ function Load-ProcompConfig {
             $repo = [string]$item.repo
         } elseif ($repoUrl) {
             $repoDirName = Get-RepoNameFromUrl -RepoUrl $repoUrl
-            $repo = if ($reposRoot) { Join-Path $reposRoot $repoDirName } else { $repoDirName }
+            $repo = if ($reposRoot) { [System.IO.Path]::Combine($reposRoot, $repoDirName) } else { $repoDirName }
         }
 
         $tmplVars = @{ servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; type = $runtimeName }

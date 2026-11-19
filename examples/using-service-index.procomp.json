@@ -1,8 +1,7 @@
 {
-  "reposRoot": "C:\\dev\\repos",
   "appsFile": "./service-index.json",
   "defaults": {
-    "builder": "gradle-boot",
+    "builder": "gradle",
     "enabled": false,
     "logFormat": "json",
     "proxyPathTemplate": "/{{servicename}}",
@@ -12,7 +11,7 @@
     }
   },
   "builders": {
-    "gradle-boot": { "command": "gradlew.bat :{{subproject}}:bootJar -q" }
+    "gradle": { "command": "gradlew.bat :{{subproject}}:assemble -q" }
   },
   "runtimes": {
     "java": {

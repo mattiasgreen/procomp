@@ -43,7 +43,7 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $orders.MemLimit "384M"
             Assert-Eq $orders.SwaggerUri "swagger-ui/index.html"
             Assert-Eq $quarkus.HealthPath "/q/health/ready"
-            Assert-Eq (Expand-BuildCommand -Svc $orders -RootDir $script:RepoRoot) "gradlew.bat :services:order-service:bootJar -q"
+            Assert-Eq (Expand-BuildCommand -Svc $orders -RootDir $script:RepoRoot) "gradlew.bat :services:order-service:assemble -q"
             Assert-Eq (Expand-BuildCommand -Svc $quarkus -RootDir $script:RepoRoot) "mvnw.cmd -pl billing-api package -DskipTests -q"
         }
 
@@ -77,12 +77,14 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $s.Repo "..\service1"
         }
 
-        It 'loads external appsFile with defaults, remoteUrlTemplate, and wildcard remote profile' {
+        It 'loads external appsFile with defaults, remoteUrlTemplate, ReposRootOverride, and wildcard remote profile' {
             $exPath = Join-Path $script:RepoRoot "examples\using-service-index.procomp.json"
             $rFile = Join-Path $TestDrive "ex-routing.json"
-            $cfg = Load-ProcompConfig -ConfigPath $exPath -StateDir (Join-Path $TestDrive "exst") -LogDir (Join-Path $TestDrive "exlg")
+            $cfg = Load-ProcompConfig -ConfigPath $exPath -StateDir (Join-Path $TestDrive "exst") -LogDir (Join-Path $TestDrive "exlg") -ReposRootOverride "D:\my-repos"
             Assert-Eq $cfg.Services.Count 3
-            Assert-Eq $cfg.Services[0].Builder "gradle-boot"
+            Assert-Eq $cfg.Services[0].Builder "gradle"
+            Assert-Eq $cfg.Services[0].Repo "D:\my-repos\service1"
+            Assert-Eq (Expand-BuildCommand -Svc $cfg.Services[0] -RootDir $script:RepoRoot) "gradlew.bat :service1:assemble -q"
             Assert-Eq $cfg.Services[0].MemLimit "384M"
             Assert-Eq $cfg.Services[0].RemoteUrl "https://shared-dev.mycorp/service1"
             Assert-Eq $cfg.Services[1].RemoteUrl "https://shared-dev.mycorp/service2"
