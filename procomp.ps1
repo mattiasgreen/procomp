@@ -285,6 +285,9 @@ try {
     }
 
     # Queue startup in BackgroundWorker so the TUI event loop is responsive immediately
+    foreach ($s in $services) {
+        if ($s.Enabled) { $s.StatusText = "PROBING" }
+    }
     $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "Startup"; ServiceName = "" })
     $sharedState.RefreshNow = $true
     $banner = "Starting enabled services..."

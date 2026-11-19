@@ -139,6 +139,7 @@ function Resolve-ServiceCommand {
 function Start-ServiceProcess {
     param($Svc, [string]$RootDir, [switch]$AsyncBuild)
 
+    $Svc.StatusText = "PROBING"
     Report-ProcompActivity -ServiceName $Svc.Name -Message "Checking PID file for $($Svc.Name)..."
     $existingPid = Read-PidFromFile -PidFile $Svc.PidFile
     if ($existingPid) {
@@ -148,6 +149,7 @@ function Start-ServiceProcess {
             $Svc.Managed = $true
             $Svc.CachedPid = $existing.Id
             $Svc.CachedProc = $existing
+            $Svc.StatusText = if ($Svc.Healthy) { "HEALTHY" } else { "STARTING" }
             return
         }
     }

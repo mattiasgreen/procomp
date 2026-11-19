@@ -105,6 +105,15 @@ function Start-BackgroundMonitor {
                                 "Startup" {
                                     $buildingNames = @()
                                     $lastErr = ""
+                                    foreach ($s in $bgServices) {
+                                        if ($s.Enabled) {
+                                            $s.StatusText = "PROBING"
+                                            if ($State.ServiceMetrics.ContainsKey($s.Name)) {
+                                                $State.ServiceMetrics[$s.Name].StatusText = "PROBING"
+                                            }
+                                        }
+                                    }
+                                    $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                     $externalGwReused = $false
                                     if ($gwAdminUrl -and $gwSvcName -and (Test-WireMockReachable -WireMockBaseUrl $gwAdminUrl)) {
                                         $gwTarget = $bgServices | Where-Object { $_.Name -eq $gwSvcName } | Select-Object -First 1

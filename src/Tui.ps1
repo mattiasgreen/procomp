@@ -305,6 +305,7 @@ function Render-Tui {
                 "HEALTHY"       { $script:C_GREEN }
                 "IDE-UP"        { $script:C_CYAN }
                 "IDE-INIT"      { $script:C_YELLOW }
+                "PROBING"       { $script:C_YELLOW }
                 "STARTING"      { $script:C_YELLOW }
                 "BUILDING"      { $script:C_YELLOW }
                 "STOPPING"      { $script:C_YELLOW }
