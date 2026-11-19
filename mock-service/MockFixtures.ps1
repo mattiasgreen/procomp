@@ -38,6 +38,22 @@ function Ensure-MockServiceJar {
     return $mockJar
 }
 
+function Ensure-WireMockJar {
+    param([string]$RootDir)
+    $envJar = [System.Environment]::GetEnvironmentVariable("PROCOMP_WIREMOCK_JAR", "Process")
+    if ($envJar -and (Test-Path -LiteralPath $envJar)) { return $envJar }
+
+    $toolsDir = Join-Path $RootDir ".tools"
+    $wmJar = Join-Path $toolsDir "wiremock-standalone-3.10.0.jar"
+    if (Test-Path -LiteralPath $wmJar) { return $wmJar }
+
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $url = "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/3.10.0/wiremock-standalone-3.10.0.jar"
+    Invoke-WebRequest -Uri $url -OutFile $wmJar -UseBasicParsing
+    return $wmJar
+}
+
 function New-MockGitRepo {
     param(
         [string]$BaseDir,

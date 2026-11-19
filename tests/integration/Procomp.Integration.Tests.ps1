@@ -4,6 +4,7 @@ Describe 'Real-JVM Integration Tests' {
     BeforeAll {
         $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         . (Join-Path $script:RepoRoot "tests\TestHelpers.ps1")
+        . (Join-Path $script:RepoRoot "mock-service\MockFixtures.ps1")
         . (Join-Path $script:RepoRoot "src\Config.ps1")
         . (Join-Path $script:RepoRoot "src\EnvLoader.ps1")
         . (Join-Path $script:RepoRoot "src\BuildRunner.ps1")
@@ -237,5 +238,78 @@ Describe 'Real-JVM Integration Tests' {
             [System.Environment]::SetEnvironmentVariable("PROCOMP_MOCK_GIT_DELAY_MS", $prevDelay, "Process")
             Stop-BackgroundMonitor -Worker $worker46
         }
+    }
+
+    It 'integrates with a real WireMock JVM: gateway.command launch, clear+import sync, HTTP proxying, and Journal/Mappings viewer' {
+        $wmJar = Ensure-WireMockJar -RootDir $script:RepoRoot
+        $mockJar = Join-Path $script:RepoRoot "mock-service\mock-service.jar"
+        $td = (Resolve-Path $TestDrive).ProviderPath
+        $wmCfgPath = Join-Path $td "real-wm.procomp.json"
+        $wmState = Join-Path $td "wm-st"
+        $wmLog = Join-Path $td "wm-lg"
+        New-Item -ItemType Directory -Force -Path $wmState, $wmLog | Out-Null
+
+        @{
+            runtimes = @{
+                java = @{
+                    command    = "java -Xmx64m -Dservice.name={{servicename}} -Dserver.port={{localport}} -Dhealth.path=/actuator/health -Dstartup.delay.ms=200 -Dlog.format=text -jar `"$mockJar`""
+                    healthPath = "/actuator/health"
+                }
+            }
+            gateway  = @{
+                type       = "wiremock"
+                port       = 18089
+                command    = "java -Xmx128m -jar `"$wmJar`" --port {{port}}"
+                workingDir = $td
+                healthPath = "/__admin/health"
+            }
+            apps     = @(
+                @{ servicename = "orders"; localport = "18205"; type = "java"; proxyPath = "/orders"; remoteUrl = "http://127.0.0.1:18206"; enabled = $true }
+                @{ servicename = "remote-svc"; localport = "18207"; type = "java"; proxyPath = "/remote"; remoteUrl = "https://example.invalid/remote"; enabled = $false }
+            )
+        } | ConvertTo-Json -Depth 5 | Set-Content -Path $wmCfgPath -Encoding UTF8
+
+        $cfgWm = Load-ProcompConfig -ConfigPath $wmCfgPath -StateDir $wmState -LogDir $wmLog
+        $svcsWm = @($cfgWm.Services)
+        $script:services = $svcsWm
+
+        Assert-Eq $svcsWm[0].Name "wiremock-gateway"
+        Assert-Eq $svcsWm[0].Port 18089
+
+        Start-ServiceProcess -Svc $svcsWm[0] -RootDir $td
+        Start-ServiceProcess -Svc $svcsWm[1] -RootDir $td
+
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt 20000) {
+            Refresh-ProcessSnapshot -Services $svcsWm -DetectIde
+            Poll-AsyncHealth -Services $svcsWm -HttpClient $script:httpClient
+            if (($svcsWm[0].StatusText -eq "HEALTHY") -and ($svcsWm[1].StatusText -eq "HEALTHY")) { break }
+            Start-Sleep -Milliseconds 150
+        }
+        Assert-Eq $svcsWm[0].StatusText "HEALTHY"
+        Assert-Eq $svcsWm[1].StatusText "HEALTHY"
+
+        $syncedCount = Sync-WireMockMappings -Services $svcsWm -WireMockBaseUrl $cfgWm.Gateway.AdminUrl -GatewayServiceName $cfgWm.Gateway.ServiceName
+        Assert-Eq $syncedCount 2
+
+        # Proxy a real HTTP request through WireMock -> orders mock-service
+        $proxied = Invoke-RestMethod -Uri "http://127.0.0.1:18089/orders/actuator/health" -Method Get -TimeoutSec 3
+        Assert-Eq $proxied.status "UP"
+
+        # Verify Mappings and Journal viewer entries from real WireMock
+        $mapEntries = @(Get-WireMockViewerEntries -WireMockBaseUrl $cfgWm.Gateway.AdminUrl -SubMode "MAPPINGS")
+        Assert-Eq $mapEntries.Count 2
+        Assert-Match ($mapEntries | ForEach-Object { $_.Text } | Out-String) "procomp-orders"
+
+        $jrnEntries = @(Get-WireMockViewerEntries -WireMockBaseUrl $cfgWm.Gateway.AdminUrl -SubMode "JOURNAL")
+        Assert-Gt $jrnEntries.Count 0
+        Assert-Match ($jrnEntries | ForEach-Object { $_.Text } | Out-String) "/orders/actuator/health => 200"
+
+        # Toggle orders to REMOTE and verify Set-ServiceWireMockRoute updates real WireMock
+        $svcsWm[1].RoutingMode = "REMOTE"
+        $okToggle = Set-ServiceWireMockRoute -Svc $svcsWm[1] -WireMockBaseUrl $cfgWm.Gateway.AdminUrl -GatewayServiceName $cfgWm.Gateway.ServiceName
+        Assert-Eq $okToggle $true
+        $mapAfter = @(Get-WireMockViewerEntries -WireMockBaseUrl $cfgWm.Gateway.AdminUrl -SubMode "MAPPINGS")
+        Assert-Match ($mapAfter | ForEach-Object { $_.Text } | Out-String) "127\.0\.0\.1:18206"
     }
 }
