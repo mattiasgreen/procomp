@@ -86,7 +86,7 @@ function Get-GitRepoStatus {
 function Refresh-GitSummaries {
     param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null, [switch]$Quiet)
     $cache = @{}
-    $svcList = @($Services)
+    $svcList = @($Services | Where-Object { $_.RoutingMode -eq "LOCAL" }) + @($Services | Where-Object { $_.RoutingMode -ne "LOCAL" })
     $toQuery = @()
     $seenQuery = @{}
 

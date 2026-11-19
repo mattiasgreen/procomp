@@ -80,7 +80,8 @@ function Start-BackgroundMonitor {
             $traceOffsets = @{}
             Write-ProcompTraceLog -Category "BG" -Message "BackgroundMonitor started ($($bgServices.Count) service(s))"
             $State.CurrentActivity = ""
-            $lastGit = [datetime]::MinValue
+            $gitDueAt = (Get-Date).AddSeconds(4)
+            $gitBgJob = $null
             $lastClearEpoch = 0
 
             while (-not $State.StopRequested) {
@@ -127,8 +128,9 @@ function Start-BackgroundMonitor {
                                             Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $gwSvcName -Message "WireMock already reachable at $gwAdminUrl; reusing external instance"
                                         }
                                     }
-                                    foreach ($svc in $bgServices) {
-                                        if ($svc.Enabled -and (-not ($externalGwReused -and $svc.Name -eq $gwSvcName))) {
+                                    $orderedStartup = @($bgServices | Where-Object { $_.Enabled -and $_.RoutingMode -eq "LOCAL" }) + @($bgServices | Where-Object { $_.Enabled -and $_.RoutingMode -ne "LOCAL" })
+                                    foreach ($svc in $orderedStartup) {
+                                        if (-not ($externalGwReused -and $svc.Name -eq $gwSvcName)) {
                                             $State.CurrentActivity = "Starting $($svc.Name) (port $($svc.Port))..."
                                             $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                                             try {
@@ -165,6 +167,7 @@ function Start-BackgroundMonitor {
                                     } elseif (-not $State.BannerNotification) {
                                         $State.BannerNotification = "Ready"
                                     }
+                                    $gitDueAt = (Get-Date).AddSeconds(4)
                                 }
                                 "StartOne" {
                                     $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
@@ -359,7 +362,7 @@ function Start-BackgroundMonitor {
                         }
 
                         Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
-                        $lastGit = Get-Date
+                        $gitDueAt = (Get-Date).AddMinutes(30)
                         if ($isPull) {
                             if ($pulledTotal -gt 0) {
                                 $State.BannerNotification = "Pulled $pulledTotal commit(s) - press [b] to rebuild"
@@ -377,25 +380,46 @@ function Start-BackgroundMonitor {
                     Refresh-ProcessSnapshot -Services $bgServices -DetectIde
                     Poll-AsyncHealth -Services $bgServices -HttpClient $httpClient
 
-                    $now = Get-Date
-                    if (($now - $lastGit).TotalMinutes -ge 30) {
-                        $State.ServiceMetrics.Keys | Out-Null
-                        foreach ($svc in $bgServices) {
-                            $proc = $svc.CachedProc
-                            $State.ServiceMetrics[$svc.Name] = @{
-                                PidStr       = if ($proc) { [string]$proc.Id } else { "-" }
-                                StatusText   = $svc.StatusText
-                                RamUsed      = (Format-RamMb -Proc $proc)
-                                Uptime       = (Format-Uptime -Proc $proc)
-                                ExternalIde  = $svc.ExternalIde
-                                PortConflict = $svc.PortConflict
-                                GitSummary   = $svc.GitSummary
-                                Healthy      = $svc.Healthy
+                    if ($gitBgJob -and $gitBgJob.Handle.IsCompleted) {
+                        try {
+                            $gitMap = $gitBgJob.PS.EndInvoke($gitBgJob.Handle) | Select-Object -Last 1
+                            if ($gitMap -is [System.Collections.IDictionary]) {
+                                foreach ($svc in $bgServices) {
+                                    if ($gitMap.ContainsKey($svc.Name)) {
+                                        $svc.GitSummary = [string]$gitMap[$svc.Name]
+                                    }
+                                }
                             }
-                        }
-                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
-                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
-                        $lastGit = $now
+                        } catch { }
+                        try { $gitBgJob.PS.Dispose() } catch { }
+                        try { $gitBgJob.Runspace.Close(); $gitBgJob.Runspace.Dispose() } catch { }
+                        $gitBgJob = $null
+                        $gitDueAt = (Get-Date).AddMinutes(30)
+                    } elseif ((-not $gitBgJob) -and ((Get-Date) -ge $gitDueAt)) {
+                        $gitRs = [RunspaceFactory]::CreateRunspace()
+                        $gitRs.Open()
+                        $gitPs = [PowerShell]::Create()
+                        $gitPs.Runspace = $gitRs
+                        $snapSvcs = @($bgServices | ForEach-Object {
+                            [PSCustomObject]@{
+                                Name                 = $_.Name
+                                Repo                 = $_.Repo
+                                RoutingMode          = $_.RoutingMode
+                                ServiceRepositoryUrl = $_.ServiceRepositoryUrl
+                                GitSummary           = $_.GitSummary
+                            }
+                        })
+                        [void]$gitPs.AddScript({
+                            param($rRoot, $svcs, $activeOps)
+                            Set-StrictMode -Version Latest
+                            . (Join-Path $rRoot "src\Config.ps1")
+                            . (Join-Path $rRoot "src\BuildRunner.ps1")
+                            Refresh-GitSummaries -Services $svcs -RootDir $rRoot -ActiveOps $activeOps -Quiet
+                            $out = @{}
+                            foreach ($s in $svcs) { $out[$s.Name] = $s.GitSummary }
+                            return $out
+                        }).AddArgument($root).AddArgument($snapSvcs).AddArgument(@{})
+                        $gitBgJob = [PSCustomObject]@{ Runspace = $gitRs; PS = $gitPs; Handle = $gitPs.BeginInvoke() }
                     }
 
                     $rawMode = [bool]$State.RawMode
@@ -486,6 +510,11 @@ function Start-BackgroundMonitor {
                 }
             }
         } finally {
+            if ($gitBgJob) {
+                try { $gitBgJob.PS.Stop() } catch { }
+                try { $gitBgJob.PS.Dispose() } catch { }
+                try { $gitBgJob.Runspace.Close(); $gitBgJob.Runspace.Dispose() } catch { }
+            }
             $httpClient.Dispose()
         }
     }).AddArgument($SharedState)
