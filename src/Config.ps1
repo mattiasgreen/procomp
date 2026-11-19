@@ -17,6 +17,18 @@ function Resolve-ModulePath {
     return ($Module.TrimStart(':').Replace(':', '\').Replace('/', '\'))
 }
 
+function Get-RepoNameFromUrl {
+    param([string]$RepoUrl)
+    if (-not $RepoUrl) { return "" }
+    $trimmed = $RepoUrl.TrimEnd('/')
+    $lastSlash = $trimmed.LastIndexOf('/')
+    $seg = if ($lastSlash -ge 0) { $trimmed.Substring($lastSlash + 1) } else { $trimmed }
+    if ($seg.EndsWith(".git", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $seg = $seg.Substring(0, $seg.Length - 4)
+    }
+    return $seg
+}
+
 function Resolve-Artifact {
     param([string]$BaseDir, [string]$Glob, [string]$Exclude = "")
     if (-not $Glob) { return $null }
@@ -86,6 +98,8 @@ function Load-ProcompConfig {
 
     $doc = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
 
+    $reposRoot = if ($doc.PSObject.Properties["reposRoot"] -and $doc.reposRoot) { [string]$doc.reposRoot } else { "" }
+
     $builders = @{}
     if ($doc.PSObject.Properties["builders"] -and $doc.builders) {
         foreach ($bp in $doc.builders.PSObject.Properties) {
@@ -130,25 +144,37 @@ function Load-ProcompConfig {
     $routingMap = Load-RoutingState -RoutingFile $routingFile
 
     $services = @()
-    $rawServices = if ($doc.PSObject.Properties["services"] -and $doc.services) { @($doc.services) } else { @() }
-    foreach ($item in $rawServices) {
-        $runtimeName = [string]$item.runtime
+    $rawApps = if ($doc.PSObject.Properties["apps"] -and $doc.apps) { @($doc.apps) } else { @() }
+    foreach ($item in $rawApps) {
+        $svcName = [string]$item.servicename
+        $runtimeName = [string]$item.type
         if (-not $runtimes.ContainsKey($runtimeName)) {
-            throw "Service '$($item.name)' references unknown runtime '$runtimeName'."
+            throw "App '$svcName' references unknown runtime type '$runtimeName'."
         }
         $rt = $runtimes[$runtimeName]
 
         $builderName = if ($item.PSObject.Properties["builder"] -and $item.builder) { [string]$item.builder } else { "" }
         if ($builderName -and (-not $builders.ContainsKey($builderName))) {
-            throw "Service '$($item.name)' references unknown builder '$builderName'."
+            throw "App '$svcName' references unknown builder '$builderName'."
+        }
+
+        $port = [int]$item.localport
+        $subproject = if ($item.PSObject.Properties["subproject"] -and $item.subproject) { [string]$item.subproject } else { "" }
+        $swaggerUri = if ($item.PSObject.Properties["swaggeruri"] -and $item.swaggeruri) { [string]$item.swaggeruri } else { "" }
+        $repoUrl = if ($item.PSObject.Properties["servicerepositoryurl"] -and $item.servicerepositoryurl) { [string]$item.servicerepositoryurl } else { "" }
+
+        $repo = ""
+        if ($item.PSObject.Properties["repo"] -and $item.repo) {
+            $repo = [string]$item.repo
+        } elseif ($repoUrl) {
+            $repoDirName = Get-RepoNameFromUrl -RepoUrl $repoUrl
+            $repo = if ($reposRoot) { Join-Path $reposRoot $repoDirName } else { $repoDirName }
         }
 
         $healthPath = if ($item.PSObject.Properties["healthPath"] -and $item.healthPath) { [string]$item.healthPath } else { $rt.HealthPath }
         $enabled = if ($item.PSObject.Properties["enabled"]) { [bool]$item.enabled } else { $true }
-        $repo = if ($item.PSObject.Properties["repo"] -and $item.repo) { [string]$item.repo } else { "" }
-        $module = if ($item.PSObject.Properties["module"] -and $item.module) { [string]$item.module } else { "" }
         $logFmt = if ($item.PSObject.Properties["logFormat"] -and $item.logFormat) { [string]$item.logFormat } else { "text" }
-        $proxyPath = if ($item.PSObject.Properties["proxyPath"] -and $item.proxyPath) { [string]$item.proxyPath } else { "/$($item.name)" }
+        $proxyPath = if ($item.PSObject.Properties["proxyPath"] -and $item.proxyPath) { [string]$item.proxyPath } else { "/$svcName" }
         $remoteUrl = if ($item.PSObject.Properties["remoteUrl"] -and $item.remoteUrl) { [string]$item.remoteUrl } else { "" }
 
         $vars = @{}
@@ -172,8 +198,8 @@ function Load-ProcompConfig {
             }
         }
 
-        $routeMode = if ($routingMap.ContainsKey([string]$item.name)) {
-            $routingMap[[string]$item.name]
+        $routeMode = if ($routingMap.ContainsKey($svcName)) {
+            $routingMap[$svcName]
         } elseif (-not $enabled -and $remoteUrl) {
             "REMOTE"
         } else {
@@ -184,49 +210,52 @@ function Load-ProcompConfig {
         $memLimit = Parse-MemoryLimit -Text $memSource -Pattern $rt.MemoryArgPattern
 
         $services += [PSCustomObject]@{
-            Name             = [string]$item.name
-            Runtime          = $runtimeName
-            RuntimeDef       = $rt
-            Builder          = $builderName
-            BuilderDef       = if ($builderName) { $builders[$builderName] } else { $null }
-            Port             = [int]$item.port
-            Repo             = $repo
-            Module           = $module
-            Vars             = $vars
-            HealthPath       = $healthPath
-            MemLimit         = $memLimit
-            LogFormat        = $logFmt
-            LogMapping       = $logMap
-            Env              = $envMap
-            ProxyPath        = $proxyPath
-            RemoteUrl        = $remoteUrl
-            RoutingMode      = $routeMode
-            Enabled          = $enabled
-            PidFile          = (Join-Path $StateDir "$($item.name).pid")
-            LogFile          = (Join-Path $LogDir "$($item.name).log")
-            ErrFile          = (Join-Path $LogDir "$($item.name).err.log")
-            Managed          = $false
-            ExternalIde      = $false
-            PortConflict     = $false
-            Healthy          = $false
-            Stopping         = $false
-            BuildProc        = $null
-            GitSummary       = "-"
-            LastHealthAt     = [datetime]::MinValue
-            HealthTask       = $null
-            CachedPid        = $null
-            CachedProc       = $null
-            CachedLogRawMode = $null
-            StatusText       = if ($enabled) { "STOPPED" } else { "DISABLED" }
+            Name                 = $svcName
+            Runtime              = $runtimeName
+            RuntimeDef           = $rt
+            Builder              = $builderName
+            BuilderDef           = if ($builderName) { $builders[$builderName] } else { $null }
+            Port                 = $port
+            Repo                 = $repo
+            ServiceRepositoryUrl = $repoUrl
+            Module               = $subproject
+            SwaggerUri           = $swaggerUri
+            Vars                 = $vars
+            HealthPath           = $healthPath
+            MemLimit             = $memLimit
+            LogFormat            = $logFmt
+            LogMapping           = $logMap
+            Env                  = $envMap
+            ProxyPath            = $proxyPath
+            RemoteUrl            = $remoteUrl
+            RoutingMode          = $routeMode
+            Enabled              = $enabled
+            PidFile              = (Join-Path $StateDir "$svcName.pid")
+            LogFile              = (Join-Path $LogDir "$svcName.log")
+            ErrFile              = (Join-Path $LogDir "$svcName.err.log")
+            Managed              = $false
+            ExternalIde          = $false
+            PortConflict         = $false
+            Healthy              = $false
+            Stopping             = $false
+            BuildProc            = $null
+            GitSummary           = "-"
+            LastHealthAt         = [datetime]::MinValue
+            HealthTask           = $null
+            CachedPid            = $null
+            CachedProc           = $null
+            CachedLogRawMode     = $null
+            StatusText           = if ($enabled) { "STOPPED" } else { "DISABLED" }
         }
     }
 
     return [PSCustomObject]@{
-        Builders = $builders
-        Runtimes = $runtimes
-        Gateway  = $gateway
-        Profiles = $profiles
-        Services = $services
+        ReposRoot = $reposRoot
+        Builders  = $builders
+        Runtimes  = $runtimes
+        Gateway   = $gateway
+        Profiles  = $profiles
+        Services  = $services
     }
 }
 
@@ -236,16 +265,26 @@ function Build-ServiceTemplateVars {
     if ($Svc.Repo) {
         $repoAbs = if ([System.IO.Path]::IsPathRooted($Svc.Repo)) { $Svc.Repo } else { [System.IO.Path]::GetFullPath((Join-Path $RootDir $Svc.Repo)) }
     }
+    $modPath = Resolve-ModulePath -Module $Svc.Module
+    $swagger = if ($Svc.PSObject.Properties["SwaggerUri"]) { [string]$Svc.SwaggerUri } else { "" }
+    $repoUrl = if ($Svc.PSObject.Properties["ServiceRepositoryUrl"]) { [string]$Svc.ServiceRepositoryUrl } else { "" }
+
     $vars = @{
-        root       = $RootDir
-        name       = $Svc.Name
-        port       = [string]$Svc.Port
-        repo       = $repoAbs
-        module     = $Svc.Module
-        modulePath = (Resolve-ModulePath -Module $Svc.Module)
-        healthPath = $Svc.HealthPath
-        logFormat  = $Svc.LogFormat
-        artifact   = $Artifact
+        root                 = $RootDir
+        servicename          = $Svc.Name
+        name                 = $Svc.Name
+        localport            = [string]$Svc.Port
+        port                 = [string]$Svc.Port
+        type                 = $Svc.Runtime
+        repo                 = $repoAbs
+        servicerepositoryurl = $repoUrl
+        subproject           = $Svc.Module
+        module               = $Svc.Module
+        modulePath           = $modPath
+        swaggeruri           = $swagger
+        healthPath           = $Svc.HealthPath
+        logFormat            = $Svc.LogFormat
+        artifact             = $Artifact
     }
     if ($Svc.Vars) {
         foreach ($k in $Svc.Vars.Keys) {
@@ -263,7 +302,7 @@ function Apply-RoutingProfile {
     )
     if (-not $ProfileName) { return }
     if (-not $Config.Profiles.ContainsKey($ProfileName)) {
-        throw "Profile '$ProfileName' not found in procomp.json"
+        throw "Profile '$ProfileName' not found in config."
     }
 
     $prof = $Config.Profiles[$ProfileName]

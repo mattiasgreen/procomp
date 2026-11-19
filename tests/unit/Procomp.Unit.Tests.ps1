@@ -39,9 +39,40 @@ Describe 'procomp Unit Tests' {
             $orders = $cfg.Services | Where-Object { $_.Name -eq "order-service" }
             $quarkus = $cfg.Services | Where-Object { $_.Name -eq "billing-quarkus" }
             Assert-Eq $orders.MemLimit "384M"
+            Assert-Eq $orders.SwaggerUri "swagger-ui/index.html"
             Assert-Eq $quarkus.HealthPath "/q/health/ready"
             Assert-Eq (Expand-BuildCommand -Svc $orders -RootDir $script:RepoRoot) "gradlew.bat :services:order-service:bootJar -q"
             Assert-Eq (Expand-BuildCommand -Svc $quarkus -RootDir $script:RepoRoot) "mvnw.cmd -pl billing-api package -DskipTests -q"
+        }
+
+        It 'loads user apps schema with string localport, swaggeruri, and servicerepositoryurl' {
+            $uPath = Join-Path $TestDrive "user-apps.json"
+            @'
+{
+    "reposRoot": "..",
+    "runtimes": {
+        "java": { "command": "java -Dserver.port={{localport}} -jar {{subproject}}.jar", "healthPath": "/actuator/health" }
+    },
+    "apps": [{
+        "servicename": "service1",
+        "localport": "9001",
+        "subproject": "service1",
+        "type": "java",
+        "swaggeruri": "swagger-ui/index.html",
+        "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/service1.git"
+    }]
+}
+'@ | Set-Content -Path $uPath -Encoding UTF8
+            $cfg = Load-ProcompConfig -ConfigPath $uPath -StateDir (Join-Path $TestDrive "ust") -LogDir (Join-Path $TestDrive "ulg")
+            Assert-Eq $cfg.Services.Count 1
+            $s = $cfg.Services[0]
+            Assert-Eq $s.Name "service1"
+            Assert-Eq $s.Port 9001
+            Assert-Eq $s.Module "service1"
+            Assert-Eq $s.Runtime "java"
+            Assert-Eq $s.SwaggerUri "swagger-ui/index.html"
+            Assert-Eq $s.ServiceRepositoryUrl "ssh://git@scm.corp:7999/acme/service1.git"
+            Assert-Eq $s.Repo "..\service1"
         }
 
         It 'round-trips routing.json state' {

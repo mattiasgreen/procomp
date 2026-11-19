@@ -26,20 +26,20 @@ Describe 'Real-JVM Integration Tests' {
         @{
             runtimes = @{
                 "mock-broker" = @{
-                    command = "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=activemq -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\mock-service.jar"
+                    command = "java {{jvmArgs}} -Dservice.name={{servicename}} -Dservice.type=activemq -Dserver.port={{localport}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\mock-service.jar"
                     healthPath = "/api/jolokia"
                     memoryArgPattern = "-Xmx(\d+[kmgKMG]?)"
                 }
                 "mock-service" = @{
-                    command = "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=spring-boot -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\mock-service.jar"
+                    command = "java {{jvmArgs}} -Dservice.name={{servicename}} -Dservice.type=spring-boot -Dserver.port={{localport}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\mock-service.jar"
                     healthPath = "/actuator/health"
                     memoryArgPattern = "-Xmx(\d+[kmgKMG]?)"
                 }
             }
-            services = @(
-                @{ name = "it-broker"; runtime = "mock-broker";  port = 18161; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "800" };  logFormat = "text"; enabled = $true },
-                @{ name = "it-orders"; runtime = "mock-service"; port = 18181; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "1000" }; logFormat = "json"; enabled = $true; proxyPath = "/orders"; remoteUrl = "https://shared-dev.mycorp/orders" },
-                @{ name = "it-unused"; runtime = "mock-service"; port = 18182; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "800" };  logFormat = "text"; enabled = $false }
+            apps = @(
+                @{ servicename = "it-broker"; type = "mock-broker";  localport = "18161"; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "800" };  logFormat = "text"; enabled = $true },
+                @{ servicename = "it-orders"; type = "mock-service"; localport = "18181"; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "1000" }; logFormat = "json"; enabled = $true; proxyPath = "/orders"; remoteUrl = "https://shared-dev.mycorp/orders" },
+                @{ servicename = "it-unused"; type = "mock-service"; localport = "18182"; vars = @{ jvmArgs = "-Xmx128m"; startupDelayMs = "800" };  logFormat = "text"; enabled = $false }
             )
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:cfgPath -Encoding UTF8
     }

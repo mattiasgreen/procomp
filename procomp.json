@@ -2,12 +2,12 @@
   "builders": {},
   "runtimes": {
     "mock-broker": {
-      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=activemq -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\\mock-service.jar",
+      "command": "java {{jvmArgs}} -Dservice.name={{servicename}} -Dservice.type=activemq -Dserver.port={{localport}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar \"{{root}}\\mock-service\\mock-service.jar\"",
       "healthPath": "/api/jolokia",
       "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
     },
     "mock-service": {
-      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=spring-boot -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar mock-service\\mock-service.jar",
+      "command": "java {{jvmArgs}} -Dservice.name={{servicename}} -Dservice.type=spring-boot -Dserver.port={{localport}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar \"{{root}}\\mock-service\\mock-service.jar\"",
       "healthPath": "/actuator/health",
       "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
     }
@@ -22,11 +22,11 @@
       "remote": ["auth-service", "inventory-service", "notification-service"]
     }
   },
-  "services": [
+  "apps": [
     {
-      "name": "activemq-broker",
-      "runtime": "mock-broker",
-      "port": 8161,
+      "servicename": "activemq-broker",
+      "localport": "8161",
+      "type": "mock-broker",
       "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "1800" },
       "proxyPath": "/activemq",
       "remoteUrl": "https://shared-dev.example.com/activemq",
@@ -34,9 +34,11 @@
       "enabled": true
     },
     {
-      "name": "auth-service",
-      "runtime": "mock-service",
-      "port": 8091,
+      "servicename": "auth-service",
+      "localport": "8091",
+      "subproject": "auth-service",
+      "type": "mock-service",
+      "swaggeruri": "swagger-ui/index.html",
       "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "3000" },
       "proxyPath": "/auth",
       "remoteUrl": "https://shared-dev.example.com/auth",
@@ -44,9 +46,11 @@
       "enabled": true
     },
     {
-      "name": "order-service",
-      "runtime": "mock-service",
-      "port": 8082,
+      "servicename": "order-service",
+      "localport": "8082",
+      "subproject": "order-service",
+      "type": "mock-service",
+      "swaggeruri": "swagger-ui/index.html",
       "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "4200" },
       "proxyPath": "/orders",
       "remoteUrl": "https://shared-dev.example.com/orders",
@@ -54,9 +58,11 @@
       "enabled": true
     },
     {
-      "name": "payment-service",
-      "runtime": "mock-service",
-      "port": 8083,
+      "servicename": "payment-service",
+      "localport": "8083",
+      "subproject": "payment-service",
+      "type": "mock-service",
+      "swaggeruri": "swagger-ui/index.html",
       "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "3500" },
       "proxyPath": "/payments",
       "remoteUrl": "https://shared-dev.example.com/payments",
@@ -64,9 +70,11 @@
       "enabled": true
     },
     {
-      "name": "inventory-service",
-      "runtime": "mock-service",
-      "port": 8084,
+      "servicename": "inventory-service",
+      "localport": "8084",
+      "subproject": "inventory-service",
+      "type": "mock-service",
+      "swaggeruri": "swagger-ui/index.html",
       "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "2800" },
       "proxyPath": "/inventory",
       "remoteUrl": "https://shared-dev.example.com/inventory",
@@ -74,9 +82,11 @@
       "enabled": true
     },
     {
-      "name": "notification-service",
-      "runtime": "mock-service",
-      "port": 8085,
+      "servicename": "notification-service",
+      "localport": "8085",
+      "subproject": "notification-service",
+      "type": "mock-service",
+      "swaggeruri": "swagger-ui/index.html",
       "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "2500" },
       "proxyPath": "/notifications",
       "remoteUrl": "https://shared-dev.example.com/notifications",

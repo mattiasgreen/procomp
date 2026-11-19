@@ -1,24 +1,25 @@
 {
+  "reposRoot": "..",
   "builders": {
-    "gradle-boot":   { "command": "gradlew.bat {{module}}:bootJar -q" },
-    "maven-quarkus": { "command": "mvnw.cmd -pl {{module}} package -DskipTests -q" },
+    "gradle-boot":   { "command": "gradlew.bat {{subproject}}:bootJar -q" },
+    "maven-quarkus": { "command": "mvnw.cmd -pl {{subproject}} package -DskipTests -q" },
     "npm":           { "command": "npm run build" }
   },
   "runtimes": {
     "wiremock": {
-      "command": "java {{jvmArgs}} -jar wiremock\\wiremock-standalone.jar --port {{port}} --root-dir wiremock",
+      "command": "java {{jvmArgs}} -jar wiremock\\wiremock-standalone.jar --port {{localport}} --root-dir wiremock",
       "healthPath": "/__admin/health",
       "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
     },
-    "spring-boot": {
-      "command": "java {{jvmArgs}} -Dserver.port={{port}} -Dspring.profiles.active=local -jar {{artifact}}",
+    "java": {
+      "command": "java {{jvmArgs}} -Dserver.port={{localport}} -Dspring.profiles.active=local -jar {{artifact}}",
       "healthPath": "/actuator/health",
       "artifactGlob": "{{modulePath}}\\build\\libs\\*.jar",
       "artifactExclude": "*-plain.jar",
       "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
     },
     "quarkus": {
-      "command": "java {{jvmArgs}} -Dquarkus.http.port={{port}} -Dquarkus.profile=local -jar {{artifact}}",
+      "command": "java {{jvmArgs}} -Dquarkus.http.port={{localport}} -Dquarkus.profile=local -jar {{artifact}}",
       "healthPath": "/q/health/ready",
       "artifactGlob": "{{modulePath}}\\target\\quarkus-app\\quarkus-run.jar",
       "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
@@ -39,44 +40,47 @@
       "remote": ["frontend-bff"]
     }
   },
-  "services": [
+  "apps": [
     {
-      "name": "wiremock-gateway",
-      "runtime": "wiremock",
-      "port": 8080,
+      "servicename": "wiremock-gateway",
+      "localport": "8080",
+      "type": "wiremock",
       "vars": { "jvmArgs": "-Xmx256m" },
       "enabled": true
     },
     {
-      "name": "order-service",
-      "runtime": "spring-boot",
+      "servicename": "order-service",
+      "localport": "8082",
+      "subproject": ":services:order-service",
+      "type": "java",
       "builder": "gradle-boot",
-      "port": 8082,
-      "repo": "../commerce-backend",
-      "module": ":services:order-service",
+      "swaggeruri": "swagger-ui/index.html",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/commerce-backend.git",
       "vars": { "jvmArgs": "-Xmx384m" },
       "proxyPath": "/orders",
       "remoteUrl": "https://shared-dev.mycorp/orders",
       "logFormat": "json"
     },
     {
-      "name": "billing-quarkus",
-      "runtime": "quarkus",
+      "servicename": "billing-quarkus",
+      "localport": "8083",
+      "subproject": "billing-api",
+      "type": "quarkus",
       "builder": "maven-quarkus",
-      "port": 8083,
-      "repo": "../billing-repo",
-      "module": "billing-api",
+      "swaggeruri": "q/swagger-ui/",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/billing-repo.git",
       "vars": { "jvmArgs": "-Xmx256m" },
       "proxyPath": "/billing",
       "remoteUrl": "https://shared-dev.mycorp/billing",
       "logFormat": "json"
     },
     {
-      "name": "frontend-bff",
-      "runtime": "node",
+      "servicename": "frontend-bff",
+      "localport": "3000",
+      "subproject": "",
+      "type": "node",
       "builder": "npm",
-      "port": 3000,
-      "repo": "../web-bff",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/web-bff.git",
       "env": { "PORT": "3000" },
       "proxyPath": "/bff",
       "remoteUrl": "https://shared-dev.mycorp/bff"
