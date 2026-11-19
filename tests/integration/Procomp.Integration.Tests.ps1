@@ -181,4 +181,61 @@ Describe 'Real-JVM Integration Tests' {
             Stop-BackgroundMonitor -Worker $worker
         }
     }
+
+    It 'boots local service to HEALTHY quickly with 46 services even with 3s simulated Git latency' {
+        $jar = Join-Path $script:RepoRoot "mock-service\mock-service.jar"
+        $td = (Resolve-Path $TestDrive).ProviderPath
+        $scaleCfgPath = Join-Path $td "scale46.procomp.json"
+        $scaleState = Join-Path $td "scale46-st"
+        $scaleLog = Join-Path $td "scale46-lg"
+        New-Item -ItemType Directory -Force -Path $scaleState, $scaleLog, (Join-Path $td "svc-01") | Out-Null
+
+        $apps = @(
+            @{ servicename = "svc-01"; localport = "18201"; type = "java"; enabled = $true; servicerepositoryurl = "ssh://git@scm/svc-01.git" }
+        )
+        for ($i = 2; $i -le 46; $i++) {
+            $num = $i.ToString("D2")
+            $apps += @{ servicename = "svc-$num"; localport = [string](18200 + $i); type = "java"; enabled = $false; remoteUrl = "https://dev.corp/svc-$num"; servicerepositoryurl = "ssh://git@scm/svc-$num.git" }
+        }
+        @{
+            reposRoot = $td
+            runtimes  = @{
+                java = @{
+                    command    = "java -Xmx64m -Dservice.name={{servicename}} -Dserver.port={{localport}} -Dhealth.path=/actuator/health -Dstartup.delay.ms=400 -Dlog.format=text -jar `"$jar`""
+                    healthPath = "/actuator/health"
+                }
+            }
+            apps      = $apps
+        } | ConvertTo-Json -Depth 5 | Set-Content -Path $scaleCfgPath -Encoding UTF8
+
+        $cfg46 = Load-ProcompConfig -ConfigPath $scaleCfgPath -StateDir $scaleState -LogDir $scaleLog
+        $svcs46 = @($cfg46.Services)
+        Assert-Eq $svcs46.Count 46
+
+        $prevDelay = [System.Environment]::GetEnvironmentVariable("PROCOMP_MOCK_GIT_DELAY_MS", "Process")
+        $shared46 = New-SharedTuiState -RootDir $script:RepoRoot -ConfigPath $scaleCfgPath -StateDir $scaleState -LogDir $scaleLog
+        $shared46.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "Startup"; ServiceName = "" })
+        $worker46 = $null
+        try {
+            [System.Environment]::SetEnvironmentVariable("PROCOMP_MOCK_GIT_DELAY_MS", "3000", "Process")
+            $worker46 = Start-BackgroundMonitor -SharedState $shared46
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.ElapsedMilliseconds -lt 10000) {
+                if ($shared46.SnapshotVersion -gt 0) {
+                    Apply-SharedSnapshot -Services $svcs46 -SharedState $shared46
+                    if ($svcs46[0].StatusText -eq "HEALTHY") { break }
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            $script:services = $svcs46
+            Assert-Eq $svcs46[0].StatusText "HEALTHY" " (err=$($shared46.LastError) banner=$($shared46.BannerNotification) snap=$($shared46.SnapshotVersion))"
+            Assert-Eq $svcs46[45].StatusText "REMOTE"
+
+            $frame46 = Render-Tui -Services $svcs46 -SelectedIndex 0 -BannerMsg "Ready" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -DryRun
+            Assert-Match $frame46 "Services: 46"
+        } finally {
+            [System.Environment]::SetEnvironmentVariable("PROCOMP_MOCK_GIT_DELAY_MS", $prevDelay, "Process")
+            Stop-BackgroundMonitor -Worker $worker46
+        }
+    }
 }

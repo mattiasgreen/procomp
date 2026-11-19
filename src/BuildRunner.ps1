@@ -48,6 +48,11 @@ function Invoke-GitNonInteractive {
 
 function Get-GitRepoStatus {
     param([string]$RepoPath, [bool]$HasRepoUrl = $false)
+    $mockDelay = 0
+    $delayEnv = [System.Environment]::GetEnvironmentVariable("PROCOMP_MOCK_GIT_DELAY_MS", "Process")
+    if ($delayEnv -and [int]::TryParse($delayEnv, [ref]$mockDelay) -and $mockDelay -gt 0) {
+        Start-Sleep -Milliseconds $mockDelay
+    }
     if (-not $RepoPath -or -not (Test-Path (Join-Path $RepoPath ".git"))) {
         $sum = if ($HasRepoUrl) { "MISSING" } else { "-" }
         return [PSCustomObject]@{ Exists = $false; Branch = "-"; Dirty = $false; Ahead = 0; Behind = 0; Summary = $sum }

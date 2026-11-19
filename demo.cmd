@@ -1,4 +1,6 @@
 @echo off
+setlocal
+if not defined PROCOMP_MOCK_GIT_DELAY_MS set "PROCOMP_MOCK_GIT_DELAY_MS=3000"
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0demo\setup-demo.ps1"
 if errorlevel 1 goto :fail
