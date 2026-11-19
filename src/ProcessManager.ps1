@@ -190,9 +190,17 @@ function Start-ServiceProcess {
     if ($null -eq $resolved) {
         return
     }
+    if ($resolved.WorkingDirectory -and (-not (Test-Path -LiteralPath $resolved.WorkingDirectory))) {
+        throw "Working directory not found for $($Svc.Name): $($resolved.WorkingDirectory)"
+    }
     $parsed = Split-CommandLine -CommandLine $resolved.CommandLine
     if (($parsed.FilePath -eq "java" -or $parsed.FilePath -eq "java.exe") -and (Get-Command Resolve-JavaTool -ErrorAction SilentlyContinue)) {
         $parsed.FilePath = Resolve-JavaTool -Tool "java"
+    } elseif ($resolved.WorkingDirectory -and (-not [System.IO.Path]::IsPathRooted($parsed.FilePath))) {
+        $inWorkDir = Join-Path $resolved.WorkingDirectory $parsed.FilePath
+        if (Test-Path -LiteralPath $inWorkDir) {
+            $parsed.FilePath = (Resolve-Path -LiteralPath $inWorkDir).ProviderPath
+        }
     }
 
     $envToInject = @{}
@@ -208,7 +216,8 @@ function Start-ServiceProcess {
 
     try {
         Report-ProcompActivity -ServiceName $Svc.Name -Message "Launching $($Svc.Name) on port $($Svc.Port)..."
-        $argText = if ($parsed.ArgumentList.Count -gt 0) { " " + ($parsed.ArgumentList -join " ") } else { "" }
+        $argList = @($parsed.ArgumentList)
+        $argText = if ($argList.Count -gt 0) { " " + ($argList -join " ") } else { "" }
         Write-ProcompDebugLog -Category "EXEC" -ServiceName $Svc.Name -WorkingDirectory $resolved.WorkingDirectory -Message "`"$($parsed.FilePath)`"$argText"
         $startParams = @{
             FilePath               = $parsed.FilePath
@@ -218,8 +227,8 @@ function Start-ServiceProcess {
             WindowStyle            = "Hidden"
             PassThru               = $true
         }
-        if ($parsed.ArgumentList.Count -gt 0) {
-            $startParams["ArgumentList"] = $parsed.ArgumentList
+        if ($argList.Count -gt 0) {
+            $startParams["ArgumentList"] = $argList
         }
         $proc = Start-Process @startParams
         Write-ProcompDebugLog -Category "EXEC" -ServiceName $Svc.Name -Message "Started PID=$($proc.Id)"

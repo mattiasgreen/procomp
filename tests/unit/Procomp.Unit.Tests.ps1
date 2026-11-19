@@ -758,6 +758,26 @@ Describe 'procomp Unit Tests' {
             Assert-Eq (Resolve-ServiceWorkingDir -Svc $custom -RootDir $script:RepoRoot) "C:\repos\custom-dir"
         }
 
+        It 'resolves relative executables like gradlew.bat inside WorkingDirectory when starting a service' {
+            $batDir = Join-Path $TestDrive "batwd"
+            New-Item -ItemType Directory -Force -Path $batDir | Out-Null
+            "@echo off`necho bat_started_ok" | Set-Content -Path (Join-Path $batDir "mytool.bat") -Encoding ASCII
+            $svc = [PSCustomObject]@{
+                Name = "bat-svc"; Runtime = "custom"; Port = 19997; Repo = $batDir; WorkingDir = $batDir; Module = ""
+                RuntimeDef = [PSCustomObject]@{ Name = "custom"; Command = "mytool.bat --flag"; HealthPath = ""; ArtifactGlob = ""; ArtifactExclude = ""; MemoryArgPattern = "" }
+                BuilderDef = $null; Vars = @{}; HealthPath = ""; LogFormat = "text"; SwaggerUri = ""; ServiceRepositoryUrl = ""; ReposRoot = ""
+                PidFile = (Join-Path $batDir "bat.pid"); LogFile = (Join-Path $batDir "bat.log"); ErrFile = (Join-Path $batDir "bat.err.log")
+                ExternalIde = $false; PortConflict = $false; Managed = $false; Stopping = $false; Healthy = $false; Enabled = $true
+                BuildProc = $null; HealthTask = $null; LastHealthAt = [datetime]::MinValue; CachedPid = $null; CachedProc = $null; StatusText = "STOPPED"
+            }
+            Start-ServiceProcess -Svc $svc -RootDir $batDir
+            if ($svc.CachedProc -and -not $svc.CachedProc.HasExited) {
+                $svc.CachedProc.WaitForExit(3000) | Out-Null
+            }
+            Assert-Match (Get-Content -Path $svc.LogFile -Raw) "bat_started_ok"
+            Stop-ServiceProcess -Svc $svc
+        }
+
         It 'applies named routing profiles from procomp.json and persists routing.json' {
             $rFile = Join-Path $TestDrive "prof-routing.json"
             $polyPath = Join-Path $script:RepoRoot "examples\polyglot.procomp.json"
