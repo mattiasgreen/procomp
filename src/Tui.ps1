@@ -110,6 +110,7 @@ function Render-Tui {
         [hashtable]$ExpandedEntryIds = @{},
         [hashtable]$LogBuffers = $null,
         [array]$ProcompLogEntries = @(),
+        [string]$ProcompLogLevel = "TRACE",
         [string]$WireMockSubMode = "JOURNAL",
         [array]$WireMockEntries = @(),
         $LayoutOut = $null,
@@ -136,8 +137,8 @@ function Render-Tui {
             "  r                 Restart selected       b                      Rebuild selected",
             "  f / F             Git fetch one / all    p / P                  Git pull (--ff-only) one / all",
             "  t / Click ROUTING Toggle LOCAL <-> REMOTE  o                    Open Swagger URI in browser",
-            "  L                 procomp Trace/Debug Log  w                    WireMock Journal / Mappings",
-            "  g                 Toggle LOCAL-only view   d                    Detach (keep running)",
+            "  L / 4             procomp Log (INFO/DBG/TRC) w / 3              WireMock Journal / Mappings",
+            "  1 / 2 / 3 / 4     Switch main views          g                    Toggle LOCAL-only view",
             "  q / Ctrl+C        Confirm & stop all",
             "",
             "$script:C_BOLD LOG VIEWER MODE (Full-Screen)$script:C_RESET",
@@ -191,11 +192,12 @@ function Render-Tui {
         $logRows = [Math]::Max(4, $height - 4)
     } elseif ($ViewMode -eq "PROCOMP") {
         $toolbar = Build-ToolbarLine -Items @(
-            @{ Label = "[Esc]Services"; Command = "back";   Active = $false },
-            @{ Label = "[e]Warn/Err";   Command = "err";    Active = $ErrorsOnly },
-            @{ Label = "[/]Find";       Command = "find";   Active = ($FilterText -ne "") },
-            @{ Label = "[End]Follow";   Command = "follow"; Active = ($ScrollOffset -eq 0) },
-            @{ Label = "[?]Help";       Command = "help";   Active = $false }
+            @{ Label = "[Esc]Services";            Command = "back";          Active = $false },
+            @{ Label = "[v]Level:$ProcompLogLevel"; Command = "procomp-level"; Active = $true },
+            @{ Label = "[e]Warn/Err";               Command = "err";           Active = $ErrorsOnly },
+            @{ Label = "[/]Find";                   Command = "find";          Active = ($FilterText -ne "") },
+            @{ Label = "[End]Follow";               Command = "follow";        Active = ($ScrollOffset -eq 0) },
+            @{ Label = "[?]Help";                   Command = "help";          Active = $false }
         )
         $logStartY = 3
         $logRows = [Math]::Max(4, $height - 4)
@@ -242,6 +244,10 @@ function Render-Tui {
     # Fetch log viewport first so header can display FOLLOW / PAUSED scroll position accurately
     if ($ViewMode -eq "PROCOMP" -or $ViewMode -eq "WIREMOCK") {
         $pEntries = if ($ViewMode -eq "WIREMOCK") { @($WireMockEntries) } else { @($ProcompLogEntries) }
+        if ($ViewMode -eq "PROCOMP" -and $ProcompLogLevel -ne "TRACE") {
+            $allowedVerbs = if ($ProcompLogLevel -eq "INFO") { @("INFO") } else { @("INFO", "DEBUG") }
+            $pEntries = @($pEntries | Where-Object { (-not $_.PSObject.Properties["Verbosity"]) -or ($_.Verbosity -in $allowedVerbs) })
+        }
         if ($ErrorsOnly) {
             $pEntries = @($pEntries | Where-Object { $_.Level -eq "ERROR" -or $_.Level -eq "WARN" })
         }
@@ -263,7 +269,7 @@ function Render-Tui {
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
     } elseif ($ViewMode -eq "PROCOMP") {
-        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag TRACE LOG$script:C_RESET $script:C_DIM| (Wheel/PgUp/PgDn: scroll, Esc: services)$script:C_RESET$errTag$followTag$filtTag" $width) + "`n")
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag PROCOMP ($ProcompLogLevel)$script:C_RESET $script:C_DIM| (v: INFO/DEBUG/TRACE, 1-4: views, Esc: services)$script:C_RESET$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
     } elseif ($ViewMode -eq "LOGS") {

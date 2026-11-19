@@ -534,13 +534,26 @@ Describe 'procomp Unit Tests' {
             Assert-Match $logFrame "procomp LOGS"
             Assert-Eq $logLayout.ToolbarButtons[0].Command "back"
 
-            # Full-screen PROCOMP trace log view renders and filters
+            # Full-screen PROCOMP log view renders and filters by INFO / DEBUG / TRACE verbosity
             $pEntries = @(
-                [PSCustomObject]@{ EntryId = "p1"; SortKey = "000001"; Level = "INFO";  Text = "[2026-11-19] [START] Action=tui"; StackLines = @(); IsJson = $false }
-                [PSCustomObject]@{ EntryId = "p2"; SortKey = "000002"; Level = "ERROR"; Text = "[2026-11-19] [BUILD-FAIL] svc=svc1 boom"; StackLines = @(); IsJson = $false }
+                [PSCustomObject]@{ EntryId = "p1"; SortKey = "000001"; Level = "INFO";  Verbosity = "INFO";  Text = "[2026-11-19] [START] Action=tui"; StackLines = @(); IsJson = $false }
+                [PSCustomObject]@{ EntryId = "p2"; SortKey = "000002"; Level = "INFO";  Verbosity = "DEBUG"; Text = "[2026-11-19] [WIREMOCK] PUT /orders"; StackLines = @(); IsJson = $false }
+                [PSCustomObject]@{ EntryId = "p3"; SortKey = "000003"; Level = "INFO";  Verbosity = "TRACE"; Text = "[2026-11-19] [SUBPROC] stdout line"; StackLines = @(); IsJson = $false }
+                [PSCustomObject]@{ EntryId = "p4"; SortKey = "000004"; Level = "ERROR"; Verbosity = "INFO";  Text = "[2026-11-19] [BUILD-FAIL] svc=svc1 boom"; StackLines = @(); IsJson = $false }
             )
-            $pFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $true -RawLogs $false -ConfirmQuit $false -ViewMode "PROCOMP" -ProcompLogEntries $pEntries -DryRun
-            Assert-Match $pFrame "procomp TRACE LOG"
+            $pInfo = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "PROCOMP" -ProcompLogEntries $pEntries -ProcompLogLevel "INFO" -DryRun
+            Assert-Match $pInfo "procomp PROCOMP \(INFO\)"
+            Assert-Match $pInfo "Action=tui"
+            Assert-Eq ($pInfo.Contains("[WIREMOCK]")) $false
+            Assert-Eq ($pInfo.Contains("[SUBPROC]")) $false
+
+            $pDbg = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "PROCOMP" -ProcompLogEntries $pEntries -ProcompLogLevel "DEBUG" -DryRun
+            Assert-Match $pDbg "procomp PROCOMP \(DEBUG\)"
+            Assert-Match $pDbg "\[WIREMOCK\]"
+            Assert-Eq ($pDbg.Contains("[SUBPROC]")) $false
+
+            $pFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $true -RawLogs $false -ConfirmQuit $false -ViewMode "PROCOMP" -ProcompLogEntries $pEntries -ProcompLogLevel "TRACE" -DryRun
+            Assert-Match $pFrame "procomp PROCOMP \(TRACE\)"
             Assert-Match $pFrame "BUILD-FAIL"
             Assert-Eq ($pFrame.Contains("Action=tui")) $false
 

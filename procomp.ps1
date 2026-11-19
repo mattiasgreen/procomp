@@ -266,6 +266,7 @@ try {
     $needsRender = $true
     $viewMode = "SERVICES"
     $wireMockSubMode = "JOURNAL"
+    $procompLogLevel = "TRACE"
     $localOnly = $false
     $showHelp = $false
     $filterText = ""
@@ -350,7 +351,16 @@ try {
                 $script:viewMode = "PROCOMP"
                 $sharedState.ActiveViewMode = "PROCOMP"
                 $script:scrollOffset = 0
-                $script:banner = "procomp Trace Log (Wheel/PgUp/PgDn to scroll, Esc to return)"
+                $script:banner = "procomp Log ($($script:procompLogLevel)) - [v] INFO/DEBUG/TRACE, Esc to return"
+            }
+            "procomp-level" {
+                $script:procompLogLevel = switch ($script:procompLogLevel) {
+                    "TRACE" { "INFO" }
+                    "INFO"  { "DEBUG" }
+                    default { "TRACE" }
+                }
+                $script:scrollOffset = 0
+                $script:banner = "procomp log level: $($script:procompLogLevel)"
             }
             "wiremock" {
                 $script:viewMode = "WIREMOCK"
@@ -582,7 +592,7 @@ try {
 
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
-            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -WireMockSubMode $wireMockSubMode -WireMockEntries $sharedState.WireMockEntries -LayoutOut $layoutRef
+            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -ProcompLogLevel $procompLogLevel -WireMockSubMode $wireMockSubMode -WireMockEntries $sharedState.WireMockEntries -LayoutOut $layoutRef
             if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }
@@ -713,6 +723,10 @@ try {
                         0x09 { if ($viewMode -eq "WIREMOCK") { Invoke-UiAction -Cmd "wm-toggle" } else { Invoke-UiAction -Cmd "all" }; $needsRender = $true; continue }   # Tab
                     }
                     switch -CaseSensitive ($ch) {
+                        '1' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
+                        '2' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
+                        '3' { Invoke-UiAction -Cmd "wiremock"; $needsRender = $true }
+                        '4' { Invoke-UiAction -Cmd "procomp-logs"; $needsRender = $true }
                         'l' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
                         'L' { if ($viewMode -eq "PROCOMP") { Invoke-UiAction -Cmd "back" } else { Invoke-UiAction -Cmd "procomp-logs" }; $needsRender = $true }
                         'w' { if ($viewMode -eq "WIREMOCK") { Invoke-UiAction -Cmd "back" } else { Invoke-UiAction -Cmd "wiremock" }; $needsRender = $true }
@@ -722,7 +736,7 @@ try {
                         'G' { Invoke-UiAction -Cmd "follow"; $needsRender = $true }
                         'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
                         'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }
-                        'v' { Invoke-UiAction -Cmd "raw"; $needsRender = $true }
+                        'v' { if ($viewMode -eq "PROCOMP") { Invoke-UiAction -Cmd "procomp-level" } else { Invoke-UiAction -Cmd "raw" }; $needsRender = $true }
                         'z' { Invoke-UiAction -Cmd "stack"; $needsRender = $true }
                         '/' { Invoke-UiAction -Cmd "find"; $needsRender = $true }
                         'c' { Invoke-UiAction -Cmd "clear"; $needsRender = $true }
@@ -736,6 +750,10 @@ try {
                         0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
                     }
                     switch -CaseSensitive ($ch) {
+                        '1' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
+                        '2' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
+                        '3' { Invoke-UiAction -Cmd "wiremock"; $needsRender = $true }
+                        '4' { Invoke-UiAction -Cmd "procomp-logs"; $needsRender = $true }
                         'k' { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true }
                         'j' { $selected = [Math]::Min($visServices.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($visServices[$selected].Name)"; $needsRender = $true }
                         'g' { Invoke-UiAction -Cmd "local-only"; $needsRender = $true }

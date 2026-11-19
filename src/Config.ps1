@@ -91,10 +91,20 @@ function Read-ProcompTraceEntries {
         } else {
             "INFO"
         }
+        $verb = if ($lvl -eq "ERROR" -or $lvl -eq "WARN") {
+            "INFO"
+        } elseif ($ln -match '\[SUBPROC\]|\[GIT\].*(rev-parse --abbrev-ref HEAD|status --porcelain|rev-list --left-right)') {
+            "TRACE"
+        } elseif ($ln -match '\[(ARTIFACT|ENV|IDE|PORT|WIREMOCK|UI|GIT)\]') {
+            "DEBUG"
+        } else {
+            "INFO"
+        }
         $entries += [PSCustomObject]@{
             EntryId    = "procomp-$idx"
             SortKey    = $idx.ToString("D6")
             Level      = $lvl
+            Verbosity  = $verb
             Text       = $ln
             StackLines = @()
             IsJson     = $false
