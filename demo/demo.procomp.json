@@ -1,0 +1,125 @@
+{
+  "builders": {
+    "mock-gradle": {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"{{root}}\\demo\\mock-build.ps1\" -Tool gradle -Service {{name}} -Module {{module}}"
+    },
+    "mock-maven": {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"{{root}}\\demo\\mock-build.ps1\" -Tool maven -Service {{name}} -Module {{module}}"
+    },
+    "mock-npm": {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"{{root}}\\demo\\mock-build.ps1\" -Tool npm -Service {{name}}"
+    }
+  },
+  "runtimes": {
+    "wiremock": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=wiremock -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format=text -jar \"{{root}}\\mock-service\\mock-service.jar\"",
+      "healthPath": "/__admin/health",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    },
+    "activemq": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=activemq -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format=text -jar \"{{root}}\\mock-service\\mock-service.jar\"",
+      "healthPath": "/api/jolokia",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    },
+    "spring-boot": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=spring-boot -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar \"{{root}}\\mock-service\\mock-service.jar\"",
+      "healthPath": "/actuator/health",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    },
+    "quarkus": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=quarkus -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar \"{{root}}\\mock-service\\mock-service.jar\"",
+      "healthPath": "/q/health/ready",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    },
+    "node": {
+      "command": "java {{jvmArgs}} -Dservice.name={{name}} -Dservice.type=node -Dserver.port={{port}} -Dhealth.path={{healthPath}} -Dstartup.delay.ms={{startupDelayMs}} -Dlog.format={{logFormat}} -jar \"{{root}}\\mock-service\\mock-service.jar\"",
+      "healthPath": "/health"
+    }
+  },
+  "gateway": {
+    "type": "wiremock",
+    "adminUrl": "http://127.0.0.1:8088",
+    "serviceName": "wiremock-gateway"
+  },
+  "profiles": {
+    "checkout": {
+      "local":  ["wiremock-gateway", "activemq-broker", "order-service", "billing-quarkus"],
+      "remote": ["auth-service", "web-bff"]
+    },
+    "all-local": {
+      "local":  ["wiremock-gateway", "activemq-broker", "auth-service", "order-service", "billing-quarkus", "web-bff"],
+      "remote": []
+    }
+  },
+  "services": [
+    {
+      "name": "wiremock-gateway",
+      "runtime": "wiremock",
+      "port": 8088,
+      "vars": { "jvmArgs": "-Xmx128m", "startupDelayMs": "1000" },
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "activemq-broker",
+      "runtime": "activemq",
+      "port": 8161,
+      "vars": { "jvmArgs": "-Xmx192m", "startupDelayMs": "1400" },
+      "proxyPath": "/activemq",
+      "remoteUrl": "https://shared-dev.example.com/activemq",
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "auth-service",
+      "runtime": "spring-boot",
+      "builder": "mock-gradle",
+      "port": 8091,
+      "repo": ".demo_repos/commerce-backend",
+      "module": ":services:auth-service",
+      "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "2000" },
+      "proxyPath": "/auth",
+      "remoteUrl": "https://shared-dev.example.com/auth",
+      "logFormat": "text",
+      "enabled": true
+    },
+    {
+      "name": "order-service",
+      "runtime": "spring-boot",
+      "builder": "mock-gradle",
+      "port": 8082,
+      "repo": ".demo_repos/commerce-backend",
+      "module": ":services:order-service",
+      "vars": { "jvmArgs": "-Xmx384m", "startupDelayMs": "2500" },
+      "proxyPath": "/orders",
+      "remoteUrl": "https://shared-dev.example.com/orders",
+      "logFormat": "json",
+      "enabled": true
+    },
+    {
+      "name": "billing-quarkus",
+      "runtime": "quarkus",
+      "builder": "mock-maven",
+      "port": 8083,
+      "repo": ".demo_repos/billing-quarkus",
+      "module": "billing-api",
+      "vars": { "jvmArgs": "-Xmx256m", "startupDelayMs": "1600" },
+      "proxyPath": "/billing",
+      "remoteUrl": "https://shared-dev.example.com/billing",
+      "logFormat": "json",
+      "enabled": true
+    },
+    {
+      "name": "web-bff",
+      "runtime": "node",
+      "builder": "mock-npm",
+      "port": 3000,
+      "repo": ".demo_repos/web-bff",
+      "vars": { "jvmArgs": "-Xmx128m", "startupDelayMs": "1200" },
+      "proxyPath": "/bff",
+      "remoteUrl": "https://shared-dev.example.com/bff",
+      "logFormat": "text",
+      "enabled": false
+    }
+  ]
+}

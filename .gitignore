@@ -1,4 +1,5 @@
 .stack_state/
+.demo_repos/
 logs/
 *.class
 *.jar

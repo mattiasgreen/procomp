@@ -237,6 +237,7 @@ function Build-ServiceTemplateVars {
         $repoAbs = if ([System.IO.Path]::IsPathRooted($Svc.Repo)) { $Svc.Repo } else { [System.IO.Path]::GetFullPath((Join-Path $RootDir $Svc.Repo)) }
     }
     $vars = @{
+        root       = $RootDir
         name       = $Svc.Name
         port       = [string]$Svc.Port
         repo       = $repoAbs
