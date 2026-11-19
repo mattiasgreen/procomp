@@ -105,7 +105,7 @@ function Resolve-ServiceCommand {
         throw "Service '$($Svc.Name)' has no runtime command."
     }
 
-    $workDir = if ($Svc.Repo) { Resolve-RepoPath -Repo $Svc.Repo -RootDir $RootDir } else { $RootDir }
+    $workDir = Resolve-ServiceWorkingDir -Svc $Svc -RootDir $RootDir
     $baseVars = Build-ServiceTemplateVars -Svc $Svc -RootDir $RootDir
     $artifact = ""
 

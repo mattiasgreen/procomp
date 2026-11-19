@@ -375,6 +375,7 @@ function Load-ProcompConfig {
                 ArtifactGlob     = if ($r.PSObject.Properties["artifactGlob"] -and $r.artifactGlob) { [string]$r.artifactGlob } else { "" }
                 ArtifactExclude  = if ($r.PSObject.Properties["artifactExclude"] -and $r.artifactExclude) { [string]$r.artifactExclude } else { "" }
                 MemoryArgPattern = if ($r.PSObject.Properties["memoryArgPattern"] -and $r.memoryArgPattern) { [string]$r.memoryArgPattern } else { "" }
+                WorkingDir       = if ($r.PSObject.Properties["workingDir"] -and $r.workingDir) { [string]$r.workingDir } else { "" }
             }
         }
     }
@@ -477,7 +478,18 @@ function Load-ProcompConfig {
             $repo = if ($reposRoot) { [System.IO.Path]::Combine($reposRoot, $repoDirName) } else { $repoDirName }
         }
 
-        $tmplVars = @{ reposRoot = $reposRoot; servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; type = $runtimeName }
+        $tmplVars = @{ reposRoot = $reposRoot; root = (Split-Path -Parent $resolvedConfigPath); repo = $repo; servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; modulePath = (Resolve-ModulePath -Module $subproject); type = $runtimeName }
+
+        $rawWorkDir = if ($item.PSObject.Properties["workingDir"] -and $item.workingDir) {
+            [string]$item.workingDir
+        } elseif ($defaults -and $defaults.PSObject.Properties["workingDir"] -and $defaults.workingDir) {
+            [string]$defaults.workingDir
+        } elseif ($rt.PSObject.Properties["WorkingDir"] -and $rt.WorkingDir) {
+            [string]$rt.WorkingDir
+        } else {
+            ""
+        }
+        $workDir = if ($rawWorkDir) { Expand-Template -Template $rawWorkDir -Vars $tmplVars } else { "" }
 
         $healthPath = if ($item.PSObject.Properties["healthPath"] -and $item.healthPath) { [string]$item.healthPath } else { $rt.HealthPath }
         $enabled = if ($item.PSObject.Properties["enabled"]) {
@@ -554,6 +566,7 @@ function Load-ProcompConfig {
             BuilderDef           = if ($builderName) { $builders[$builderName] } else { $null }
             Port                 = $port
             Repo                 = $repo
+            WorkingDir           = $workDir
             ReposRoot            = $reposRoot
             ServiceRepositoryUrl = $repoUrl
             Module               = $subproject
@@ -606,6 +619,7 @@ function Load-ProcompConfig {
                 BuilderDef           = $null
                 Port                 = $gateway.Port
                 Repo                 = $gateway.WorkingDir
+                WorkingDir           = $gateway.WorkingDir
                 ReposRoot            = $reposRoot
                 ServiceRepositoryUrl = ""
                 Module               = ""
@@ -654,6 +668,20 @@ function Load-ProcompConfig {
         Profiles  = $profiles
         Services  = $services
     }
+}
+
+function Resolve-ServiceWorkingDir {
+    param($Svc, [string]$RootDir)
+    $spec = if ($Svc.PSObject.Properties["WorkingDir"] -and $Svc.WorkingDir) {
+        [string]$Svc.WorkingDir
+    } elseif ($Svc.PSObject.Properties["Repo"] -and $Svc.Repo) {
+        [string]$Svc.Repo
+    } else {
+        ""
+    }
+    if (-not $spec) { return $RootDir }
+    if ([System.IO.Path]::IsPathRooted($spec)) { return $spec }
+    return [System.IO.Path]::GetFullPath((Join-Path $RootDir $spec))
 }
 
 function Build-ServiceTemplateVars {

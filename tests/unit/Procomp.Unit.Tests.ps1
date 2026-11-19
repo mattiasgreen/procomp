@@ -735,6 +735,29 @@ Describe 'procomp Unit Tests' {
             Assert-Eq ($cfg.Services | Where-Object { $_.Name -eq "svc2" }).RoutingMode "REMOTE"
         }
 
+        It 'resolves optional workingDir on runtimes and apps while keeping Repo for Git' {
+            $wdCfgPath = Join-Path $TestDrive "wd-cfg.json"
+            @'
+{
+  "reposRoot": "C:\\repos",
+  "runtimes": {
+    "node": { "command": "node index.js", "workingDir": "{{repo}}\\{{modulePath}}" }
+  },
+  "apps": [
+    { "servicename": "bff", "localport": "3000", "type": "node", "subproject": "packages/bff", "servicerepositoryurl": "ssh://git@scm/monorepo.git" },
+    { "servicename": "custom", "localport": "3001", "type": "node", "workingDir": "{{reposRoot}}\\custom-dir" }
+  ]
+}
+'@ | Set-Content -Path $wdCfgPath -Encoding UTF8
+
+            $cfg = Load-ProcompConfig -ConfigPath $wdCfgPath -StateDir (Join-Path $TestDrive "wdst") -LogDir (Join-Path $TestDrive "wdlg")
+            $bff = $cfg.Services[0]
+            $custom = $cfg.Services[1]
+            Assert-Eq $bff.Repo "C:\repos\monorepo"
+            Assert-Eq (Resolve-ServiceWorkingDir -Svc $bff -RootDir $script:RepoRoot) "C:\repos\monorepo\packages\bff"
+            Assert-Eq (Resolve-ServiceWorkingDir -Svc $custom -RootDir $script:RepoRoot) "C:\repos\custom-dir"
+        }
+
         It 'applies named routing profiles from procomp.json and persists routing.json' {
             $rFile = Join-Path $TestDrive "prof-routing.json"
             $polyPath = Join-Path $script:RepoRoot "examples\polyglot.procomp.json"

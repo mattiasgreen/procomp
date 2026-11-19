@@ -259,7 +259,7 @@ function Expand-BuildCommand {
 function Start-ServiceBuildAsync {
     param($Svc, [string]$RootDir)
     $cmdLine = Expand-BuildCommand -Svc $Svc -RootDir $RootDir
-    $workDir = if ($Svc.Repo) { Resolve-RepoPath -Repo $Svc.Repo -RootDir $RootDir } else { $RootDir }
+    $workDir = Resolve-ServiceWorkingDir -Svc $Svc -RootDir $RootDir
     if (-not (Test-Path $workDir)) {
         throw "Working directory not found for $($Svc.Name): $workDir"
     }
@@ -286,7 +286,7 @@ function Invoke-ServiceBuildSync {
     param($Svc, [string]$RootDir)
     if (-not $Svc.BuilderDef) { return $false }
     $cmdLine = Expand-BuildCommand -Svc $Svc -RootDir $RootDir
-    $workDir = if ($Svc.Repo) { Resolve-RepoPath -Repo $Svc.Repo -RootDir $RootDir } else { $RootDir }
+    $workDir = Resolve-ServiceWorkingDir -Svc $Svc -RootDir $RootDir
     if (-not (Test-Path $workDir)) { return $false }
 
     $prevEap = $ErrorActionPreference
