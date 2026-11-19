@@ -4,6 +4,7 @@ Describe 'procomp Unit Tests' {
     BeforeAll {
         $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         . (Join-Path $script:RepoRoot "tests\TestHelpers.ps1")
+        . (Join-Path $script:RepoRoot "mock-service\MockFixtures.ps1")
         . (Join-Path $script:RepoRoot "src\Config.ps1")
         . (Join-Path $script:RepoRoot "src\EnvLoader.ps1")
         . (Join-Path $script:RepoRoot "src\BuildRunner.ps1")
@@ -310,36 +311,8 @@ Describe 'procomp Unit Tests' {
         }
 
         It 'fetches remote commit, reports behind count, pulls --ff-only, and skips dirty repo' {
-            $remote = Join-Path $TestDrive "git-remote.git"
-            $local  = Join-Path $TestDrive "git-local"
-            $other  = Join-Path $TestDrive "git-other"
-            New-Item -ItemType Directory -Force -Path $remote, $local | Out-Null
-
-            $prevEap = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            try {
-                & git init --bare $remote >$null 2>&1
-                & git -C $local init >$null 2>&1
-                & git -C $local checkout -B main >$null 2>&1
-                & git -C $local config user.email "t@t.local" >$null 2>&1
-                & git -C $local config user.name "t" >$null 2>&1
-                "v1" | Set-Content (Join-Path $local "a.txt")
-                & git -C $local add a.txt >$null 2>&1
-                & git -C $local commit -m "c1" >$null 2>&1
-                & git -C $local remote add origin $remote >$null 2>&1
-                & git -C $local push -u origin main >$null 2>&1
-
-                # Push an upstream commit from another clone
-                & git clone --branch main $remote $other >$null 2>&1
-                & git -C $other config user.email "t@t.local" >$null 2>&1
-                & git -C $other config user.name "t" >$null 2>&1
-                "v2" | Set-Content (Join-Path $other "b.txt")
-                & git -C $other add b.txt >$null 2>&1
-                & git -C $other commit -m "c2" >$null 2>&1
-                & git -C $other push origin main >$null 2>&1
-            } finally {
-                $ErrorActionPreference = $prevEap
-            }
+            $repo = New-MockGitRepo -BaseDir (Join-Path $TestDrive "mgit") -Name "svc" -Branch "main" -AddRemoteCommit -Force
+            $local = $repo.LocalPath
 
             $fr = Invoke-GitFetchRepo -RepoPath $local
             Assert-Eq $fr.Action "FETCHED"

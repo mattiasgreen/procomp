@@ -55,7 +55,6 @@ trap {
 . (Join-Path $RootDir "src\WireMockBridge.ps1")
 . (Join-Path $RootDir "src\LogViewer.ps1")
 . (Join-Path $RootDir "src\BackgroundWorker.ps1")
-. (Join-Path $RootDir "src\ConsoleInput.ps1")
 . (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
@@ -203,23 +202,16 @@ if ($Action -eq "status") {
 }
 
 # --- TUI Mode ---
+Write-Host "[procomp] Loading TUI & background monitor ($($services.Count) apps)..." -ForegroundColor Cyan
+. (Join-Path $RootDir "src\ConsoleInput.ps1")
+
 $selected = 0
 $allLogs = $false
 $errorsOnly = $false
 $rawLogs = $false
 $confirmQuit = $false
 $detachOnExit = $false
-$banner = "Booting enabled services..."
-
-foreach ($svc in $services) {
-    if ($svc.Enabled) {
-        try {
-            Start-ServiceProcess -Svc $svc -RootDir $RootDir
-        } catch {
-            $banner = $_.Exception.Message
-        }
-    }
-}
+$banner = "Starting enabled services..."
 
 $sharedState = New-SharedTuiState -RootDir $RootDir -ConfigPath $ConfigPath -StateDir $StateDir -LogDir $LogDir
 foreach ($svc in $services) {
@@ -246,6 +238,21 @@ try {
     $scrollOffset = 0
     $expandedEntryIds = @{}
     $uiLayout = $null
+
+    # Render initial TUI frame immediately so the user sees live startup progress instead of a blank screen
+    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Booting enabled services..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -LogBuffers $sharedState.LogBuffers
+    foreach ($svc in $services) {
+        if ($svc.Enabled) {
+            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Starting $($svc.Name) (port $($svc.Port))..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -LogBuffers $sharedState.LogBuffers
+            try {
+                Start-ServiceProcess -Svc $svc -RootDir $RootDir
+            } catch {
+                $banner = $_.Exception.Message
+            }
+        }
+    }
+    $sharedState.RefreshNow = $true
+    $banner = "All enabled services launched. Waiting for health checks..."
 
     function Invoke-UiAction {
         param([string]$Cmd)
