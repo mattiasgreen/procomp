@@ -372,6 +372,24 @@ Describe 'procomp Unit Tests' {
             Assert-Match $rows[2].Text "java\.lang\.RuntimeException: Second boom"
             Assert-Match $rows[4].Text "Caused by: java\.io\.IOException: Closed"
         }
+
+        It 'inherits SortKey for timestamp-less lines so they stay in chronological order' {
+            $logPath = Join-Path $TestDrive "notime.log"
+            @(
+                "2026-11-18 09:00:01.000  INFO [svc-a] --- Starting"
+                "SLF4J: Class path contains multiple SLF4J bindings."
+                "2026-11-18 09:00:05.000  INFO [svc-a] --- Ready"
+            ) | Set-Content -Path $logPath -Encoding UTF8
+
+            $svc = [PSCustomObject]@{
+                Name = "svc-a"; LogFile = $logPath; ErrFile = (Join-Path $TestDrive "notime.err.log")
+                StatusText = "HEALTHY"; CachedLogRawMode = $null
+            }
+            $entries = @(Get-ServiceLogEntries -Svc $svc -TailCount 10 -RawMode $false)
+            Assert-Eq $entries.Count 3
+            Assert-Eq $entries[1].SortKey $entries[0].SortKey
+            Assert-Eq $entries[1].Level "INFO"
+        }
     }
 
     Context 'TUI DryRun Renderer' {

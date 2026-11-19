@@ -194,6 +194,9 @@ function Get-ServiceLogEntries {
                 }
 
                 $entry = Normalize-LogEntry -RawLine $line -DefaultService $Svc.Name -RawMode $RawMode -LogMapping $Svc.LogMapping
+                if ((-not $entry.SortKey) -and ($Svc.LogRingBuffer.Count -gt 0)) {
+                    $entry.SortKey = $Svc.LogRingBuffer[$Svc.LogRingBuffer.Count - 1].SortKey
+                }
                 $Svc.LogRingBuffer.Add($entry)
                 if ($Svc.LogRingBuffer.Count -gt 1000) {
                     $Svc.LogRingBuffer.RemoveAt(0)

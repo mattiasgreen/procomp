@@ -167,9 +167,22 @@ function Start-BackgroundMonitor {
                         if ($svc.ErrFile -and (Test-Path $svc.ErrFile)) {
                             $errLines = @(Get-Content -Path $svc.ErrFile -Tail 40 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne "" })
                             if ($errLines.Count -gt 0) {
-                                $entries += [PSCustomObject]@{ EntryId = "err-hdr-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.998"; Level = "ERROR"; Text = "--- stderr ---"; StackLines = @(); IsJson = $false }
+                                $pinBottom = ($svc.StatusText -in @("CRASHED", "BUILD-FAIL", "BUILDING")) -or ($entries.Count -eq 0)
+                                $errEntries = @()
+                                $errIdx = 0
                                 foreach ($el in $errLines) {
-                                    $entries += [PSCustomObject]@{ EntryId = "err-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.999"; Level = "ERROR"; Text = "[$($svc.Name)] $el"; StackLines = @(); IsJson = $false }
+                                    $errIdx++
+                                    $normErr = Normalize-LogEntry -RawLine $el -DefaultService $svc.Name -RawMode $rawMode -LogMapping $svc.LogMapping
+                                    if (-not $normErr.SortKey) {
+                                        $normErr.SortKey = if ($pinBottom) { "9999-99-99 99:99:99.$($errIdx.ToString('D3'))" } else { "0000-00-00 00:00:00.$($errIdx.ToString('D3'))" }
+                                    }
+                                    $normErr.Text = "[stderr] $($normErr.Text)"
+                                    $errEntries += $normErr
+                                }
+                                if ($pinBottom) {
+                                    $entries = @($entries) + @([PSCustomObject]@{ EntryId = "err-hdr-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.000"; Level = "WARN"; Text = "--- stderr ---"; StackLines = @(); IsJson = $false }) + $errEntries
+                                } else {
+                                    $entries = $errEntries + @($entries)
                                 }
                             }
                         }
