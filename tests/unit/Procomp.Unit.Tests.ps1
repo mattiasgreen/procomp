@@ -98,6 +98,24 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $cfg.Services[2].Enabled $false
         }
 
+        It 'expands {{reposRoot}} in appsFile and template variables' {
+            $fakeRoot = Join-Path $TestDrive "myrepos"
+            New-Item -ItemType Directory -Force -Path $fakeRoot | Out-Null
+            Copy-Item (Join-Path $script:RepoRoot "examples\service-index.json") (Join-Path $fakeRoot "service-index.json")
+
+            $cfgFile = Join-Path $TestDrive "rr-cfg.json"
+            @{
+                appsFile = "{{reposRoot}}\service-index.json"
+                runtimes = @{ java = @{ command = "java -jar {{reposRoot}}\{{servicename}}.jar" } }
+            } | ConvertTo-Json -Depth 4 | Set-Content -Path $cfgFile -Encoding UTF8
+
+            $cfg = Load-ProcompConfig -ConfigPath $cfgFile -StateDir (Join-Path $TestDrive "rrst") -LogDir (Join-Path $TestDrive "rrlg") -ReposRootOverride $fakeRoot
+            Assert-Eq $cfg.Services.Count 3
+            $vars = Build-ServiceTemplateVars -Svc $cfg.Services[0] -RootDir $script:RepoRoot
+            Assert-Eq $vars["reposRoot"] $fakeRoot
+            Assert-Eq (Expand-Template -Template $cfg.Services[0].RuntimeDef.Command -Vars $vars) "java -jar $fakeRoot\service1.jar"
+        }
+
         It 'round-trips routing.json state' {
             $rFile = Join-Path $TestDrive "state\routing.json"
             Save-RoutingState -RoutingMap @{ "order-service" = "REMOTE"; "auth-service" = "LOCAL" } -RoutingFile $rFile

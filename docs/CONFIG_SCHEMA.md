@@ -39,6 +39,8 @@ Both `builders.<name>.command` and `runtimes.<name>.command` (as well as `artifa
 | Variable | Description |
 | :--- | :--- |
 | `{{root}}` | Workspace root directory containing `procomp.ps1` |
+| `{{reposRoot}}` | Value of `-ReposRoot` CLI parameter (or `reposRoot` in config); usable in `appsFile`, `repo`, `builders`, and `runtimes` |
+| `{{java}}` | Resolved `%JAVA_HOME%\bin\java.exe` (or `java` on `PATH`) |
 | `{{servicename}}` (or `{{name}}`) | App `servicename` |
 | `{{localport}}` (or `{{port}}`) | App `localport` |
 | `{{type}}` | App `type` (runtime alias) |

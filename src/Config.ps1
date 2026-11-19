@@ -170,9 +170,9 @@ function Load-ProcompConfig {
 
     $rawApps = @()
     if ($doc.PSObject.Properties["appsFile"] -and $doc.appsFile) {
-        $afSpec = [string]$doc.appsFile
+        $afSpec = Expand-Template -Template ([string]$doc.appsFile) -Vars @{ reposRoot = $reposRoot }
         $cfgDir = Split-Path -Parent $ConfigPath
-        $afPath = if ([System.IO.Path]::IsPathRooted($afSpec)) { $afSpec } else { [System.IO.Path]::GetFullPath((Join-Path $cfgDir $afSpec)) }
+        $afPath = if ([System.IO.Path]::IsPathRooted($afSpec)) { $afSpec } else { [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($cfgDir, $afSpec)) }
         if (-not (Test-Path $afPath)) {
             throw "appsFile not found: $afPath"
         }
@@ -213,13 +213,13 @@ function Load-ProcompConfig {
 
         $repo = ""
         if ($item.PSObject.Properties["repo"] -and $item.repo) {
-            $repo = [string]$item.repo
+            $repo = Expand-Template -Template ([string]$item.repo) -Vars @{ reposRoot = $reposRoot }
         } elseif ($repoUrl) {
             $repoDirName = Get-RepoNameFromUrl -RepoUrl $repoUrl
             $repo = if ($reposRoot) { [System.IO.Path]::Combine($reposRoot, $repoDirName) } else { $repoDirName }
         }
 
-        $tmplVars = @{ servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; type = $runtimeName }
+        $tmplVars = @{ reposRoot = $reposRoot; servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; type = $runtimeName }
 
         $healthPath = if ($item.PSObject.Properties["healthPath"] -and $item.healthPath) { [string]$item.healthPath } else { $rt.HealthPath }
         $enabled = if ($item.PSObject.Properties["enabled"]) {
@@ -296,6 +296,7 @@ function Load-ProcompConfig {
             BuilderDef           = if ($builderName) { $builders[$builderName] } else { $null }
             Port                 = $port
             Repo                 = $repo
+            ReposRoot            = $reposRoot
             ServiceRepositoryUrl = $repoUrl
             Module               = $subproject
             SwaggerUri           = $swaggerUri
@@ -347,9 +348,11 @@ function Build-ServiceTemplateVars {
     $modPath = Resolve-ModulePath -Module $Svc.Module
     $swagger = if ($Svc.PSObject.Properties["SwaggerUri"]) { [string]$Svc.SwaggerUri } else { "" }
     $repoUrl = if ($Svc.PSObject.Properties["ServiceRepositoryUrl"]) { [string]$Svc.ServiceRepositoryUrl } else { "" }
+    $rRoot   = if ($Svc.PSObject.Properties["ReposRoot"]) { [string]$Svc.ReposRoot } else { "" }
 
     $vars = @{
         root                 = $RootDir
+        reposRoot            = $rRoot
         java                 = (Resolve-JavaTool -Tool "java")
         servicename          = $Svc.Name
         name                 = $Svc.Name
