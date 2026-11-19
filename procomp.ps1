@@ -523,6 +523,7 @@ try {
             }
             foreach ($svc in $services) {
                 if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
+                    try { $svc.BuildProc.WaitForExit() } catch { }
                     $exitCode = $svc.BuildProc.ExitCode
                     $svc.BuildProc = $null
                     Write-ProcompTraceLog -Category "BUILD-DONE" -ServiceName $svc.Name -Message "exitCode=$exitCode"
@@ -538,6 +539,14 @@ try {
                     } else {
                         $svc.StatusText = "BUILD-FAIL"
                         $banner = "Build failed for $($svc.Name) (exit $exitCode)"
+                        foreach ($bf in @($svc.LogFile, $svc.ErrFile)) {
+                            if ($bf -and (Test-Path $bf)) {
+                                $bTail = @(Get-Content -Path $bf -Tail 20 -ErrorAction SilentlyContinue)
+                                foreach ($bl in $bTail) {
+                                    if ($bl) { Write-ProcompTraceLog -Category "BUILD-FAIL" -ServiceName $svc.Name -Message $bl }
+                                }
+                            }
+                        }
                     }
                 }
             }

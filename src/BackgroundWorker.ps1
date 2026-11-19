@@ -57,6 +57,7 @@ function Start-BackgroundMonitor {
         try {
             $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir -ReposRootOverride $State.ReposRoot
             $bgServices = @($cfg.Services)
+            $traceOffsets = @{}
             Write-ProcompTraceLog -Category "BG" -Message "BackgroundMonitor started ($($bgServices.Count) service(s))"
             $lastGit = [datetime]::MinValue
             $lastClearEpoch = 0
@@ -162,14 +163,42 @@ function Start-BackgroundMonitor {
                         }
 
                         $entries = @(Get-ServiceLogEntries -Svc $svc -TailCount 1000 -RawMode $rawMode)
-                        if (($svc.StatusText -eq "CRASHED") -and (Test-Path $svc.ErrFile)) {
-                            $errLines = @(Get-Content -Path $svc.ErrFile -Tail 20 -ErrorAction SilentlyContinue)
+                        if ($svc.ErrFile -and (Test-Path $svc.ErrFile)) {
+                            $errLines = @(Get-Content -Path $svc.ErrFile -Tail 40 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() -ne "" })
                             if ($errLines.Count -gt 0) {
                                 $entries += [PSCustomObject]@{ EntryId = "err-hdr-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.998"; Level = "ERROR"; Text = "--- stderr ---"; StackLines = @(); IsJson = $false }
                                 foreach ($el in $errLines) {
-                                    if ($el) {
-                                        $entries += [PSCustomObject]@{ EntryId = "err-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.999"; Level = "ERROR"; Text = "[$($svc.Name)] $el"; StackLines = @(); IsJson = $false }
-                                    }
+                                    $entries += [PSCustomObject]@{ EntryId = "err-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.999"; Level = "ERROR"; Text = "[$($svc.Name)] $el"; StackLines = @(); IsJson = $false }
+                                }
+                            }
+                        }
+                        if ([System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")) {
+                            foreach ($streamPair in @(@("stdout", $svc.LogFile), @("stderr", $svc.ErrFile))) {
+                                $stName = $streamPair[0]
+                                $stPath = $streamPair[1]
+                                if ($stPath -and (Test-Path -LiteralPath $stPath)) {
+                                    try {
+                                        $fi = Get-Item -LiteralPath $stPath -ErrorAction SilentlyContinue
+                                        if ($fi) {
+                                            $prevOff = if ($traceOffsets.ContainsKey($stPath)) { [long]$traceOffsets[$stPath] } else { 0L }
+                                            if ($fi.Length -lt $prevOff) { $prevOff = 0L }
+                                            if ($fi.Length -gt $prevOff) {
+                                                $fs = [System.IO.File]::Open($stPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                                try {
+                                                    [void]$fs.Seek($prevOff, [System.IO.SeekOrigin]::Begin)
+                                                    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8, $true)
+                                                    while ($null -ne ($tLine = $sr.ReadLine())) {
+                                                        if ($tLine.Trim() -ne "") {
+                                                            Write-ProcompTraceLog -Category "SUBPROC" -ServiceName $svc.Name -Message "[$stName] $tLine"
+                                                        }
+                                                    }
+                                                    $traceOffsets[$stPath] = $fs.Position
+                                                } finally {
+                                                    $fs.Dispose()
+                                                }
+                                            }
+                                        }
+                                    } catch { }
                                 }
                             }
                         }

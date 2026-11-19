@@ -440,6 +440,9 @@ Describe 'procomp Unit Tests' {
             if ($svc.BuildProc -and -not $svc.BuildProc.HasExited) {
                 $svc.BuildProc.WaitForExit(5000) | Out-Null
             }
+            $svc.BuildProc.WaitForExit()
+            Assert-Eq $svc.BuildProc.ExitCode 0
+            Assert-Match (Get-Content -Path $svc.LogFile -Raw) "async-build"
             Stop-ServiceProcess -Svc $svc
         }
 

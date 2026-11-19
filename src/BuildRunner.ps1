@@ -226,14 +226,18 @@ function Start-ServiceBuildAsync {
         throw "Working directory not found for $($Svc.Name): $workDir"
     }
 
-    Write-ProcompDebugLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "cmd.exe /c $cmdLine"
+    $logDir = Split-Path -Parent $Svc.LogFile
+    if ($logDir -and (-not (Test-Path -LiteralPath $logDir))) {
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    }
+    $wrappedCmd = "`"$cmdLine 1>`"$($Svc.LogFile)`" 2>`"$($Svc.ErrFile)`"`""
+    Write-ProcompDebugLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "cmd.exe /c $cmdLine (stdout=$($Svc.LogFile), stderr=$($Svc.ErrFile))"
     $proc = Start-Process -FilePath "cmd.exe" `
-        -ArgumentList @("/c", $cmdLine) `
+        -ArgumentList @("/c", $wrappedCmd) `
         -WorkingDirectory $workDir `
-        -RedirectStandardOutput $Svc.LogFile `
-        -RedirectStandardError $Svc.ErrFile `
         -WindowStyle Hidden `
         -PassThru
+    try { $null = $proc.Handle } catch { }
 
     Write-ProcompDebugLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -Message "Started PID=$($proc.Id)"
     $Svc.BuildProc = $proc
