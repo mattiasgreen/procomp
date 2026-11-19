@@ -70,9 +70,24 @@ function Set-ServiceWireMockRoute {
     }
 }
 
+function Test-WireMockReachable {
+    param([string]$WireMockBaseUrl)
+    if (-not $WireMockBaseUrl) { return $false }
+    try {
+        $null = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings?limit=1" -Method Get -TimeoutSec 1
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Sync-WireMockMappings {
     param($Services, [string]$WireMockBaseUrl, [string]$GatewayServiceName = "")
     if (-not $WireMockBaseUrl) { return 0 }
+    if (-not (Test-WireMockReachable -WireMockBaseUrl $WireMockBaseUrl)) {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "WireMock not reachable at $WireMockBaseUrl; skipping route sync"
+        return 0
+    }
     $synced = 0
     $total = @($Services).Count
     $idx = 0

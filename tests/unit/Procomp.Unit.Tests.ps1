@@ -677,6 +677,10 @@ Describe 'procomp Unit Tests' {
             $mRemote = Build-WireMockMapping -Svc $svc
             Assert-Eq $mRemote.id $mLocal.id
             Assert-Eq $mRemote.response.proxyBaseUrl "https://shared-dev.mycorp/orders"
+
+            # Precondition check skips sync when WireMock is unreachable
+            Assert-Eq (Test-WireMockReachable -WireMockBaseUrl "http://127.0.0.1:19998") $false
+            Assert-Eq (Sync-WireMockMappings -Services @($svc) -WireMockBaseUrl "http://127.0.0.1:19998") 0
         }
 
         It 'applies named routing profiles from procomp.json and persists routing.json' {

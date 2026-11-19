@@ -73,7 +73,7 @@ function Get-GitRepoStatus {
 }
 
 function Refresh-GitSummaries {
-    param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null)
+    param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null, [switch]$Quiet)
     $cache = @{}
     $svcList = @($Services)
     $total = $svcList.Count
@@ -95,7 +95,9 @@ function Refresh-GitSummaries {
             continue
         }
         if (-not $cache.ContainsKey($rp)) {
-            Report-ProcompActivity -ServiceName $svc.Name -Category "GIT" -Message "Checking Git status ($idx/$total): $(Split-Path -Leaf $rp)..."
+            if (-not $Quiet) {
+                Report-ProcompActivity -ServiceName $svc.Name -Category "GIT" -Message "Checking Git status ($idx/$total): $(Split-Path -Leaf $rp)..."
+            }
             $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp -HasRepoUrl $hasUrl).Summary
         }
         $svc.GitSummary = $cache[$rp]

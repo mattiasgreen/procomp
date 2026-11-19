@@ -332,10 +332,8 @@ function Start-BackgroundMonitor {
                     }
 
                     $now = Get-Date
-                    if (($now - $lastGit).TotalSeconds -ge 10) {
-                        $State.CurrentActivity = "Checking Git status..."
-                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
-                        $State.CurrentActivity = ""
+                    if (($now - $lastGit).TotalSeconds -ge 60) {
+                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
                         $lastGit = $now
                     }
 
