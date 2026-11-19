@@ -98,39 +98,48 @@ function Sync-WireMockMappings {
         return 0
     }
 
-    $existingById = @{}
+    $targets = @()
+    $mappings = @()
+    foreach ($svc in $Services) {
+        if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
+        $targets += [PSCustomObject]@{ Svc = $svc; BaseUrl = $WireMockBaseUrl }
+        $mappings += (Build-WireMockMapping -Svc $svc)
+    }
+
+    Report-ProcompActivity -Category "WIREMOCK" -Message "Clearing WireMock mappings..."
     try {
-        $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Get -TimeoutSec 2
-        if ($resp -and $resp.PSObject.Properties["mappings"] -and $resp.mappings) {
-            foreach ($m in $resp.mappings) {
-                if ($m.PSObject.Properties["id"] -and $m.id -and $m.PSObject.Properties["response"] -and $m.response.PSObject.Properties["proxyBaseUrl"]) {
-                    $existingById[[string]$m.id] = ([string]$m.response.proxyBaseUrl).TrimEnd('/')
-                }
-            }
-        }
+        Write-ProcompDebugLog -Category "WIREMOCK" -Message "DELETE $WireMockBaseUrl/__admin/mappings"
+        Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Delete -TimeoutSec 2 | Out-Null
     } catch {
-        Write-ProcompTraceLog -Category "WIREMOCK" -Message "GET mappings failed before sync: $($_.Exception.Message)"
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "DELETE mappings failed: $($_.Exception.Message)"
         return 0
     }
 
-    $targets = @()
-    foreach ($svc in $Services) {
-        if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
-        $expected = Build-WireMockMapping -Svc $svc
-        if ($existingById.ContainsKey($expected.id) -and ($existingById[$expected.id] -eq $expected.response.proxyBaseUrl)) {
-            continue
-        }
-        $targets += [PSCustomObject]@{ Svc = $svc; BaseUrl = $WireMockBaseUrl; GwName = $GatewayServiceName }
+    if ($mappings.Count -eq 0) { return 0 }
+
+    Report-ProcompActivity -Category "WIREMOCK" -Message "Posting $($mappings.Count) WireMock route(s)..."
+    try {
+        $batchJson = @{ mappings = $mappings; duplicatePolicy = "OVERWRITE" } | ConvertTo-Json -Depth 6
+        Write-ProcompDebugLog -Category "WIREMOCK" -Message "POST $WireMockBaseUrl/__admin/mappings/import ($($mappings.Count) mappings)"
+        Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings/import" -Method Post -Body $batchJson -ContentType "application/json" -TimeoutSec 5 | Out-Null
+        return $mappings.Count
+    } catch {
+        Write-ProcompTraceLog -Category "WIREMOCK" -Message "Batch import unavailable ($($_.Exception.Message)); posting individually (4 threads)"
     }
-    if ($targets.Count -eq 0) {
-        Write-ProcompTraceLog -Category "WIREMOCK" -Message "All WireMock routes already in sync (0 PUTs needed)"
-        return 0
-    }
-    Report-ProcompActivity -Category "WIREMOCK" -Message "Syncing $($targets.Count) changed WireMock route(s) (4 threads)..."
+
     $initScripts = @((Join-Path $PSScriptRoot "Config.ps1"), (Join-Path $PSScriptRoot "WireMockBridge.ps1"))
     $res = @(Invoke-ParallelWork -Items $targets -MaxThreads 4 -InitScripts $initScripts -ScriptBlock {
         param($t)
-        Set-ServiceWireMockRoute -Svc $t.Svc -WireMockBaseUrl $t.BaseUrl -GatewayServiceName $t.GwName
+        $m = Build-WireMockMapping -Svc $t.Svc
+        $json = $m | ConvertTo-Json -Depth 5
+        try {
+            Write-ProcompDebugLog -Category "WIREMOCK" -ServiceName $t.Svc.Name -Message "POST $($t.BaseUrl)/__admin/mappings -> $($t.Svc.RoutingMode)"
+            Invoke-RestMethod -Uri "$($t.BaseUrl)/__admin/mappings" -Method Post -Body $json -ContentType "application/json" -TimeoutSec 2 | Out-Null
+            return $true
+        } catch {
+            Write-ProcompTraceLog -Category "WIREMOCK" -ServiceName $t.Svc.Name -Message "POST mapping failed: $($_.Exception.Message)"
+            return $false
+        }
     })
     return (@($res | Where-Object { $_ -eq $true })).Count
 }
