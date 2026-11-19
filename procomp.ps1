@@ -344,6 +344,11 @@ try {
                 $script:scrollOffset = 0
                 $script:banner = "Log Viewer: $($curSvc.Name) (Wheel/PgUp/PgDn to scroll, Esc to return)"
             }
+            "procomp-logs" {
+                $script:viewMode = "PROCOMP"
+                $script:scrollOffset = 0
+                $script:banner = "procomp Trace Log (Wheel/PgUp/PgDn to scroll, Esc to return)"
+            }
             "back" {
                 $script:viewMode = "SERVICES"
                 $script:scrollOffset = 0
@@ -558,7 +563,7 @@ try {
 
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
-            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -LayoutOut $layoutRef
+            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -LayoutOut $layoutRef
             if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }
@@ -675,7 +680,7 @@ try {
 
                 $pageStep = if ($uiLayout -and $uiLayout.PageHeight -gt 2) { $uiLayout.PageHeight - 2 } else { 10 }
 
-                if ($viewMode -eq "LOGS") {
+                if ($viewMode -eq "LOGS" -or $viewMode -eq "PROCOMP") {
                     switch ($vk) {
                         0x1B { Invoke-UiAction -Cmd "back"; $needsRender = $true; continue }   # Esc
                         0x26 { $scrollOffset++; $needsRender = $true; continue }              # Up
@@ -690,6 +695,7 @@ try {
                     }
                     switch -CaseSensitive ($ch) {
                         'l' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
+                        'L' { if ($viewMode -eq "PROCOMP") { Invoke-UiAction -Cmd "back" } else { Invoke-UiAction -Cmd "procomp-logs" }; $needsRender = $true }
                         'k' { $scrollOffset++; $needsRender = $true }
                         'j' { $scrollOffset = [Math]::Max(0, $scrollOffset - 1); $needsRender = $true }
                         'G' { Invoke-UiAction -Cmd "follow"; $needsRender = $true }
@@ -714,6 +720,7 @@ try {
                         'g' { Invoke-UiAction -Cmd "local-only"; $needsRender = $true }
                         'o' { Invoke-UiAction -Cmd "swagger"; $needsRender = $true }
                         'l' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
+                        'L' { Invoke-UiAction -Cmd "procomp-logs"; $needsRender = $true }
                         'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
                         'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }
                         'v' { Invoke-UiAction -Cmd "raw"; $needsRender = $true }

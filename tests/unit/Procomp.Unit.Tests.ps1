@@ -515,6 +515,16 @@ Describe 'procomp Unit Tests' {
             $logFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "LOGS" -LayoutOut $llRef -DryRun
             Assert-Match $logFrame "procomp LOGS"
             Assert-Eq $logLayout.ToolbarButtons[0].Command "back"
+
+            # Full-screen PROCOMP trace log view renders and filters
+            $pEntries = @(
+                [PSCustomObject]@{ EntryId = "p1"; SortKey = "000001"; Level = "INFO";  Text = "[2026-11-19] [START] Action=tui"; StackLines = @(); IsJson = $false }
+                [PSCustomObject]@{ EntryId = "p2"; SortKey = "000002"; Level = "ERROR"; Text = "[2026-11-19] [BUILD-FAIL] svc=svc1 boom"; StackLines = @(); IsJson = $false }
+            )
+            $pFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $true -RawLogs $false -ConfirmQuit $false -ViewMode "PROCOMP" -ProcompLogEntries $pEntries -DryRun
+            Assert-Match $pFrame "procomp TRACE LOG"
+            Assert-Match $pFrame "BUILD-FAIL"
+            Assert-Eq ($pFrame.Contains("Action=tui")) $false
         }
 
         It 'windows large service tables (25 apps) and renders the help overlay' {

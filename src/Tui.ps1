@@ -109,6 +109,7 @@ function Render-Tui {
         [int]$ScrollOffset = 0,
         [hashtable]$ExpandedEntryIds = @{},
         [hashtable]$LogBuffers = $null,
+        [array]$ProcompLogEntries = @(),
         $LayoutOut = $null,
         [switch]$DryRun
     )
@@ -133,7 +134,8 @@ function Render-Tui {
             "  r                 Restart selected       b                      Rebuild selected",
             "  f / F             Git fetch one / all    p / P                  Git pull (--ff-only) one / all",
             "  t / Click ROUTING Toggle LOCAL <-> REMOTE  o                    Open Swagger URI in browser",
-            "  g                 Toggle LOCAL-only view   d                    Detach (keep running)",
+            "  L                 procomp Trace/Debug Log  g                    Toggle LOCAL-only view",
+            "  d                 Detach (keep running)    q / Ctrl+C           Confirm & stop all",
             "",
             "$script:C_BOLD LOG VIEWER MODE (Full-Screen)$script:C_RESET",
             "  Esc / l           Return to Services     Left / Right           Switch service logs",
@@ -172,7 +174,17 @@ function Render-Tui {
     $logStartY = 3
     $logRows = 4
 
-    if ($ViewMode -eq "LOGS") {
+    if ($ViewMode -eq "PROCOMP") {
+        $toolbar = Build-ToolbarLine -Items @(
+            @{ Label = "[Esc]Services"; Command = "back";   Active = $false },
+            @{ Label = "[e]Warn/Err";   Command = "err";    Active = $ErrorsOnly },
+            @{ Label = "[/]Find";       Command = "find";   Active = ($FilterText -ne "") },
+            @{ Label = "[End]Follow";   Command = "follow"; Active = ($ScrollOffset -eq 0) },
+            @{ Label = "[?]Help";       Command = "help";   Active = $false }
+        )
+        $logStartY = 3
+        $logRows = [Math]::Max(4, $height - 4)
+    } elseif ($ViewMode -eq "LOGS") {
         $toolbar = Build-ToolbarLine -Items @(
             @{ Label = "[Esc]Services"; Command = "back";   Active = $false },
             @{ Label = "[a]All";        Command = "all";    Active = $AllLogs },
@@ -187,17 +199,18 @@ function Render-Tui {
         $logRows = [Math]::Max(4, $height - 4)
     } else {
         $toolbar = Build-ToolbarLine -Items @(
-            @{ Label = "[s]Start";  Command = "start";   Active = $false },
-            @{ Label = "[x]Stop";   Command = "stop";    Active = $false },
-            @{ Label = "[r]Rst";    Command = "restart"; Active = $false },
-            @{ Label = "[b]Build";  Command = "build";   Active = $false },
-            @{ Label = "[f]Fetch";  Command = "fetch";   Active = $false },
-            @{ Label = "[p]Pull";   Command = "pull";    Active = $false },
-            @{ Label = "[t]Route";  Command = "route";   Active = $false },
-            @{ Label = "[l]Logs";   Command = "logs";    Active = $false },
-            @{ Label = "[o]Docs";   Command = "swagger"; Active = $false },
-            @{ Label = "[?]Help";   Command = "help";    Active = $false },
-            @{ Label = "[q]Quit";   Command = "quit";    Active = $false }
+            @{ Label = "[s]Start";  Command = "start";        Active = $false },
+            @{ Label = "[x]Stop";   Command = "stop";         Active = $false },
+            @{ Label = "[r]Rst";    Command = "restart";      Active = $false },
+            @{ Label = "[b]Build";  Command = "build";        Active = $false },
+            @{ Label = "[f]Fetch";  Command = "fetch";        Active = $false },
+            @{ Label = "[p]Pull";   Command = "pull";         Active = $false },
+            @{ Label = "[t]Route";  Command = "route";        Active = $false },
+            @{ Label = "[l]Logs";   Command = "logs";         Active = $false },
+            @{ Label = "[L]Trace";  Command = "procomp-logs"; Active = $false },
+            @{ Label = "[o]Docs";   Command = "swagger";      Active = $false },
+            @{ Label = "[?]Help";   Command = "help";         Active = $false },
+            @{ Label = "[q]Quit";   Command = "quit";         Active = $false }
         )
         $maxSvcRows = [Math]::Max(4, [int][Math]::Floor($height * 0.45))
         $visibleSvcCount = [Math]::Min($Services.Count, $maxSvcRows)
@@ -211,7 +224,16 @@ function Render-Tui {
     }
 
     # Fetch log viewport first so header can display FOLLOW / PAUSED scroll position accurately
-    if ($null -ne $LogBuffers) {
+    if ($ViewMode -eq "PROCOMP") {
+        $pEntries = @($ProcompLogEntries)
+        if ($ErrorsOnly) {
+            $pEntries = @($pEntries | Where-Object { $_.Level -eq "ERROR" -or $_.Level -eq "WARN" })
+        }
+        if ($FilterText) {
+            $pEntries = @($pEntries | Where-Object { $_.Text.IndexOf($FilterText, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        }
+        $vp = Get-LogViewport -Entries $pEntries -MaxRows $logRows -ScrollOffset $ScrollOffset -ExpandedEntryIds @{} -ExpandLatest $false
+    } elseif ($null -ne $LogBuffers) {
         $vp = Get-LogViewportFromMemory -Services $Services -LogBuffers $LogBuffers -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -MaxRows $logRows -FilterText $FilterText -ExpandStacks $ExpandStacks -ScrollOffset $ScrollOffset -ExpandedEntryIds $ExpandedEntryIds
     } else {
         $rowsDirect = @(Get-UnifiedLogs -Services $Services -SelectedIndex $SelectedIndex -AllMode $AllLogs -ErrorsOnly $ErrorsOnly -RawMode $RawLogs -MaxRows $logRows -FilterText $FilterText -ExpandStacks $ExpandStacks -ScrollOffset $ScrollOffset -ExpandedEntryIds $ExpandedEntryIds)
@@ -220,7 +242,11 @@ function Render-Tui {
 
     $followTag = if ($vp.IsFollowing) { " | ${script:C_GREEN}FOLLOW${script:C_RESET}" } else { " | ${script:C_YELLOW}PAUSED ^$($vp.ClampedOffset)/$($vp.TotalRows)${script:C_RESET}" }
 
-    if ($ViewMode -eq "LOGS") {
+    if ($ViewMode -eq "PROCOMP") {
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag TRACE LOG$script:C_RESET $script:C_DIM| (Wheel/PgUp/PgDn: scroll, Esc: services)$script:C_RESET$errTag$followTag$filtTag" $width) + "`n")
+        [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
+        [void]$sb.Append(("-" * $width) + "`n")
+    } elseif ($ViewMode -eq "LOGS") {
         [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag LOGS$script:C_RESET $script:C_DIM| Scope: $modeTag (Left/Right: switch, Wheel/PgUp/PgDn: scroll)$script:C_RESET$rawTag$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
@@ -323,7 +349,7 @@ function Render-Tui {
         [void]$sb.Append((Pad-Line "$script:C_DIM $BannerMsg$script:C_RESET" $width))
     }
 
-    $routingStartX = if ($ViewMode -eq "LOGS") { 67 } else { 46 + $svcColWidth }
+    $routingStartX = if ($ViewMode -eq "LOGS" -or $ViewMode -eq "PROCOMP") { 67 } else { 46 + $svcColWidth }
     if ($null -ne $LayoutOut) {
         $LayoutOut.Value = [PSCustomObject]@{
             ViewMode         = $ViewMode

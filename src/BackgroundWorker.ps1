@@ -27,6 +27,7 @@ function New-SharedTuiState {
         ServiceOverrides   = [Hashtable]::Synchronized(@{})
         ServiceMetrics     = [Hashtable]::Synchronized(@{})
         LogBuffers         = [Hashtable]::Synchronized(@{})
+        ProcompLogEntries  = @()
     })
 }
 
@@ -205,6 +206,7 @@ function Start-BackgroundMonitor {
                         $State.LogBuffers[$svc.Name] = $entries
                     }
 
+                    $State.ProcompLogEntries = @(Read-ProcompTraceEntries -TailCount 400)
                     $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                     $State.RefreshNow = $false
                 } catch {

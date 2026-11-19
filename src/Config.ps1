@@ -71,6 +71,38 @@ function Write-ProcompTraceLog {
     }
 }
 
+function Read-ProcompTraceEntries {
+    param([int]$TailCount = 400)
+    $path = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")
+    if (-not $path) {
+        $path = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
+    }
+    if (-not $path -or (-not (Test-Path -LiteralPath $path))) { return @() }
+    $lines = @(Get-Content -LiteralPath $path -Tail $TailCount -ErrorAction SilentlyContinue)
+    $entries = @()
+    $idx = 0
+    foreach ($ln in $lines) {
+        if (-not $ln) { continue }
+        $idx++
+        $lvl = if ($ln -match '\[BG-ERROR\]|\[BUILD-FAIL\]|\[PORT\]|CRASHED|\[EXIT\].*error=|\[WIREMOCK\].*failed') {
+            "ERROR"
+        } elseif ($ln -match '\[KILL\]|\[GIT\] git exit=|PORT-CONFLICT|BUILD-FAIL|\[WIREMOCK\].*falling back') {
+            "WARN"
+        } else {
+            "INFO"
+        }
+        $entries += [PSCustomObject]@{
+            EntryId    = "procomp-$idx"
+            SortKey    = $idx.ToString("D6")
+            Level      = $lvl
+            Text       = $ln
+            StackLines = @()
+            IsJson     = $false
+        }
+    }
+    return $entries
+}
+
 function Resolve-JavaTool {
     param([string]$Tool = "java")
     if ($env:JAVA_HOME) {
