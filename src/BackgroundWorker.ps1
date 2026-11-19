@@ -22,6 +22,8 @@ function New-SharedTuiState {
         LastError          = ""
         BannerNotification = ""
         GitJobQueue        = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        CommandJobQueue    = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        CurrentActivity    = ""
         ActiveGitOps       = [Hashtable]::Synchronized(@{})
         StaleServices      = [Hashtable]::Synchronized(@{})
         ServiceOverrides   = [Hashtable]::Synchronized(@{})
@@ -60,11 +62,15 @@ function Start-BackgroundMonitor {
 
         $httpClient = New-HealthHttpClient -TimeoutMs 400
         try {
+            $State.CurrentActivity = "Loading config..."
             $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir -ReposRootOverride $State.ReposRoot
             $bgServices = @($cfg.Services)
             $gwAdminUrl = Get-GatewayAdminUrl -Config $cfg
+            $gwSvcName = if ($cfg.Gateway) { $cfg.Gateway.ServiceName } else { "" }
+            $routingFile = Join-Path $State.StateDir "routing.json"
             $traceOffsets = @{}
             Write-ProcompTraceLog -Category "BG" -Message "BackgroundMonitor started ($($bgServices.Count) service(s))"
+            $State.CurrentActivity = ""
             $lastGit = [datetime]::MinValue
             $lastClearEpoch = 0
 
@@ -84,9 +90,181 @@ function Start-BackgroundMonitor {
                         $lastClearEpoch = $State.ClearLogEpoch
                     }
 
+                    # Process queued lifecycle/WireMock commands off the UI thread
+                    $cmdJob = $null
+                    while ($State.CommandJobQueue.TryDequeue([ref]$cmdJob)) {
+                        try {
+                            switch ($cmdJob.Action) {
+                                "Startup" {
+                                    $buildingNames = @()
+                                    $lastErr = ""
+                                    foreach ($svc in $bgServices) {
+                                        if ($svc.Enabled) {
+                                            $State.CurrentActivity = "Starting $($svc.Name) (port $($svc.Port))..."
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                            try {
+                                                Start-ServiceProcess -Svc $svc -RootDir $root -AsyncBuild
+                                                if ($svc.BuildProc) { $buildingNames += $svc.Name }
+                                            } catch {
+                                                $lastErr = $_.Exception.Message
+                                                Write-ProcompTraceLog -Category "START-ERR" -ServiceName $svc.Name -Message $lastErr
+                                            }
+                                        }
+                                    }
+                                    if ($gwAdminUrl -and (-not $gwSvcName)) {
+                                        $State.CurrentActivity = "Syncing WireMock routes..."
+                                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                        $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl
+                                        if ($cnt -gt 0 -and (-not $lastErr)) { $State.BannerNotification = "External WireMock synced ($cnt routes)" }
+                                    }
+                                    if ($lastErr) {
+                                        $State.BannerNotification = $lastErr
+                                    } elseif ($buildingNames.Count -gt 0) {
+                                        $State.BannerNotification = "Building $($buildingNames -join ', ') in background..."
+                                    } elseif (-not $State.BannerNotification) {
+                                        $State.BannerNotification = "Ready"
+                                    }
+                                }
+                                "StartOne" {
+                                    $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
+                                    if ($target) {
+                                        $target.Enabled = $true
+                                        $target.RoutingMode = "LOCAL"
+                                        if ($target.StatusText -eq "BUILD-FAIL") { $target.StatusText = "STOPPED" }
+                                        $State.CurrentActivity = "Starting $($target.Name)..."
+                                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                        Start-ServiceProcess -Svc $target -RootDir $root -AsyncBuild
+                                        $State.BannerNotification = if ($target.BuildProc) { "Building $($target.Name) (will auto-start)..." } else { "Started $($target.Name)" }
+                                    }
+                                }
+                                "StartAll" {
+                                    foreach ($s in $bgServices) {
+                                        if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
+                                            $State.CurrentActivity = "Starting $($s.Name)..."
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                            try { Start-ServiceProcess -Svc $s -RootDir $root -AsyncBuild } catch { }
+                                        }
+                                    }
+                                    $State.BannerNotification = "Started all enabled LOCAL services"
+                                }
+                                "StopOne" {
+                                    $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
+                                    if ($target) {
+                                        if ($target.ExternalIde) {
+                                            $State.BannerNotification = "$($target.Name) is IDE-managed; stop it from your IDE."
+                                        } else {
+                                            $State.CurrentActivity = "Stopping $($target.Name)..."
+                                            $target.StatusText = "STOPPING"
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                            Stop-ServiceProcess -Svc $target
+                                            $State.BannerNotification = "Stopped $($target.Name)"
+                                        }
+                                    }
+                                }
+                                "StopAll" {
+                                    foreach ($s in $bgServices) {
+                                        if (($s.Managed -or $s.BuildProc -or (Test-Path $s.PidFile)) -and (-not $s.ExternalIde)) {
+                                            $State.CurrentActivity = "Stopping $($s.Name)..."
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                            Stop-ServiceProcess -Svc $s
+                                        }
+                                    }
+                                    $State.BannerNotification = "Stopped all managed services"
+                                }
+                                "RestartOne" {
+                                    $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
+                                    if ($target) {
+                                        if ($target.ExternalIde) {
+                                            $State.BannerNotification = "$($target.Name) is IDE-managed; restart it from your IDE."
+                                        } else {
+                                            $State.CurrentActivity = "Restarting $($target.Name)..."
+                                            $target.StatusText = "STOPPING"
+                                            $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                            Stop-ServiceProcess -Svc $target
+                                            $target.Enabled = $true
+                                            $target.RoutingMode = "LOCAL"
+                                            Start-ServiceProcess -Svc $target -RootDir $root -AsyncBuild
+                                            $State.BannerNotification = if ($target.BuildProc) { "Building $($target.Name) (will auto-start)..." } else { "Restarted $($target.Name)" }
+                                        }
+                                    }
+                                }
+                                "BuildOne" {
+                                    $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
+                                    if ($target) {
+                                        $State.CurrentActivity = "Starting build for $($target.Name)..."
+                                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                        Stop-ServiceProcess -Svc $target
+                                        Start-ServiceBuildAsync -Svc $target -RootDir $root
+                                        $State.BannerNotification = "Building $($target.Name) ($($target.Builder))..."
+                                    }
+                                }
+                                "RouteOne" {
+                                    $target = $bgServices | Where-Object { $_.Name -eq $cmdJob.ServiceName } | Select-Object -First 1
+                                    if ($target) {
+                                        $State.CurrentActivity = "Updating WireMock route for $($target.Name)..."
+                                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                        $rMap = @{}
+                                        foreach ($s in $bgServices) { $rMap[$s.Name] = $s.RoutingMode }
+                                        Save-RoutingState -RoutingMap $rMap -RoutingFile $routingFile
+                                        $gwSynced = Set-ServiceWireMockRoute -Svc $target -WireMockBaseUrl $gwAdminUrl -GatewayServiceName $gwSvcName
+                                        $gwNote = if ($gwSynced) { " (Gateway updated)" } else { "" }
+                                        $State.BannerNotification = "Routing for $($target.Name) set to $($target.RoutingMode)$gwNote"
+                                    }
+                                }
+                                "SyncGateway" {
+                                    if ($gwAdminUrl) {
+                                        $State.CurrentActivity = "Syncing WireMock routes..."
+                                        $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
+                                        $cnt = Sync-WireMockMappings -Services $bgServices -WireMockBaseUrl $gwAdminUrl -GatewayServiceName $gwSvcName
+                                        $State.BannerNotification = "Gateway synced ($cnt routes)"
+                                    }
+                                }
+                            }
+                        } catch {
+                            $State.BannerNotification = $_.Exception.Message
+                            Write-ProcompTraceLog -Category "CMD-ERR" -Message "$($cmdJob.Action): $($_.Exception.Message)"
+                        } finally {
+                            $State.CurrentActivity = ""
+                        }
+                    }
+
+                    # Check completed async builds inside BackgroundWorker
+                    foreach ($svc in $bgServices) {
+                        if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
+                            try { $svc.BuildProc.WaitForExit() } catch { }
+                            $exitCode = $svc.BuildProc.ExitCode
+                            $svc.BuildProc = $null
+                            Write-ProcompTraceLog -Category "BUILD-DONE" -ServiceName $svc.Name -Message "exitCode=$exitCode"
+                            if ($exitCode -eq 0) {
+                                try {
+                                    $State.StaleServices[$svc.Name] = $false
+                                    $State.CurrentActivity = "Starting $($svc.Name)..."
+                                    Start-ServiceProcess -Svc $svc -RootDir $root
+                                    $State.BannerNotification = "Build succeeded; started $($svc.Name)"
+                                } catch {
+                                    $State.BannerNotification = $_.Exception.Message
+                                } finally {
+                                    $State.CurrentActivity = ""
+                                }
+                            } else {
+                                $svc.StatusText = "BUILD-FAIL"
+                                $State.BannerNotification = "Build failed for $($svc.Name) (exit $exitCode)"
+                                foreach ($bf in @($svc.LogFile, $svc.ErrFile)) {
+                                    if ($bf -and (Test-Path $bf)) {
+                                        $bTail = @(Get-Content -Path $bf -Tail 20 -ErrorAction SilentlyContinue)
+                                        foreach ($bl in $bTail) {
+                                            if ($bl) { Write-ProcompTraceLog -Category "BUILD-FAIL" -ServiceName $svc.Name -Message $bl }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     # Process any queued on-demand Git fetch/pull jobs without blocking the UI thread
                     $job = $null
                     while ($State.GitJobQueue.TryDequeue([ref]$job)) {
+                        $State.CurrentActivity = if ($job.Action -like "Pull*") { "Git pulling..." } else { "Git fetching..." }
                         $targetRepos = @()
                         $seenR = @{}
                         foreach ($svc in $bgServices) {
@@ -143,11 +321,14 @@ function Start-BackgroundMonitor {
                         } else {
                             $State.BannerNotification = "Git fetch complete ($($targetRepos.Count) repo(s))."
                         }
+                        $State.CurrentActivity = ""
                     }
 
                     $now = Get-Date
                     if (($now - $lastGit).TotalSeconds -ge 10) {
+                        $State.CurrentActivity = "Checking Git status..."
                         Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
+                        $State.CurrentActivity = ""
                         $lastGit = $now
                     }
 

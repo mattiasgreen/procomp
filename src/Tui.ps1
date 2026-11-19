@@ -224,7 +224,7 @@ function Render-Tui {
             @{ Label = "[p]Pull";   Command = "pull";         Active = $false },
             @{ Label = "[t]Route";  Command = "route";        Active = $false },
             @{ Label = "[l]Logs";   Command = "logs";         Active = $false },
-            @{ Label = "[L]Trace";  Command = "procomp-logs"; Active = $false },
+            @{ Label = "[L]Procomp"; Command = "procomp-logs"; Active = $false },
             @{ Label = "[w]WM";     Command = "wiremock";     Active = $false },
             @{ Label = "[o]Docs";   Command = "swagger";      Active = $false },
             @{ Label = "[?]Help";   Command = "help";         Active = $false },

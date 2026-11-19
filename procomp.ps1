@@ -284,33 +284,12 @@ try {
         return $services
     }
 
-    # Render initial TUI frame immediately so the user sees live startup progress instead of a blank screen
-    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Booting enabled services..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
-    $buildingSvcs = @()
-    foreach ($svc in $services) {
-        if ($svc.Enabled) {
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Starting $($svc.Name) (port $($svc.Port))..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode $viewMode -ProjectName $ProjectName -LogBuffers $sharedState.LogBuffers
-            try {
-                Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
-                if ($svc.BuildProc) {
-                    $buildingSvcs += $svc.Name
-                }
-            } catch {
-                $banner = $_.Exception.Message
-            }
-        }
-    }
-    if ($buildingSvcs.Count -gt 0) {
-        $banner = "Building $($buildingSvcs -join ', ') in background..."
-    }
-    if ($gatewayUrl -and (-not $gatewaySvcName)) {
-        $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl
-        $gatewaySynced = $true
-        if ($cnt -gt 0) { $banner = "External WireMock synced ($cnt routes)." }
-    }
+    # Queue startup in BackgroundWorker so the TUI event loop is responsive immediately
+    $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "Startup"; ServiceName = "" })
     $sharedState.RefreshNow = $true
-    if (-not $banner) { $banner = "Ready" }
+    $banner = "Starting enabled services..."
     $lastBannerText = $banner
+    $lastActivity = ""
     $bannerSetAt = Get-Date
 
     function Invoke-UiAction {
@@ -430,35 +409,23 @@ try {
                 $svc = $curSvc
                 $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
                 $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+                $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "RouteOne"; ServiceName = $svc.Name })
                 $sharedState.RefreshNow = $true
-                $rMap = @{}
-                foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
-                Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
-                $gwSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
-                $gwNote = if ($gwSynced) { " (Gateway updated)" } else { "" }
-                $script:banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$gwNote"
+                $script:banner = "Updating routing for $($svc.Name) -> $($svc.RoutingMode)..."
             }
             "start" {
                 $svc = $curSvc
                 $svc.Enabled = $true
                 $svc.RoutingMode = "LOCAL"
                 $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                try {
-                    Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
-                    $script:banner = if ($svc.BuildProc) { "Building $($svc.Name) (will auto-start)..." } else { "Started $($svc.Name)" }
-                } catch {
-                    $script:banner = $_.Exception.Message
-                }
+                $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "StartOne"; ServiceName = $svc.Name })
                 $sharedState.RefreshNow = $true
+                $script:banner = "Starting $($svc.Name)..."
             }
             "start-all" {
-                foreach ($s in $services) {
-                    if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
-                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir -AsyncBuild } catch { }
-                    }
-                }
+                $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "StartAll"; ServiceName = "" })
                 $sharedState.RefreshNow = $true
-                $script:banner = "Started all enabled LOCAL services"
+                $script:banner = "Starting all enabled LOCAL services..."
             }
             "stop" {
                 $svc = $curSvc
@@ -466,20 +433,15 @@ try {
                     $script:banner = "$($svc.Name) is IDE-managed; stop it from your IDE."
                 } else {
                     $svc.StatusText = "STOPPING"
-                    Render-Tui -Services $services -SelectedIndex $script:selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $script:allLogs -ErrorsOnly $script:errorsOnly -RawLogs $script:rawLogs -ConfirmQuit $false -ViewMode $script:viewMode -LogBuffers $sharedState.LogBuffers
-                    Stop-ServiceProcess -Svc $svc
+                    $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "StopOne"; ServiceName = $svc.Name })
                     $sharedState.RefreshNow = $true
-                    $script:banner = "Stopped $($svc.Name)"
+                    $script:banner = "Stopping $($svc.Name)..."
                 }
             }
             "stop-all" {
-                foreach ($s in $services) {
-                    if (($s.Managed -or (Test-Path $s.PidFile)) -and (-not $s.ExternalIde)) {
-                        Stop-ServiceProcess -Svc $s
-                    }
-                }
+                $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "StopAll"; ServiceName = "" })
                 $sharedState.RefreshNow = $true
-                $script:banner = "Stopped all managed services"
+                $script:banner = "Stopping all managed services..."
             }
             "restart" {
                 $svc = $curSvc
@@ -487,26 +449,19 @@ try {
                     $script:banner = "$($svc.Name) is IDE-managed; restart it from your IDE."
                 } else {
                     $svc.StatusText = "STOPPING"
-                    Render-Tui -Services $services -SelectedIndex $script:selected -BannerMsg "Restarting $($svc.Name)..." -AllLogs $script:allLogs -ErrorsOnly $script:errorsOnly -RawLogs $script:rawLogs -ConfirmQuit $false -ViewMode $script:viewMode -LogBuffers $sharedState.LogBuffers
-                    Stop-ServiceProcess -Svc $svc
                     $svc.Enabled = $true
                     $svc.RoutingMode = "LOCAL"
                     $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                    Start-ServiceProcess -Svc $svc -RootDir $RootDir -AsyncBuild
+                    $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "RestartOne"; ServiceName = $svc.Name })
                     $sharedState.RefreshNow = $true
-                    $script:banner = if ($svc.BuildProc) { "Building $($svc.Name) (will auto-start)..." } else { "Restarted $($svc.Name)" }
+                    $script:banner = "Restarting $($svc.Name)..."
                 }
             }
             "build" {
                 $svc = $curSvc
-                Stop-ServiceProcess -Svc $svc
-                try {
-                    Start-ServiceBuildAsync -Svc $svc -RootDir $RootDir
-                    $script:banner = "Building $($svc.Name) ($($svc.Builder))..."
-                } catch {
-                    $script:banner = $_.Exception.Message
-                }
+                $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "BuildOne"; ServiceName = $svc.Name })
                 $sharedState.RefreshNow = $true
+                $script:banner = "Queueing build for $($svc.Name)..."
             }
             "fetch" {
                 $svc = $curSvc
@@ -552,38 +507,9 @@ try {
             if (-not $gatewaySynced -and $gatewayUrl -and $gatewaySvcName) {
                 $gwSvc = $services | Where-Object { $_.Name -eq $gatewaySvcName -and $_.StatusText -eq "HEALTHY" } | Select-Object -First 1
                 if ($gwSvc) {
-                    $cnt = Sync-WireMockMappings -Services $services -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
                     $gatewaySynced = $true
-                    $banner = "Gateway synced ($cnt routes)"
-                }
-            }
-            foreach ($svc in $services) {
-                if ($svc.BuildProc -and $svc.BuildProc.HasExited) {
-                    try { $svc.BuildProc.WaitForExit() } catch { }
-                    $exitCode = $svc.BuildProc.ExitCode
-                    $svc.BuildProc = $null
-                    Write-ProcompTraceLog -Category "BUILD-DONE" -ServiceName $svc.Name -Message "exitCode=$exitCode"
-                    if ($exitCode -eq 0) {
-                        try {
-                            $sharedState.StaleServices[$svc.Name] = $false
-                            Start-ServiceProcess -Svc $svc -RootDir $RootDir
-                            $sharedState.RefreshNow = $true
-                            $banner = "Build succeeded; started $($svc.Name)"
-                        } catch {
-                            $banner = $_.Exception.Message
-                        }
-                    } else {
-                        $svc.StatusText = "BUILD-FAIL"
-                        $banner = "Build failed for $($svc.Name) (exit $exitCode)"
-                        foreach ($bf in @($svc.LogFile, $svc.ErrFile)) {
-                            if ($bf -and (Test-Path $bf)) {
-                                $bTail = @(Get-Content -Path $bf -Tail 20 -ErrorAction SilentlyContinue)
-                                foreach ($bl in $bTail) {
-                                    if ($bl) { Write-ProcompTraceLog -Category "BUILD-FAIL" -ServiceName $svc.Name -Message $bl }
-                                }
-                            }
-                        }
-                    }
+                    $sharedState.CommandJobQueue.Enqueue([PSCustomObject]@{ Action = "SyncGateway"; ServiceName = "" })
+                    $sharedState.RefreshNow = $true
                 }
             }
             $needsRender = $true
@@ -592,12 +518,18 @@ try {
         $visServices = @(Get-VisibleServices)
         if ($selected -ge $visServices.Count) { $selected = [Math]::Max(0, $visServices.Count - 1) }
 
+        $curActivity = [string]$sharedState.CurrentActivity
+        if ($curActivity -ne $lastActivity) {
+            $lastActivity = $curActivity
+            $needsRender = $true
+        }
+
         if ($banner -ne $lastBannerText) {
             $lastBannerText = $banner
             $bannerSetAt = Get-Date
         } elseif ($banner -and $banner -ne "Ready" -and (((Get-Date) - $bannerSetAt).TotalSeconds -ge 6)) {
-            $hasActiveBuild = (@($services | Where-Object { $_.BuildProc }).Count -gt 0)
-            if (-not $hasActiveBuild -and ($sharedState.ActiveGitOps.Count -eq 0) -and ($banner -notmatch 'fail|error|conflict|cannot|not found|skipped')) {
+            $hasActiveBuild = (@($services | Where-Object { $_.StatusText -eq "BUILDING" }).Count -gt 0)
+            if (-not $curActivity -and (-not $hasActiveBuild) -and ($sharedState.ActiveGitOps.Count -eq 0) -and ($banner -notmatch 'fail|error|conflict|cannot|not found|skipped')) {
                 $banner = "Ready"
                 $lastBannerText = "Ready"
                 $needsRender = $true
@@ -606,7 +538,8 @@ try {
 
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
-            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -ProcompLogLevel $procompLogLevel -WireMockSubMode $wireMockSubMode -WireMockEntries $sharedState.WireMockEntries -LayoutOut $layoutRef
+            $effectiveBanner = if ($curActivity) { $curActivity } else { $banner }
+            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $effectiveBanner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -ProcompLogLevel $procompLogLevel -WireMockSubMode $wireMockSubMode -WireMockEntries $sharedState.WireMockEntries -LayoutOut $layoutRef
             if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }

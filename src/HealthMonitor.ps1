@@ -16,6 +16,8 @@ function Poll-AsyncHealth {
         $prevStatus = $svc.StatusText
         if ($svc.Stopping) {
             $svc.StatusText = "STOPPING"
+        } elseif ($svc.PSObject.Properties["BuildProc"] -and $svc.BuildProc) {
+            $svc.StatusText = "BUILDING"
         } elseif ($svc.PortConflict) {
             $svc.StatusText = "PORT-CONFLICT"
             $svc.Healthy = $false
@@ -23,6 +25,8 @@ function Poll-AsyncHealth {
             if ($svc.HealthTask) { $svc.HealthTask = $null }
             if ($svc.CachedPid) {
                 $svc.StatusText = "CRASHED"
+                $svc.Healthy = $false
+            } elseif ($svc.StatusText -eq "BUILD-FAIL") {
                 $svc.Healthy = $false
             } elseif ($svc.RoutingMode -eq "REMOTE") {
                 $svc.StatusText = "REMOTE"
