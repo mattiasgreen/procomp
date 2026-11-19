@@ -153,11 +153,34 @@ function Load-ProcompConfig {
         }
     }
 
+    $defaults = $null
+    if ($doc.PSObject.Properties["defaults"] -and $doc.defaults) {
+        $defaults = $doc.defaults
+    }
+
     $routingFile = Join-Path $StateDir "routing.json"
     $routingMap = Load-RoutingState -RoutingFile $routingFile
 
+    $rawApps = @()
+    if ($doc.PSObject.Properties["appsFile"] -and $doc.appsFile) {
+        $afSpec = [string]$doc.appsFile
+        $cfgDir = Split-Path -Parent $ConfigPath
+        $afPath = if ([System.IO.Path]::IsPathRooted($afSpec)) { $afSpec } else { [System.IO.Path]::GetFullPath((Join-Path $cfgDir $afSpec)) }
+        if (-not (Test-Path $afPath)) {
+            throw "appsFile not found: $afPath"
+        }
+        $afDoc = Get-Content -Path $afPath -Raw | ConvertFrom-Json
+        if ($afDoc -is [System.Array]) {
+            $rawApps += @($afDoc)
+        } elseif ($afDoc.PSObject.Properties["apps"] -and $afDoc.apps) {
+            $rawApps += @($afDoc.apps)
+        }
+    }
+    if ($doc.PSObject.Properties["apps"] -and $doc.apps) {
+        $rawApps += @($doc.apps)
+    }
+
     $services = @()
-    $rawApps = if ($doc.PSObject.Properties["apps"] -and $doc.apps) { @($doc.apps) } else { @() }
     foreach ($item in $rawApps) {
         $svcName = [string]$item.servicename
         $runtimeName = [string]$item.type
@@ -166,7 +189,12 @@ function Load-ProcompConfig {
         }
         $rt = $runtimes[$runtimeName]
 
-        $builderName = if ($item.PSObject.Properties["builder"] -and $item.builder) { [string]$item.builder } else { "" }
+        $builderName = ""
+        if ($item.PSObject.Properties["builder"]) {
+            $builderName = if ($item.builder) { [string]$item.builder } else { "" }
+        } elseif ($defaults -and $defaults.PSObject.Properties["builder"] -and $defaults.builder) {
+            $builderName = [string]$defaults.builder
+        }
         if ($builderName -and (-not $builders.ContainsKey($builderName))) {
             throw "App '$svcName' references unknown builder '$builderName'."
         }
@@ -184,13 +212,44 @@ function Load-ProcompConfig {
             $repo = if ($reposRoot) { Join-Path $reposRoot $repoDirName } else { $repoDirName }
         }
 
+        $tmplVars = @{ servicename = $svcName; name = $svcName; localport = [string]$port; port = [string]$port; subproject = $subproject; type = $runtimeName }
+
         $healthPath = if ($item.PSObject.Properties["healthPath"] -and $item.healthPath) { [string]$item.healthPath } else { $rt.HealthPath }
-        $enabled = if ($item.PSObject.Properties["enabled"]) { [bool]$item.enabled } else { $true }
-        $logFmt = if ($item.PSObject.Properties["logFormat"] -and $item.logFormat) { [string]$item.logFormat } else { "text" }
-        $proxyPath = if ($item.PSObject.Properties["proxyPath"] -and $item.proxyPath) { [string]$item.proxyPath } else { "/$svcName" }
-        $remoteUrl = if ($item.PSObject.Properties["remoteUrl"] -and $item.remoteUrl) { [string]$item.remoteUrl } else { "" }
+        $enabled = if ($item.PSObject.Properties["enabled"]) {
+            [bool]$item.enabled
+        } elseif ($defaults -and $defaults.PSObject.Properties["enabled"]) {
+            [bool]$defaults.enabled
+        } else {
+            $true
+        }
+        $logFmt = if ($item.PSObject.Properties["logFormat"] -and $item.logFormat) {
+            [string]$item.logFormat
+        } elseif ($defaults -and $defaults.PSObject.Properties["logFormat"] -and $defaults.logFormat) {
+            [string]$defaults.logFormat
+        } else {
+            "text"
+        }
+        $proxyPath = if ($item.PSObject.Properties["proxyPath"] -and $item.proxyPath) {
+            [string]$item.proxyPath
+        } elseif ($defaults -and $defaults.PSObject.Properties["proxyPathTemplate"] -and $defaults.proxyPathTemplate) {
+            Expand-Template -Template ([string]$defaults.proxyPathTemplate) -Vars $tmplVars
+        } else {
+            "/$svcName"
+        }
+        $remoteUrl = if ($item.PSObject.Properties["remoteUrl"] -and $item.remoteUrl) {
+            [string]$item.remoteUrl
+        } elseif ($defaults -and $defaults.PSObject.Properties["remoteUrlTemplate"] -and $defaults.remoteUrlTemplate) {
+            Expand-Template -Template ([string]$defaults.remoteUrlTemplate) -Vars $tmplVars
+        } else {
+            ""
+        }
 
         $vars = @{}
+        if ($defaults -and $defaults.PSObject.Properties["vars"] -and $defaults.vars) {
+            foreach ($vp in $defaults.vars.PSObject.Properties) {
+                $vars[$vp.Name] = [string]$vp.Value
+            }
+        }
         if ($item.PSObject.Properties["vars"] -and $item.vars) {
             foreach ($vp in $item.vars.PSObject.Properties) {
                 $vars[$vp.Name] = [string]$vp.Value
@@ -330,12 +389,13 @@ function Apply-RoutingProfile {
     }
 
     $rMap = @{}
+    $remoteAllOthers = $remoteSet.ContainsKey("*")
     foreach ($svc in $Config.Services) {
         if ($localSet.ContainsKey($svc.Name)) {
             $svc.RoutingMode = "LOCAL"
             $svc.Enabled = $true
             $svc.StatusText = "STOPPED"
-        } elseif ($remoteSet.ContainsKey($svc.Name)) {
+        } elseif ($remoteSet.ContainsKey($svc.Name) -or $remoteAllOthers) {
             $svc.RoutingMode = "REMOTE"
             $svc.Enabled = $false
             $svc.StatusText = "REMOTE"

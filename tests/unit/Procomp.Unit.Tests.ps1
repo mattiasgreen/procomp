@@ -77,6 +77,25 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $s.Repo "..\service1"
         }
 
+        It 'loads external appsFile with defaults, remoteUrlTemplate, and wildcard remote profile' {
+            $exPath = Join-Path $script:RepoRoot "examples\using-service-index.procomp.json"
+            $rFile = Join-Path $TestDrive "ex-routing.json"
+            $cfg = Load-ProcompConfig -ConfigPath $exPath -StateDir (Join-Path $TestDrive "exst") -LogDir (Join-Path $TestDrive "exlg")
+            Assert-Eq $cfg.Services.Count 3
+            Assert-Eq $cfg.Services[0].Builder "gradle-boot"
+            Assert-Eq $cfg.Services[0].MemLimit "384M"
+            Assert-Eq $cfg.Services[0].RemoteUrl "https://shared-dev.mycorp/service1"
+            Assert-Eq $cfg.Services[1].RemoteUrl "https://shared-dev.mycorp/service2"
+
+            Apply-RoutingProfile -Config $cfg -ProfileName "one-local" -RoutingFile $rFile
+            Assert-Eq $cfg.Services[0].RoutingMode "LOCAL"
+            Assert-Eq $cfg.Services[0].Enabled $true
+            Assert-Eq $cfg.Services[1].RoutingMode "REMOTE"
+            Assert-Eq $cfg.Services[1].Enabled $false
+            Assert-Eq $cfg.Services[2].RoutingMode "REMOTE"
+            Assert-Eq $cfg.Services[2].Enabled $false
+        }
+
         It 'round-trips routing.json state' {
             $rFile = Join-Path $TestDrive "state\routing.json"
             Save-RoutingState -RoutingMap @{ "order-service" = "REMOTE"; "auth-service" = "LOCAL" } -RoutingFile $rFile

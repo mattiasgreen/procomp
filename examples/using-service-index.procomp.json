@@ -1,0 +1,36 @@
+{
+  "reposRoot": "C:\\dev\\repos",
+  "appsFile": "./service-index.json",
+  "defaults": {
+    "builder": "gradle-boot",
+    "enabled": false,
+    "logFormat": "json",
+    "proxyPathTemplate": "/{{servicename}}",
+    "remoteUrlTemplate": "https://shared-dev.mycorp/{{servicename}}",
+    "vars": {
+      "jvmArgs": "-Xmx384m"
+    }
+  },
+  "builders": {
+    "gradle-boot": { "command": "gradlew.bat :{{subproject}}:bootJar -q" }
+  },
+  "runtimes": {
+    "java": {
+      "command": "java {{jvmArgs}} -Dserver.port={{localport}} -Dspring.profiles.active=local -jar {{artifact}}",
+      "healthPath": "/actuator/health",
+      "artifactGlob": "{{modulePath}}\\build\\libs\\*.jar",
+      "artifactExclude": "*-plain.jar",
+      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+    }
+  },
+  "gateway": {
+    "type": "wiremock",
+    "adminUrl": "http://127.0.0.1:8080"
+  },
+  "profiles": {
+    "one-local": {
+      "local":  ["service1"],
+      "remote": ["*"]
+    }
+  }
+}

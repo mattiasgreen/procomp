@@ -1,0 +1,28 @@
+{
+  "apps": [
+    {
+      "servicename": "service1",
+      "localport": "9001",
+      "subproject": "service1",
+      "type": "java",
+      "swaggeruri": "swagger-ui/index.html",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/service1.git"
+    },
+    {
+      "servicename": "service2",
+      "localport": "9002",
+      "subproject": "service2",
+      "type": "java",
+      "swaggeruri": "swagger-ui/index.html",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/service2.git"
+    },
+    {
+      "servicename": "service3",
+      "localport": "9003",
+      "subproject": "service3",
+      "type": "java",
+      "swaggeruri": "swagger-ui/index.html",
+      "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/service3.git"
+    }
+  ]
+}

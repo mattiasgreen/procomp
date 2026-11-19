@@ -9,13 +9,26 @@
 ```json
 {
   "reposRoot": "..",
+  "appsFile":  "./service-index.json",
+  "defaults":  {
+    "builder": "gradle-boot",
+    "enabled": false,
+    "remoteUrlTemplate": "https://shared-dev.mycorp/{{servicename}}",
+    "vars": { "jvmArgs": "-Xmx384m" }
+  },
   "builders": { ... },
   "runtimes": { ... },
   "gateway":  { ... },
-  "profiles": { ... },
+  "profiles": {
+    "one-local": { "local": ["service1"], "remote": ["*"] }
+  },
   "apps":     [ ... ]
 }
 ```
+
+* **`appsFile`** *(optional)*: Path (relative to `procomp.json` or absolute) to an external service index JSON (e.g. `service-index.json` containing `{"apps": [...]}` or a bare array), merged with any inline `apps`.
+* **`defaults`** *(optional)*: Default `builder`, `enabled`, `logFormat`, `proxyPathTemplate`, `remoteUrlTemplate`, and `vars` applied to every app unless overridden on the app itself.
+* **`profiles.<name>.remote`**: Supports `"*"` wildcard to route all apps not listed in `local` as `REMOTE`.
 
 ---
 
