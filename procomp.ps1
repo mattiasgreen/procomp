@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
 . (Join-Path $RootDir "src\WireMockBridge.ps1")
 . (Join-Path $RootDir "src\LogViewer.ps1")
 . (Join-Path $RootDir "src\BackgroundWorker.ps1")
+. (Join-Path $RootDir "src\ConsoleInput.ps1")
 . (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
 
@@ -184,7 +185,7 @@ $bgWorker = Start-BackgroundMonitor -SharedState $sharedState
 $origCtrlC = [Console]::TreatControlCAsInput
 [Console]::TreatControlCAsInput = $true
 [Console]::CursorVisible = $false
-# Enter ANSI alternate screen buffer so Windows Terminal never scrolls or duplicates frames
+$mouseEnabled = Enable-ConsoleMouseInput
 [Console]::Write("$([char]27)[?1049h$([char]27)[2J$([char]27)[H")
 
 try {
@@ -192,11 +193,159 @@ try {
     $lastSnapVer = -1
     $gatewaySynced = $false
     $needsRender = $true
+    $viewMode = "SERVICES"
     $filterText = ""
     $filterInputMode = $false
     $expandStacks = $false
-    $pausedLogs = $false
-    $frozenEntries = $null
+    $scrollOffset = 0
+    $expandedEntryIds = @{}
+    $uiLayout = $null
+
+    function Invoke-UiAction {
+        param([string]$Cmd)
+        switch ($Cmd) {
+            "logs" {
+                $script:viewMode = "LOGS"
+                $script:scrollOffset = 0
+                $script:banner = "Log Viewer: $($services[$script:selected].Name) (Wheel/PgUp/PgDn to scroll, Esc to return)"
+            }
+            "back" {
+                $script:viewMode = "SERVICES"
+                $script:scrollOffset = 0
+                $script:banner = "Services view"
+            }
+            "follow" {
+                $script:scrollOffset = 0
+                $script:banner = "Auto-tail FOLLOW resumed"
+            }
+            "all" {
+                $script:allLogs = -not $script:allLogs
+                $script:scrollOffset = 0
+                $script:banner = if ($script:allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$script:selected].Name)" }
+            }
+            "err" {
+                $script:errorsOnly = -not $script:errorsOnly
+                $script:scrollOffset = 0
+                $script:banner = if ($script:errorsOnly) { "Filter: WARN/ERROR only" } else { "Filter: All log levels" }
+            }
+            "raw" {
+                $script:rawLogs = -not $script:rawLogs
+                $sharedState.RawMode = $script:rawLogs
+                $sharedState.RefreshNow = $true
+                $script:scrollOffset = 0
+                $script:banner = if ($script:rawLogs) { "Log format: Raw" } else { "Log format: Unified/Normalized" }
+            }
+            "find" {
+                $script:filterInputMode = $true
+            }
+            "clear" {
+                $sharedState.ClearLogEpoch = [int]$sharedState.ClearLogEpoch + 1
+                $sharedState.RefreshNow = $true
+                $script:scrollOffset = 0
+                $script:expandedEntryIds = @{}
+                $script:banner = "Cleared log display buffer"
+            }
+            "stack" {
+                if ($script:expandedEntryIds.Count -gt 0) {
+                    $script:expandedEntryIds = @{}
+                    $script:expandStacks = $false
+                    $script:banner = "Collapsed all stack traces"
+                } else {
+                    $script:expandStacks = -not $script:expandStacks
+                    $script:banner = if ($script:expandStacks) { "Expanded latest stack trace (click any trace to toggle)" } else { "Stack traces folded" }
+                }
+            }
+            "route" {
+                $svc = $services[$script:selected]
+                $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
+                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+                $sharedState.RefreshNow = $true
+                $rMap = @{}
+                foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
+                Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
+                $gwSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
+                $gwNote = if ($gwSynced) { " (Gateway updated)" } else { "" }
+                $script:banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$gwNote"
+            }
+            "start" {
+                $svc = $services[$script:selected]
+                $svc.Enabled = $true
+                $svc.RoutingMode = "LOCAL"
+                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+                try {
+                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                    $script:banner = "Started $($svc.Name)"
+                } catch {
+                    $script:banner = $_.Exception.Message
+                }
+                $sharedState.RefreshNow = $true
+            }
+            "start-all" {
+                foreach ($s in $services) {
+                    if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
+                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir } catch { }
+                    }
+                }
+                $sharedState.RefreshNow = $true
+                $script:banner = "Started all enabled LOCAL services"
+            }
+            "stop" {
+                $svc = $services[$script:selected]
+                if ($svc.ExternalIde) {
+                    $script:banner = "$($svc.Name) is IDE-managed; stop it from your IDE."
+                } else {
+                    $svc.StatusText = "STOPPING"
+                    Render-Tui -Services $services -SelectedIndex $script:selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $script:allLogs -ErrorsOnly $script:errorsOnly -RawLogs $script:rawLogs -ConfirmQuit $false -ViewMode $script:viewMode -LogBuffers $sharedState.LogBuffers
+                    Stop-ServiceProcess -Svc $svc
+                    $sharedState.RefreshNow = $true
+                    $script:banner = "Stopped $($svc.Name)"
+                }
+            }
+            "stop-all" {
+                foreach ($s in $services) {
+                    if (($s.Managed -or (Test-Path $s.PidFile)) -and (-not $s.ExternalIde)) {
+                        Stop-ServiceProcess -Svc $s
+                    }
+                }
+                $sharedState.RefreshNow = $true
+                $script:banner = "Stopped all managed services"
+            }
+            "restart" {
+                $svc = $services[$script:selected]
+                if ($svc.ExternalIde) {
+                    $script:banner = "$($svc.Name) is IDE-managed; restart it from your IDE."
+                } else {
+                    $svc.StatusText = "STOPPING"
+                    Render-Tui -Services $services -SelectedIndex $script:selected -BannerMsg "Restarting $($svc.Name)..." -AllLogs $script:allLogs -ErrorsOnly $script:errorsOnly -RawLogs $script:rawLogs -ConfirmQuit $false -ViewMode $script:viewMode -LogBuffers $sharedState.LogBuffers
+                    Stop-ServiceProcess -Svc $svc
+                    $svc.Enabled = $true
+                    $svc.RoutingMode = "LOCAL"
+                    $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
+                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
+                    $sharedState.RefreshNow = $true
+                    $script:banner = "Restarted $($svc.Name)"
+                }
+            }
+            "build" {
+                $svc = $services[$script:selected]
+                Stop-ServiceProcess -Svc $svc
+                try {
+                    Start-ServiceBuildAsync -Svc $svc -RootDir $RootDir
+                    $script:banner = "Building $($svc.Name) ($($svc.Builder))..."
+                } catch {
+                    $script:banner = $_.Exception.Message
+                }
+                $sharedState.RefreshNow = $true
+            }
+            "detach" {
+                $script:detachOnExit = $true
+                $script:running = $false
+            }
+            "quit" {
+                $script:confirmQuit = $true
+            }
+        }
+    }
 
     while ($running) {
         if ($sharedState.SnapshotVersion -ne $lastSnapVer) {
@@ -233,172 +382,163 @@ try {
         }
 
         if ($needsRender) {
-            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -PausedLogs $pausedLogs -FrozenEntries $frozenEntries -LogBuffers $sharedState.LogBuffers
+            $layoutRef = [ref]$uiLayout
+            Render-Tui -Services $services -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -LayoutOut $layoutRef
+            if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }
 
-        if ([Console]::KeyAvailable) {
-            while ([Console]::KeyAvailable -and $running) {
-                $key = [Console]::ReadKey($true)
-                $isCtrlC = ($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control))
+        $events = @(Read-ConsoleEvents)
+        if ($events.Count -gt 0) {
+            foreach ($ev in $events) {
+                if (-not $running) { break }
+
+                if ($ev.Kind -eq "WheelUp" -or $ev.Kind -eq "WheelDown") {
+                    $delta = if ($ev.Kind -eq "WheelUp") { 3 } else { -3 }
+                    $inLogArea = ($viewMode -eq "LOGS") -or ($uiLayout -and $ev.Y -ge $uiLayout.LogStartY)
+                    if ($inLogArea) {
+                        $scrollOffset = [Math]::Max(0, $scrollOffset + $delta)
+                    } else {
+                        $step = if ($ev.Kind -eq "WheelUp") { -1 } else { 1 }
+                        $selected = [Math]::Max(0, [Math]::Min($services.Count - 1, $selected + $step))
+                        $scrollOffset = 0
+                        $banner = "Selected $($services[$selected].Name)"
+                    }
+                    $needsRender = $true
+                    continue
+                }
+
+                if ($ev.Kind -eq "MouseClick" -or $ev.Kind -eq "MouseDoubleClick") {
+                    if ($confirmQuit) { $confirmQuit = $false; $needsRender = $true; continue }
+                    $hit = Resolve-UiClick -Layout $uiLayout -X $ev.X -Y $ev.Y -IsDoubleClick ($ev.Kind -eq "MouseDoubleClick")
+                    if ($hit) {
+                        switch ($hit.Action) {
+                            "Toolbar" { Invoke-UiAction -Cmd $hit.Command }
+                            "OpenLogs" {
+                                $selected = $hit.Index
+                                Invoke-UiAction -Cmd "logs"
+                            }
+                            "SelectService" {
+                                $selected = $hit.Index
+                                $scrollOffset = 0
+                                if ($hit.ToggleRoute) {
+                                    Invoke-UiAction -Cmd "route"
+                                } else {
+                                    $banner = "Selected $($services[$selected].Name)"
+                                }
+                            }
+                            "ToggleStack" {
+                                $eid = $hit.EntryId
+                                if ($expandedEntryIds.ContainsKey($eid)) {
+                                    $expandedEntryIds.Remove($eid)
+                                    $banner = "Collapsed stack trace"
+                                } else {
+                                    $expandedEntryIds[$eid] = $true
+                                    $banner = "Expanded stack trace (click again to collapse)"
+                                }
+                            }
+                        }
+                        $needsRender = $true
+                    }
+                    continue
+                }
+
+                # Keyboard event
+                $vk = $ev.VirtualKeyCode
+                $ch = $ev.UnicodeChar
+                $isCtrlC = ($ev.CtrlPressed -and ($vk -eq 0x43 -or $ch -eq [char]3))
 
                 if ($confirmQuit) {
-                    if ($key.KeyChar -eq 'y' -or $key.KeyChar -eq 'Y') {
+                    if ($ch -eq 'y' -or $ch -eq 'Y') {
                         $confirmQuit = $false
                         $detachOnExit = $false
                         $running = $false
-                        continue
                     } else {
                         $confirmQuit = $false
                         $banner = "Shutdown canceled."
                         $needsRender = $true
-                        continue
                     }
+                    continue
                 }
 
                 if ($filterInputMode) {
-                    if ($key.Key -eq [ConsoleKey]::Enter) {
+                    if ($vk -eq 0x0D) {
                         $filterInputMode = $false
+                        $scrollOffset = 0
                         $banner = if ($filterText) { "Filter applied: '$filterText'" } else { "Filter cleared" }
-                    } elseif ($key.Key -eq [ConsoleKey]::Escape) {
+                    } elseif ($vk -eq 0x1B) {
                         $filterInputMode = $false
                         $filterText = ""
+                        $scrollOffset = 0
                         $banner = "Filter cleared"
-                    } elseif ($key.Key -eq [ConsoleKey]::Backspace) {
+                    } elseif ($vk -eq 0x08) {
                         if ($filterText.Length -gt 0) { $filterText = $filterText.Substring(0, $filterText.Length - 1) }
-                    } elseif (-not [char]::IsControl($key.KeyChar)) {
-                        $filterText += $key.KeyChar
+                    } elseif ($ch -ne [char]0 -and (-not [char]::IsControl($ch))) {
+                        $filterText += $ch
                     }
                     $needsRender = $true
                     continue
                 }
 
-                if ($isCtrlC -or $key.KeyChar -eq 'q') {
-                    $confirmQuit = $true
+                if ($isCtrlC -or $ch -eq 'q') {
+                    Invoke-UiAction -Cmd "quit"
                     $needsRender = $true
                     continue
                 }
 
-                switch ($key.Key) {
-                    "UpArrow"   { $selected = [Math]::Max(0, $selected - 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
-                    "DownArrow" { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
-                    "Tab"       { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
-                    "Enter"     { $expandStacks = -not $expandStacks; $banner = if ($expandStacks) { "Stack traces expanded" } else { "Stack traces folded" }; $needsRender = $true }
-                    "Spacebar"  {
-                        $pausedLogs = -not $pausedLogs
-                        if ($pausedLogs) {
-                            $frozenEntries = @(Get-UnifiedLogsFromMemory -Services $services -LogBuffers $sharedState.LogBuffers -SelectedIndex $selected -AllMode $allLogs -ErrorsOnly $errorsOnly -MaxRows 20 -FilterText $filterText -ExpandStacks $expandStacks)
-                            $banner = "Log stream PAUSED"
-                        } else {
-                            $frozenEntries = $null
-                            $banner = "Log stream RESUMED"
-                        }
-                        $needsRender = $true
+                $pageStep = if ($uiLayout -and $uiLayout.PageHeight -gt 2) { $uiLayout.PageHeight - 2 } else { 10 }
+
+                if ($viewMode -eq "LOGS") {
+                    switch ($vk) {
+                        0x1B { Invoke-UiAction -Cmd "back"; $needsRender = $true; continue }   # Esc
+                        0x26 { $scrollOffset++; $needsRender = $true; continue }              # Up
+                        0x28 { $scrollOffset = [Math]::Max(0, $scrollOffset - 1); $needsRender = $true; continue } # Down
+                        0x21 { $scrollOffset += $pageStep; $needsRender = $true; continue }   # PgUp
+                        0x22 { $scrollOffset = [Math]::Max(0, $scrollOffset - $pageStep); $needsRender = $true; continue } # PgDn
+                        0x24 { $scrollOffset = 999999; $needsRender = $true; continue }       # Home
+                        0x23 { Invoke-UiAction -Cmd "follow"; $needsRender = $true; continue } # End
+                        0x25 { $selected = ($selected - 1 + $services.Count) % $services.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($services[$selected].Name)"; $needsRender = $true; continue } # Left
+                        0x27 { $selected = ($selected + 1) % $services.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($services[$selected].Name)"; $needsRender = $true; continue } # Right
+                        0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
                     }
-                    default {
-                        switch -CaseSensitive ($key.KeyChar) {
-                            'k' { $selected = [Math]::Max(0, $selected - 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
-                            'j' { $selected = [Math]::Min($services.Count - 1, $selected + 1); $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
-                            'a' { $allLogs = -not $allLogs; $banner = if ($allLogs) { "Showing unified logs for ALL services" } else { "Showing logs for $($services[$selected].Name)" }; $needsRender = $true }
-                            'e' { $errorsOnly = -not $errorsOnly; $banner = if ($errorsOnly) { "Filter: WARN/ERROR only" } else { "Filter: All log levels" }; $needsRender = $true }
-                            'v' { $rawLogs = -not $rawLogs; $sharedState.RawMode = $rawLogs; $sharedState.RefreshNow = $true; $banner = if ($rawLogs) { "Log format: Raw" } else { "Log format: Unified/Normalized" }; $needsRender = $true }
-                            'z' { $expandStacks = -not $expandStacks; $banner = if ($expandStacks) { "Stack traces expanded" } else { "Stack traces folded" }; $needsRender = $true }
-                            '/' { $filterInputMode = $true; $needsRender = $true }
-                            'c' { $sharedState.ClearLogEpoch = [int]$sharedState.ClearLogEpoch + 1; $sharedState.RefreshNow = $true; $frozenEntries = $null; $banner = "Cleared log display buffer"; $needsRender = $true }
-                            't' {
-                                $svc = $services[$selected]
-                                $svc.RoutingMode = if ($svc.RoutingMode -eq "LOCAL") { "REMOTE" } else { "LOCAL" }
-                                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                                $sharedState.RefreshNow = $true
-                                $rMap = @{}
-                                foreach ($s in $services) { $rMap[$s.Name] = $s.RoutingMode }
-                                Save-RoutingState -RoutingMap $rMap -RoutingFile $RoutingFile
-                                $gwSynced = Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $gatewayUrl -GatewayServiceName $gatewaySvcName
-                                $gwNote = if ($gwSynced) { " (Gateway updated)" } else { "" }
-                                $banner = "Routing for $($svc.Name) set to $($svc.RoutingMode)$gwNote"
-                                $needsRender = $true
-                            }
-                            's' {
-                                $svc = $services[$selected]
-                                $svc.Enabled = $true
-                                $svc.RoutingMode = "LOCAL"
-                                $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                                try {
-                                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
-                                    $banner = "Started $($svc.Name)"
-                                } catch {
-                                    $banner = $_.Exception.Message
-                                }
-                                $sharedState.RefreshNow = $true
-                                $needsRender = $true
-                            }
-                            'S' {
-                                foreach ($s in $services) {
-                                    if ($s.Enabled -and ($s.RoutingMode -eq "LOCAL")) {
-                                        try { Start-ServiceProcess -Svc $s -RootDir $RootDir } catch { }
-                                    }
-                                }
-                                $sharedState.RefreshNow = $true
-                                $banner = "Started all enabled LOCAL services"
-                                $needsRender = $true
-                            }
-                            'x' {
-                                $svc = $services[$selected]
-                                if ($svc.ExternalIde) {
-                                    $banner = "$($svc.Name) is IDE-managed; stop it from your IDE."
-                                } else {
-                                    $svc.StatusText = "STOPPING"
-                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
-                                    Stop-ServiceProcess -Svc $svc
-                                    $sharedState.RefreshNow = $true
-                                    $banner = "Stopped $($svc.Name)"
-                                }
-                                $needsRender = $true
-                            }
-                            'X' {
-                                foreach ($s in $services) {
-                                    if (($s.Managed -or (Test-Path $s.PidFile)) -and (-not $s.ExternalIde)) {
-                                        Stop-ServiceProcess -Svc $s
-                                    }
-                                }
-                                $sharedState.RefreshNow = $true
-                                $banner = "Stopped all managed services"
-                                $needsRender = $true
-                            }
-                            'r' {
-                                $svc = $services[$selected]
-                                if ($svc.ExternalIde) {
-                                    $banner = "$($svc.Name) is IDE-managed; restart it from your IDE."
-                                } else {
-                                    $svc.StatusText = "STOPPING"
-                                    Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Restarting $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
-                                    Stop-ServiceProcess -Svc $svc
-                                    $svc.Enabled = $true
-                                    $svc.RoutingMode = "LOCAL"
-                                    $sharedState.ServiceOverrides[$svc.Name] = @{ RoutingMode = $svc.RoutingMode; Enabled = $svc.Enabled }
-                                    Start-ServiceProcess -Svc $svc -RootDir $RootDir
-                                    $sharedState.RefreshNow = $true
-                                    $banner = "Restarted $($svc.Name)"
-                                }
-                                $needsRender = $true
-                            }
-                            'b' {
-                                $svc = $services[$selected]
-                                Stop-ServiceProcess -Svc $svc
-                                try {
-                                    Start-ServiceBuildAsync -Svc $svc -RootDir $RootDir
-                                    $banner = "Building $($svc.Name) ($($svc.Builder))..."
-                                } catch {
-                                    $banner = $_.Exception.Message
-                                }
-                                $sharedState.RefreshNow = $true
-                                $needsRender = $true
-                            }
-                            'd' {
-                                $detachOnExit = $true
-                                $running = $false
-                            }
-                        }
+                    switch -CaseSensitive ($ch) {
+                        'l' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
+                        'k' { $scrollOffset++; $needsRender = $true }
+                        'j' { $scrollOffset = [Math]::Max(0, $scrollOffset - 1); $needsRender = $true }
+                        'G' { Invoke-UiAction -Cmd "follow"; $needsRender = $true }
+                        'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
+                        'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }
+                        'v' { Invoke-UiAction -Cmd "raw"; $needsRender = $true }
+                        'z' { Invoke-UiAction -Cmd "stack"; $needsRender = $true }
+                        '/' { Invoke-UiAction -Cmd "find"; $needsRender = $true }
+                        'c' { Invoke-UiAction -Cmd "clear"; $needsRender = $true }
+                        'd' { Invoke-UiAction -Cmd "detach" }
+                    }
+                } else {
+                    switch ($vk) {
+                        0x26 { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true; continue } # Up
+                        0x28 { $selected = [Math]::Min($services.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true; continue } # Down
+                        0x0D { Invoke-UiAction -Cmd "logs"; $needsRender = $true; continue }  # Enter
+                        0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
+                    }
+                    switch -CaseSensitive ($ch) {
+                        'k' { $selected = [Math]::Max(0, $selected - 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
+                        'j' { $selected = [Math]::Min($services.Count - 1, $selected + 1); $scrollOffset = 0; $banner = "Selected $($services[$selected].Name)"; $needsRender = $true }
+                        'l' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
+                        'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
+                        'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }
+                        'v' { Invoke-UiAction -Cmd "raw"; $needsRender = $true }
+                        'z' { Invoke-UiAction -Cmd "stack"; $needsRender = $true }
+                        '/' { Invoke-UiAction -Cmd "find"; $needsRender = $true }
+                        'c' { Invoke-UiAction -Cmd "clear"; $needsRender = $true }
+                        't' { Invoke-UiAction -Cmd "route"; $needsRender = $true }
+                        's' { Invoke-UiAction -Cmd "start"; $needsRender = $true }
+                        'S' { Invoke-UiAction -Cmd "start-all"; $needsRender = $true }
+                        'x' { Invoke-UiAction -Cmd "stop"; $needsRender = $true }
+                        'X' { Invoke-UiAction -Cmd "stop-all"; $needsRender = $true }
+                        'r' { Invoke-UiAction -Cmd "restart"; $needsRender = $true }
+                        'b' { Invoke-UiAction -Cmd "build"; $needsRender = $true }
+                        'd' { Invoke-UiAction -Cmd "detach" }
                     }
                 }
             }
@@ -411,16 +551,17 @@ try {
         foreach ($svc in $services) {
             if (($svc.Managed -or (Test-Path $svc.PidFile)) -and (-not $svc.ExternalIde)) {
                 $svc.StatusText = "STOPPING"
-                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
+                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopping $($svc.Name)..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode "SERVICES" -LogBuffers $sharedState.LogBuffers
                 Stop-ServiceProcess -Svc $svc
-                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopped $($svc.Name)." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
+                Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "Stopped $($svc.Name)." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode "SERVICES" -LogBuffers $sharedState.LogBuffers
             }
         }
-        Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "All services stopped. Exiting..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -LogBuffers $sharedState.LogBuffers
+        Render-Tui -Services $services -SelectedIndex $selected -BannerMsg "All services stopped. Exiting..." -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $false -ViewMode "SERVICES" -LogBuffers $sharedState.LogBuffers
         Start-Sleep -Milliseconds 350
     }
 } finally {
     Stop-BackgroundMonitor -Worker $bgWorker
+    Restore-ConsoleInputMode
     [Console]::Write("$([char]27)[?1049l")
     [Console]::CursorVisible = $true
     [Console]::TreatControlCAsInput = $origCtrlC

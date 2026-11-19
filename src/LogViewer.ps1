@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+$script:NextLogEntryId = 0
+
 try {
     Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
     $script:JsonSerializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
@@ -89,8 +91,10 @@ function Normalize-LogEntry {
                     $stackLines = @($stackRaw -split "`r?`n" | Where-Object { $_ -ne "" })
                 }
 
+                $script:NextLogEntryId++
                 $display = "{0}  {1,-5} [{2}]{3} --- {4}" -f $tsDisplay, $level, $svc, $traceTag, $msg
                 return [PSCustomObject]@{
+                    EntryId    = "$DefaultService-$script:NextLogEntryId"
                     SortKey    = $sortKey
                     Level      = $level
                     Text       = $display
@@ -117,7 +121,9 @@ function Normalize-LogEntry {
         $display = "[$DefaultService] $RawLine"
     }
 
+    $script:NextLogEntryId++
     return [PSCustomObject]@{
+        EntryId    = "$DefaultService-$script:NextLogEntryId"
         SortKey    = $sortKey
         Level      = $level
         Text       = $display
@@ -189,7 +195,7 @@ function Get-ServiceLogEntries {
 
                 $entry = Normalize-LogEntry -RawLine $line -DefaultService $Svc.Name -RawMode $RawMode -LogMapping $Svc.LogMapping
                 $Svc.LogRingBuffer.Add($entry)
-                if ($Svc.LogRingBuffer.Count -gt 500) {
+                if ($Svc.LogRingBuffer.Count -gt 1000) {
                     $Svc.LogRingBuffer.RemoveAt(0)
                 }
             }
@@ -210,6 +216,68 @@ function Get-ServiceLogEntries {
     return $slice
 }
 
+function Get-LogViewport {
+    param(
+        $Entries,
+        [int]$MaxRows,
+        [int]$ScrollOffset = 0,
+        [hashtable]$ExpandedEntryIds = @{},
+        [bool]$ExpandLatest = $false
+    )
+
+    $list = @($Entries)
+    $latestStackIdx = -1
+    if ($ExpandLatest -and ($ExpandedEntryIds.Count -eq 0)) {
+        for ($i = $list.Count - 1; $i -ge 0; $i--) {
+            $e = $list[$i]
+            if ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0)) {
+                $latestStackIdx = $i
+                break
+            }
+        }
+    }
+
+    $displayRows = @()
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $e = $list[$i]
+        $eid = if ($e.PSObject.Properties["EntryId"]) { [string]$e.EntryId } else { "row-$i" }
+        $hasStack = ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0))
+        $isExpanded = $hasStack -and (($ExpandedEntryIds -and $ExpandedEntryIds.ContainsKey($eid)) -or ($i -eq $latestStackIdx))
+
+        if ($hasStack -and (-not $isExpanded)) {
+            $displayRows += [PSCustomObject]@{ EntryId = $eid; HasStack = $true; SortKey = $e.SortKey; Level = $e.Level; Text = "$($e.Text) [+$($e.StackLines.Count) stack lines]" }
+        } else {
+            $displayRows += [PSCustomObject]@{ EntryId = $eid; HasStack = $hasStack; SortKey = $e.SortKey; Level = $e.Level; Text = $e.Text }
+            if ($isExpanded) {
+                foreach ($sl in $e.StackLines) {
+                    $cleanSl = $sl.Replace("`t", "  ").Trim()
+                    $displayRows += [PSCustomObject]@{ EntryId = $eid; HasStack = $true; SortKey = $e.SortKey; Level = $e.Level; Text = "    $cleanSl" }
+                }
+            }
+        }
+    }
+
+    $total = $displayRows.Count
+    $maxOffset = [Math]::Max(0, $total - $MaxRows)
+    $clamped = [Math]::Max(0, [Math]::Min($ScrollOffset, $maxOffset))
+
+    $visible = @()
+    if ($total -gt 0) {
+        $endIdx = $total - 1 - $clamped
+        $startIdx = [Math]::Max(0, $endIdx - $MaxRows + 1)
+        if ($endIdx -ge $startIdx) {
+            $visible = @($displayRows[$startIdx..$endIdx])
+        }
+    }
+
+    return [PSCustomObject]@{
+        TotalRows     = $total
+        ClampedOffset = $clamped
+        IsFollowing   = ($clamped -eq 0)
+        Rows          = $visible
+    }
+}
+
 function Get-UnifiedLogs {
     param(
         $Services,
@@ -219,31 +287,33 @@ function Get-UnifiedLogs {
         [bool]$RawMode,
         [int]$MaxRows,
         [string]$FilterText = "",
-        [bool]$ExpandStacks = $false
+        [bool]$ExpandStacks = $false,
+        [int]$ScrollOffset = 0,
+        [hashtable]$ExpandedEntryIds = @{}
     )
 
     $entries = @()
     if ($AllMode) {
-        $perSvc = [Math]::Max(15, $MaxRows)
+        $perSvc = [Math]::Max(50, $MaxRows * 2)
         foreach ($svc in $Services) {
             $entries += @(Get-ServiceLogEntries -Svc $svc -TailCount $perSvc -RawMode $RawMode)
             if (($svc.StatusText -eq "CRASHED") -and (Test-Path $svc.ErrFile)) {
                 $errLines = @(Get-Content -Path $svc.ErrFile -Tail 4 -ErrorAction SilentlyContinue)
                 foreach ($l in $errLines) {
-                    if ($l) { $entries += [PSCustomObject]@{ SortKey = "9999-99-99 99:99:99.999"; Level = "ERROR"; Text = "[$($svc.Name)] $l"; StackLines = @(); IsJson = $false } }
+                    if ($l) { $entries += [PSCustomObject]@{ EntryId = "err-$($svc.Name)"; SortKey = "9999-99-99 99:99:99.999"; Level = "ERROR"; Text = "[$($svc.Name)] $l"; StackLines = @(); IsJson = $false } }
                 }
             }
         }
         $entries = @($entries | Sort-Object -Property SortKey)
     } else {
         $sel = $Services[$SelectedIndex]
-        $entries += @(Get-ServiceLogEntries -Svc $sel -TailCount ($MaxRows * 2) -RawMode $RawMode)
+        $entries += @(Get-ServiceLogEntries -Svc $sel -TailCount 1000 -RawMode $RawMode)
         if (($sel.StatusText -eq "CRASHED") -and (Test-Path $sel.ErrFile)) {
             $errLines = @(Get-Content -Path $sel.ErrFile -Tail $MaxRows -ErrorAction SilentlyContinue)
             if ($errLines.Count -gt 0) {
-                $entries += [PSCustomObject]@{ SortKey = ""; Level = "ERROR"; Text = "--- stderr ---"; StackLines = @(); IsJson = $false }
+                $entries += [PSCustomObject]@{ EntryId = "err-hdr"; SortKey = ""; Level = "ERROR"; Text = "--- stderr ---"; StackLines = @(); IsJson = $false }
                 foreach ($l in $errLines) {
-                    if ($l) { $entries += [PSCustomObject]@{ SortKey = ""; Level = "ERROR"; Text = $l; StackLines = @(); IsJson = $false } }
+                    if ($l) { $entries += [PSCustomObject]@{ EntryId = "err-$($sel.Name)"; SortKey = ""; Level = "ERROR"; Text = $l; StackLines = @(); IsJson = $false } }
                 }
             }
         }
@@ -257,38 +327,6 @@ function Get-UnifiedLogs {
         $entries = @($entries | Where-Object { $_.Text.IndexOf($FilterText, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
     }
 
-    # Find the most recent entry with a stack trace so ExpandStacks expands ONE full trace cleanly
-    $latestStackIdx = -1
-    if ($ExpandStacks) {
-        for ($i = $entries.Count - 1; $i -ge 0; $i--) {
-            $e = $entries[$i]
-            if ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0)) {
-                $latestStackIdx = $i
-                break
-            }
-        }
-    }
-
-    # Expand or fold stack traces into display rows
-    $displayRows = @()
-    for ($i = 0; $i -lt $entries.Count; $i++) {
-        $e = $entries[$i]
-        $hasStack = ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0))
-        if ($hasStack -and ($i -ne $latestStackIdx)) {
-            $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "$($e.Text) [+$($e.StackLines.Count) stack lines]" }
-        } else {
-            $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = $e.Text }
-            if ($hasStack) {
-                foreach ($sl in $e.StackLines) {
-                    $cleanSl = $sl.Replace("`t", "  ").Trim()
-                    $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "    $cleanSl" }
-                }
-            }
-        }
-    }
-
-    if ($displayRows.Count -gt $MaxRows) {
-        $displayRows = @($displayRows[($displayRows.Count - $MaxRows)..($displayRows.Count - 1)])
-    }
-    return $displayRows
+    $vp = Get-LogViewport -Entries $entries -MaxRows $MaxRows -ScrollOffset $ScrollOffset -ExpandedEntryIds $ExpandedEntryIds -ExpandLatest $ExpandStacks
+    return $vp.Rows
 }

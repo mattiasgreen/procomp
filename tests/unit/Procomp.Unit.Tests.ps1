@@ -12,6 +12,7 @@ Describe 'procomp Unit Tests' {
         . (Join-Path $script:RepoRoot "src\HealthMonitor.ps1")
         . (Join-Path $script:RepoRoot "src\WireMockBridge.ps1")
         . (Join-Path $script:RepoRoot "src\LogViewer.ps1")
+        . (Join-Path $script:RepoRoot "src\ConsoleInput.ps1")
         . (Join-Path $script:RepoRoot "src\Tui.ps1")
     }
 
@@ -209,6 +210,77 @@ Describe 'procomp Unit Tests' {
             Assert-Match $frame "LOCAL :8083"
             Assert-Match $frame "REMOTE"
             Assert-Match $frame "\[CONFIRM\]"
+        }
+
+        It 'scrolls log viewport, pauses follow when scrolled up, and expands specific clicked stack trace' {
+            $entries = @(
+                [PSCustomObject]@{ EntryId = "e1"; SortKey = "1"; Level = "ERROR"; Text = "First err";  StackLines = @("at A", "at B") }
+                [PSCustomObject]@{ EntryId = "e2"; SortKey = "2"; Level = "INFO";  Text = "Line 2";     StackLines = @() }
+                [PSCustomObject]@{ EntryId = "e3"; SortKey = "3"; Level = "INFO";  Text = "Line 3";     StackLines = @() }
+                [PSCustomObject]@{ EntryId = "e4"; SortKey = "4"; Level = "ERROR"; Text = "Second err"; StackLines = @("at C") }
+                [PSCustomObject]@{ EntryId = "e5"; SortKey = "5"; Level = "INFO";  Text = "Line 5";     StackLines = @() }
+            )
+
+            # At bottom (offset 0) -> IsFollowing = $true
+            $vp0 = Get-LogViewport -Entries $entries -MaxRows 3 -ScrollOffset 0
+            Assert-Eq $vp0.IsFollowing $true
+            Assert-Eq $vp0.Rows[2].Text "Line 5"
+
+            # Scrolled up by 2 -> IsFollowing = $false, shows earlier lines
+            $vp2 = Get-LogViewport -Entries $entries -MaxRows 3 -ScrollOffset 2
+            Assert-Eq $vp2.IsFollowing $false
+            Assert-Eq $vp2.ClampedOffset 2
+            Assert-Match $vp2.Rows[0].Text "First err \[\+2 stack lines\]"
+
+            # Expanding specifically e1 (not e4) via ExpandedEntryIds
+            $vpExp = Get-LogViewport -Entries $entries -MaxRows 10 -ScrollOffset 0 -ExpandedEntryIds @{ "e1" = $true }
+            Assert-Eq $vpExp.TotalRows 7
+            Assert-Match $vpExp.Rows[1].Text "at A"
+            Assert-Match $vpExp.Rows[5].Text "Second err \[\+1 stack lines\]"
+        }
+
+        It 'resolves mouse clicks on toolbar, service rows, routing cell, and stack trace lines' {
+            $logFile = Join-Path $TestDrive "click.log"
+            @("2026-11-18 09:00:00.000  ERROR [svc1] --- Boom", "`tat com.foo.Bar(Bar.java:1)") | Set-Content -Path $logFile -Encoding UTF8
+
+            $svcs = @(
+                [PSCustomObject]@{ Name = "svc1"; Runtime = "java"; Port = 8081; MemLimit = "256M"; LogFormat = "text"; RoutingMode = "LOCAL"; GitSummary = "main"; StatusText = "HEALTHY"; CachedProc = $null; LogFile = $logFile; ErrFile = (Join-Path $TestDrive "c.err"); CachedLogRawMode = $null },
+                [PSCustomObject]@{ Name = "svc2"; Runtime = "node"; Port = 3000; MemLimit = "-";    LogFormat = "text"; RoutingMode = "REMOTE"; GitSummary = "main"; StatusText = "REMOTE"; CachedProc = $null; LogFile = (Join-Path $TestDrive "c2.log"); ErrFile = (Join-Path $TestDrive "c2.err"); CachedLogRawMode = $null }
+            )
+            $layout = $null
+            $lRef = [ref]$layout
+            $frame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "SERVICES" -LayoutOut $lRef -DryRun
+            Assert-NotNull $layout
+
+            # Toolbar click on first button ([s]Start)
+            $hitBtn = Resolve-UiClick -Layout $layout -X $layout.ToolbarButtons[0].StartX -Y 1
+            Assert-Eq $hitBtn.Action "Toolbar"
+            Assert-Eq $hitBtn.Command "start"
+
+            # Click second service row -> SelectService index 1
+            $hitSvc = Resolve-UiClick -Layout $layout -X 5 -Y ($layout.ServiceStartY + 1)
+            Assert-Eq $hitSvc.Action "SelectService"
+            Assert-Eq $hitSvc.Index 1
+            Assert-Eq $hitSvc.ToggleRoute $false
+
+            # Click ROUTING column on first service row -> ToggleRoute = $true
+            $hitRoute = Resolve-UiClick -Layout $layout -X $layout.RoutingStartX -Y $layout.ServiceStartY
+            Assert-Eq $hitRoute.ToggleRoute $true
+
+            # Double-click service row -> OpenLogs
+            $hitDbl = Resolve-UiClick -Layout $layout -X 5 -Y $layout.ServiceStartY -IsDoubleClick $true
+            Assert-Eq $hitDbl.Action "OpenLogs"
+
+            # Click stack line in log pane -> ToggleStack
+            $hitStack = Resolve-UiClick -Layout $layout -X 10 -Y $layout.LogStartY
+            Assert-Eq $hitStack.Action "ToggleStack"
+
+            # Full-screen LOGS mode renders cleanly and has [Esc]Services toolbar button
+            $logLayout = $null
+            $llRef = [ref]$logLayout
+            $logFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "LOGS" -LayoutOut $llRef -DryRun
+            Assert-Match $logFrame "procomp LOGS"
+            Assert-Eq $logLayout.ToolbarButtons[0].Command "back"
         }
     }
 
