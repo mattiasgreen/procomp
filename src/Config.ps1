@@ -90,6 +90,58 @@ function Report-ProcompActivity {
     }
 }
 
+function Invoke-ParallelWork {
+    param(
+        [array]$Items,
+        [scriptblock]$ScriptBlock,
+        [int]$MaxThreads = 4,
+        [string[]]$InitScripts = @()
+    )
+    $itemList = @($Items)
+    if ($itemList.Count -eq 0) { return @() }
+    if ($itemList.Count -eq 1 -or $MaxThreads -le 1) {
+        $single = @()
+        foreach ($it in $itemList) {
+            $single += (& $ScriptBlock $it)
+        }
+        return $single
+    }
+
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($MaxThreads, $itemList.Count))
+    $pool.Open()
+    $jobs = @()
+    $fnText = $ScriptBlock.ToString()
+    try {
+        foreach ($it in $itemList) {
+            $ps = [PowerShell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript({
+                param($scripts, $body, $item)
+                Set-StrictMode -Version Latest
+                foreach ($s in $scripts) {
+                    if ($s -and (Test-Path -LiteralPath $s)) { . $s }
+                }
+                $sb = [scriptblock]::Create($body)
+                & $sb $item
+            }).AddArgument($InitScripts).AddArgument($fnText).AddArgument($it)
+            $jobs += [PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke() }
+        }
+        $results = @()
+        foreach ($j in $jobs) {
+            try {
+                $res = $j.PS.EndInvoke($j.Handle)
+                if ($null -ne $res) { $results += @($res) }
+            } finally {
+                $j.PS.Dispose()
+            }
+        }
+        return $results
+    } finally {
+        $pool.Close()
+        $pool.Dispose()
+    }
+}
+
 function Read-ProcompTraceEntries {
     param([int]$TailCount = 400)
     $path = [System.Environment]::GetEnvironmentVariable("PROCOMP_TRACE_LOG", "Process")

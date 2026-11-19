@@ -683,6 +683,15 @@ Describe 'procomp Unit Tests' {
             Assert-Eq (Sync-WireMockMappings -Services @($svc) -WireMockBaseUrl "http://127.0.0.1:19998") 0
         }
 
+        It 'executes Invoke-ParallelWork across up to 4 threads and collects all results' {
+            $res = @(Invoke-ParallelWork -Items @(1, 2, 3, 4, 5, 6) -MaxThreads 4 -ScriptBlock {
+                param($n)
+                return ($n * 10)
+            })
+            Assert-Eq $res.Count 6
+            Assert-Eq (($res | Sort-Object) -join ",") "10,20,30,40,50,60"
+        }
+
         It 'applies named routing profiles from procomp.json and persists routing.json' {
             $rFile = Join-Path $TestDrive "prof-routing.json"
             $polyPath = Join-Path $script:RepoRoot "examples\polyglot.procomp.json"

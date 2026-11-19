@@ -88,18 +88,19 @@ function Sync-WireMockMappings {
         Write-ProcompTraceLog -Category "WIREMOCK" -Message "WireMock not reachable at $WireMockBaseUrl; skipping route sync"
         return 0
     }
-    $synced = 0
-    $total = @($Services).Count
-    $idx = 0
+    $targets = @()
     foreach ($svc in $Services) {
-        $idx++
         if ($GatewayServiceName -and $svc.Name -eq $GatewayServiceName) { continue }
-        Report-ProcompActivity -ServiceName $svc.Name -Category "WIREMOCK" -Message "Syncing WireMock route ($idx/$total): $($svc.Name) -> $($svc.RoutingMode)..."
-        if (Set-ServiceWireMockRoute -Svc $svc -WireMockBaseUrl $WireMockBaseUrl -GatewayServiceName $GatewayServiceName) {
-            $synced++
-        }
+        $targets += [PSCustomObject]@{ Svc = $svc; BaseUrl = $WireMockBaseUrl; GwName = $GatewayServiceName }
     }
-    return $synced
+    if ($targets.Count -eq 0) { return 0 }
+    Report-ProcompActivity -Category "WIREMOCK" -Message "Syncing $($targets.Count) WireMock route(s) (4 threads)..."
+    $initScripts = @((Join-Path $PSScriptRoot "Config.ps1"), (Join-Path $PSScriptRoot "WireMockBridge.ps1"))
+    $res = @(Invoke-ParallelWork -Items $targets -MaxThreads 4 -InitScripts $initScripts -ScriptBlock {
+        param($t)
+        Set-ServiceWireMockRoute -Svc $t.Svc -WireMockBaseUrl $t.BaseUrl -GatewayServiceName $t.GwName
+    })
+    return (@($res | Where-Object { $_ -eq $true })).Count
 }
 
 function Get-WireMockDrift {

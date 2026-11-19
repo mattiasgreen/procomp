@@ -296,28 +296,37 @@ function Start-BackgroundMonitor {
 
                         $pulledTotal = 0
                         $skippedNotes = @()
-                        foreach ($rp in $targetRepos) {
-                            if ($job.Action -like "Pull*") {
-                                $pr = Invoke-GitPullRepo -RepoPath $rp
-                                if ($pr.Action -eq "PULLED" -and $pr.Commits -gt 0) {
-                                    $pulledTotal += $pr.Commits
+                        $isPull = ($job.Action -like "Pull*")
+                        $gitItems = @($targetRepos | ForEach-Object { [PSCustomObject]@{ RepoPath = $_; IsPull = $isPull } })
+                        $gitInit = @((Join-Path $root "src\Config.ps1"), (Join-Path $root "src\BuildRunner.ps1"))
+                        $gitResults = @(Invoke-ParallelWork -Items $gitItems -MaxThreads 4 -InitScripts $gitInit -ScriptBlock {
+                            param($gi)
+                            if ($gi.IsPull) {
+                                return (Invoke-GitPullRepo -RepoPath $gi.RepoPath)
+                            } else {
+                                return (Invoke-GitFetchRepo -RepoPath $gi.RepoPath)
+                            }
+                        })
+                        foreach ($rp in $targetRepos) { $State.ActiveGitOps.Remove($rp) }
+                        foreach ($gr in $gitResults) {
+                            if (-not $gr) { continue }
+                            if ($isPull) {
+                                if ($gr.Action -eq "PULLED" -and $gr.Commits -gt 0) {
+                                    $pulledTotal += $gr.Commits
                                     foreach ($svc in $bgServices) {
-                                        if ($svc.Repo -and ((Resolve-RepoPath -Repo $svc.Repo -RootDir $root) -eq $rp)) {
+                                        if ($svc.Repo -and ((Resolve-RepoPath -Repo $svc.Repo -RootDir $root) -eq $gr.Repo)) {
                                             $State.StaleServices[$svc.Name] = $true
                                         }
                                     }
-                                } elseif ($pr.Action -ne "PULLED") {
-                                    $skippedNotes += "$(Split-Path -Leaf $rp): $($pr.Reason)"
+                                } elseif ($gr.Action -ne "PULLED") {
+                                    $skippedNotes += "$(Split-Path -Leaf $gr.Repo): $($gr.Reason)"
                                 }
-                            } else {
-                                [void](Invoke-GitFetchRepo -RepoPath $rp)
                             }
-                            $State.ActiveGitOps.Remove($rp)
                         }
 
-                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps
+                        Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
                         $lastGit = Get-Date
-                        if ($job.Action -like "Pull*") {
+                        if ($isPull) {
                             if ($pulledTotal -gt 0) {
                                 $State.BannerNotification = "Pulled $pulledTotal commit(s) - press [b] to rebuild"
                             } elseif ($skippedNotes.Count -gt 0) {
@@ -332,7 +341,7 @@ function Start-BackgroundMonitor {
                     }
 
                     $now = Get-Date
-                    if (($now - $lastGit).TotalSeconds -ge 60) {
+                    if (($now - $lastGit).TotalMinutes -ge 30) {
                         Refresh-GitSummaries -Services $bgServices -RootDir $root -ActiveOps $State.ActiveGitOps -Quiet
                         $lastGit = $now
                     }

@@ -11,27 +11,38 @@ function Resolve-RepoPath {
 
 function Invoke-GitNonInteractive {
     param([string[]]$GitArgs)
-    $prevPrompt = [System.Environment]::GetEnvironmentVariable("GIT_TERMINAL_PROMPT", "Process")
-    $prevSsh    = [System.Environment]::GetEnvironmentVariable("GIT_SSH_COMMAND", "Process")
-    $prevEap    = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
+    $argStr = ($GitArgs | ForEach-Object {
+        $a = [string]$_
+        if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a }
+    }) -join " "
+    Write-ProcompDebugLog -Category "GIT" -Message "git $argStr"
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "git"
+    $psi.Arguments = $argStr
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0"
+    if (-not $psi.EnvironmentVariables["GIT_SSH_COMMAND"]) {
+        $psi.EnvironmentVariables["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=5"
+    }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
     try {
-        [System.Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", "0", "Process")
-        if (-not $prevSsh) {
-            [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=5", "Process")
-        }
-        Write-ProcompDebugLog -Category "GIT" -Message ("git " + ($GitArgs -join " "))
-        $out = @(& git @GitArgs 2>&1)
-        $exitCode = $LASTEXITCODE
-        $outText = ($out -join " ").Trim()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        $stdOut = $proc.StandardOutput.ReadToEnd()
+        $stdErr = $errTask.GetAwaiter().GetResult()
+        $proc.WaitForExit()
+        $exitCode = $proc.ExitCode
+        $outText = (($stdOut + " " + $stdErr) -replace '[\r\n]+', ' ').Trim()
         if ($exitCode -ne 0) {
             Write-ProcompTraceLog -Category "GIT" -Message "git exit=$exitCode output='$outText'"
         }
         return [PSCustomObject]@{ ExitCode = $exitCode; Output = $outText }
     } finally {
-        [System.Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", $prevPrompt, "Process")
-        [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", $prevSsh, "Process")
-        $ErrorActionPreference = $prevEap
+        $proc.Dispose()
     }
 }
 
@@ -76,10 +87,10 @@ function Refresh-GitSummaries {
     param($Services, [string]$RootDir, [hashtable]$ActiveOps = $null, [switch]$Quiet)
     $cache = @{}
     $svcList = @($Services)
-    $total = $svcList.Count
-    $idx = 0
+    $toQuery = @()
+    $seenQuery = @{}
+
     foreach ($svc in $svcList) {
-        $idx++
         $hasUrl = ($svc.PSObject.Properties["ServiceRepositoryUrl"] -and [bool]$svc.ServiceRepositoryUrl)
         if (-not $svc.Repo) {
             $svc.GitSummary = if ($hasUrl) { "MISSING" } else { "-" }
@@ -94,13 +105,33 @@ function Refresh-GitSummaries {
             $svc.GitSummary = $ActiveOps[$rp]
             continue
         }
-        if (-not $cache.ContainsKey($rp)) {
-            if (-not $Quiet) {
-                Report-ProcompActivity -ServiceName $svc.Name -Category "GIT" -Message "Checking Git status ($idx/$total): $(Split-Path -Leaf $rp)..."
-            }
-            $cache[$rp] = (Get-GitRepoStatus -RepoPath $rp -HasRepoUrl $hasUrl).Summary
+        if (-not $seenQuery.ContainsKey($rp)) {
+            $seenQuery[$rp] = $true
+            $toQuery += [PSCustomObject]@{ RepoPath = $rp; HasRepoUrl = $hasUrl }
         }
-        $svc.GitSummary = $cache[$rp]
+    }
+
+    if ($toQuery.Count -gt 0) {
+        if (-not $Quiet) {
+            Report-ProcompActivity -Category "GIT" -Message "Checking Git status ($($toQuery.Count) repo(s), 4 threads)..."
+        }
+        $initScripts = @((Join-Path $PSScriptRoot "Config.ps1"), (Join-Path $PSScriptRoot "BuildRunner.ps1"))
+        $statuses = @(Invoke-ParallelWork -Items $toQuery -MaxThreads 4 -InitScripts $initScripts -ScriptBlock {
+            param($q)
+            $st = Get-GitRepoStatus -RepoPath $q.RepoPath -HasRepoUrl ([bool]$q.HasRepoUrl)
+            return [PSCustomObject]@{ RepoPath = $q.RepoPath; Summary = $st.Summary }
+        })
+        foreach ($r in $statuses) {
+            if ($r -and $r.RepoPath) { $cache[$r.RepoPath] = $r.Summary }
+        }
+    }
+
+    foreach ($svc in $svcList) {
+        if (-not $svc.Repo) { continue }
+        $rp = Resolve-RepoPath -Repo $svc.Repo -RootDir $RootDir
+        if ($rp -and $cache.ContainsKey($rp)) {
+            $svc.GitSummary = $cache[$rp]
+        }
     }
 }
 
