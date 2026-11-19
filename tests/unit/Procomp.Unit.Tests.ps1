@@ -231,6 +231,30 @@ Describe 'procomp Unit Tests' {
             Assert-Match $dirErr ([regex]::Escape($dirAppsPath))
             Assert-Match $dirErr "is a directory, not a file"
         }
+
+        It 'logs executed commands to procomp-debug.log when Set-ProcompDebugLogPath is active' {
+            $dbgLog = Join-Path $TestDrive "procomp-debug.log"
+            $prevDbg = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
+            try {
+                Set-ProcompDebugLogPath -Path $dbgLog
+                [void](Invoke-GitNonInteractive -GitArgs @("--version"))
+
+                $fakeSvc = [PSCustomObject]@{
+                    Name = "dbg-svc"; Repo = $TestDrive; Module = ""
+                    BuilderDef = [PSCustomObject]@{ Name = "b"; Command = "echo building" }
+                    Vars = @{}; HealthPath = ""; LogFormat = "text"; Port = 9999; Runtime = "java"
+                    SwaggerUri = ""; ServiceRepositoryUrl = ""; ReposRoot = ""
+                }
+                [void](Invoke-ServiceBuildSync -Svc $fakeSvc -RootDir $TestDrive)
+
+                Assert-Eq (Test-Path $dbgLog) $true
+                $dbgContent = Get-Content -Path $dbgLog -Raw
+                Assert-Match $dbgContent "\[GIT\].*git --version"
+                Assert-Match $dbgContent "\[BUILD\] svc=dbg-svc.*cmd\.exe /c echo building"
+            } finally {
+                Set-ProcompDebugLogPath -Path $prevDbg
+            }
+        }
     }
 
     Context 'IdeDetector' {

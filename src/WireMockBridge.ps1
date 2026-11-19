@@ -52,10 +52,12 @@ function Set-ServiceWireMockRoute {
     $json = $mapping | ConvertTo-Json -Depth 5
     $id = $mapping.id
     try {
+        Write-ProcompDebugLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "PUT $WireMockBaseUrl/__admin/mappings/$id -> $($Svc.RoutingMode)"
         Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings/$id" -Method Put -Body $json -ContentType "application/json" -TimeoutSec 2 | Out-Null
         return $true
     } catch {
         try {
+            Write-ProcompDebugLog -Category "WIREMOCK" -ServiceName $Svc.Name -Message "POST $WireMockBaseUrl/__admin/mappings -> $($Svc.RoutingMode)"
             Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Post -Body $json -ContentType "application/json" -TimeoutSec 2 | Out-Null
             return $true
         } catch {

@@ -20,6 +20,7 @@ function Invoke-GitNonInteractive {
         if (-not $prevSsh) {
             [System.Environment]::SetEnvironmentVariable("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=5", "Process")
         }
+        Write-ProcompDebugLog -Category "GIT" -Message ("git " + ($GitArgs -join " "))
         $out = @(& git @GitArgs 2>&1)
         return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join " ").Trim() }
     } finally {
@@ -39,14 +40,17 @@ function Get-GitRepoStatus {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
+        Write-ProcompDebugLog -Category "GIT" -WorkingDirectory $RepoPath -Message "git -C `"$RepoPath`" rev-parse --abbrev-ref HEAD"
         $branch = (& git -C $RepoPath rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1)
         if (-not $branch) { $branch = "HEAD" }
         $branch = $branch.Trim()
+        Write-ProcompDebugLog -Category "GIT" -WorkingDirectory $RepoPath -Message "git -C `"$RepoPath`" status --porcelain"
         $porcelain = @(& git -C $RepoPath status --porcelain 2>$null)
         $dirty = ($porcelain.Count -gt 0)
 
         $ahead = 0
         $behind = 0
+        Write-ProcompDebugLog -Category "GIT" -WorkingDirectory $RepoPath -Message "git -C `"$RepoPath`" rev-list --left-right --count HEAD...@{u}"
         $abLines = @(& git -C $RepoPath rev-list --left-right --count 'HEAD...@{u}' 2>$null)
         if ($LASTEXITCODE -eq 0 -and $abLines.Count -gt 0 -and ($abLines[0].Trim() -match '^(\d+)\s+(\d+)$')) {
             $ahead  = [int]$Matches[1]
@@ -217,6 +221,7 @@ function Start-ServiceBuildAsync {
         throw "Working directory not found for $($Svc.Name): $workDir"
     }
 
+    Write-ProcompDebugLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "cmd.exe /c $cmdLine"
     $proc = Start-Process -FilePath "cmd.exe" `
         -ArgumentList @("/c", $cmdLine) `
         -WorkingDirectory $workDir `
@@ -225,6 +230,7 @@ function Start-ServiceBuildAsync {
         -WindowStyle Hidden `
         -PassThru
 
+    Write-ProcompDebugLog -Category "BUILD-ASYNC" -ServiceName $Svc.Name -Message "Started PID=$($proc.Id)"
     $Svc.BuildProc = $proc
     $Svc.StatusText = "BUILDING"
 }
@@ -240,6 +246,7 @@ function Invoke-ServiceBuildSync {
     $ErrorActionPreference = "Continue"
     try {
         Push-Location $workDir
+        Write-ProcompDebugLog -Category "BUILD" -ServiceName $Svc.Name -WorkingDirectory $workDir -Message "cmd.exe /c $cmdLine"
         & cmd.exe /c $cmdLine
         return ($LASTEXITCODE -eq 0)
     } finally {

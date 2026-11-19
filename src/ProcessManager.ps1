@@ -173,6 +173,8 @@ function Start-ServiceProcess {
     }
 
     try {
+        $argText = if ($parsed.ArgumentList.Count -gt 0) { " " + ($parsed.ArgumentList -join " ") } else { "" }
+        Write-ProcompDebugLog -Category "EXEC" -ServiceName $Svc.Name -WorkingDirectory $resolved.WorkingDirectory -Message "`"$($parsed.FilePath)`"$argText"
         $startParams = @{
             FilePath               = $parsed.FilePath
             WorkingDirectory       = $resolved.WorkingDirectory
@@ -185,6 +187,7 @@ function Start-ServiceProcess {
             $startParams["ArgumentList"] = $parsed.ArgumentList
         }
         $proc = Start-Process @startParams
+        Write-ProcompDebugLog -Category "EXEC" -ServiceName $Svc.Name -Message "Started PID=$($proc.Id)"
     } finally {
         foreach ($k in $savedEnv.Keys) {
             [System.Environment]::SetEnvironmentVariable($k, $savedEnv[$k], "Process")
@@ -216,6 +219,7 @@ function Stop-ServiceProcess {
             $prevEap = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             try {
+                Write-ProcompDebugLog -Category "KILL" -ServiceName $Svc.Name -Message "taskkill.exe /F /T /PID $procId"
                 & taskkill.exe /F /T /PID $procId >$null 2>&1
             } finally {
                 $ErrorActionPreference = $prevEap

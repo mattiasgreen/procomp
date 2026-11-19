@@ -20,6 +20,7 @@ $ErrorActionPreference = "Stop"
 $RootDir     = $PSScriptRoot
 $BaseLogDir  = Join-Path $RootDir "logs"
 $CrashLog    = Join-Path $BaseLogDir "procomp-error.log"
+$DebugLog    = Join-Path $BaseLogDir "procomp-debug.log"
 $script:LastResolvedAppsFile = ""
 
 New-Item -ItemType Directory -Force -Path $BaseLogDir | Out-Null
@@ -64,6 +65,9 @@ trap {
 . (Join-Path $RootDir "src\BackgroundWorker.ps1")
 . (Join-Path $RootDir "src\Doctor.ps1")
 . (Join-Path $RootDir "src\Tui.ps1")
+
+Set-ProcompDebugLogPath -Path $DebugLog
+Write-ProcompDebugLog -Category "START" -WorkingDirectory (Get-Location).Path -Message "Action=$Action Config=$ConfigPath ReposRoot=$ReposRoot Project=$Project Service=$Service Profile=$Profile"
 
 $ProjectName = Resolve-ProjectName -ConfigPath $ConfigPath -ProjectOverride $Project
 $StateDir    = Join-Path (Join-Path $RootDir ".stack_state") $ProjectName
@@ -314,6 +318,7 @@ try {
                     $script:banner = "No swaggeruri configured for $($curSvc.Name)"
                 } else {
                     try {
+                        Write-ProcompDebugLog -Category "OPEN" -ServiceName $curSvc.Name -Message $url
                         Start-Process $url
                         $script:banner = "Opened Swagger: $url"
                     } catch {

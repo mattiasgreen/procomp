@@ -1,5 +1,41 @@
 Set-StrictMode -Version Latest
 
+function Set-ProcompDebugLogPath {
+    param([string]$Path)
+    [System.Environment]::SetEnvironmentVariable("PROCOMP_DEBUG_LOG", $Path, "Process")
+}
+
+function Write-ProcompDebugLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$WorkingDirectory = "",
+        [string]$ServiceName = ""
+    )
+    $logPath = [System.Environment]::GetEnvironmentVariable("PROCOMP_DEBUG_LOG", "Process")
+    if (-not $logPath) { return }
+    try {
+        $dir = Split-Path -Parent $logPath
+        if ($dir -and (-not (Test-Path -LiteralPath $dir))) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss.fff")
+        $svcPart = if ($ServiceName) { " svc=$ServiceName" } else { "" }
+        $cwdPart = if ($WorkingDirectory) { " cwd=$WorkingDirectory" } else { "" }
+        $line = "[$ts] [PID=$PID] [$Category]$svcPart$cwdPart $Message" + [Environment]::NewLine
+
+        $mtx = New-Object System.Threading.Mutex($false, "procomp-debug-log-$PID")
+        $acquired = $false
+        try {
+            $acquired = $mtx.WaitOne(2000)
+            [System.IO.File]::AppendAllText($logPath, $line, (New-Object System.Text.UTF8Encoding($false)))
+        } finally {
+            if ($acquired) { $mtx.ReleaseMutex() }
+            $mtx.Dispose()
+        }
+    } catch { }
+}
+
 function Resolve-JavaTool {
     param([string]$Tool = "java")
     if ($env:JAVA_HOME) {
