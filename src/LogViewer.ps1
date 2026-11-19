@@ -180,8 +180,8 @@ function Get-ServiceLogEntries {
                 $line = $sr.ReadLine()
                 if (-not $line) { continue }
 
-                # Fold plain-text Java stack trace lines onto the preceding log entry
-                if ((-not $RawMode) -and ($Svc.LogRingBuffer.Count -gt 0) -and ($line -match '^\s+at\s+|^Caused by:|^\s+\.\.\.\s+\d+\s+more')) {
+                # Fold plain-text Java stack trace lines (including exception header & Caused by) onto the preceding log entry
+                if ((-not $RawMode) -and ($Svc.LogRingBuffer.Count -gt 0) -and ($line -match '^\s+at\s+|^\s*Caused by:|^\s+\.\.\.\s+\d+\s+more|^[\w\.$]+(Exception|Error|Throwable)(:|\s|$)')) {
                     $prev = $Svc.LogRingBuffer[$Svc.LogRingBuffer.Count - 1]
                     $prev.StackLines = @($prev.StackLines) + @($line)
                     continue
@@ -257,11 +257,24 @@ function Get-UnifiedLogs {
         $entries = @($entries | Where-Object { $_.Text.IndexOf($FilterText, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
     }
 
+    # Find the most recent entry with a stack trace so ExpandStacks expands ONE full trace cleanly
+    $latestStackIdx = -1
+    if ($ExpandStacks) {
+        for ($i = $entries.Count - 1; $i -ge 0; $i--) {
+            $e = $entries[$i]
+            if ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0)) {
+                $latestStackIdx = $i
+                break
+            }
+        }
+    }
+
     # Expand or fold stack traces into display rows
     $displayRows = @()
-    foreach ($e in $entries) {
+    for ($i = 0; $i -lt $entries.Count; $i++) {
+        $e = $entries[$i]
         $hasStack = ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0))
-        if ($hasStack -and (-not $ExpandStacks)) {
+        if ($hasStack -and ($i -ne $latestStackIdx)) {
             $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "$($e.Text) [+$($e.StackLines.Count) stack lines]" }
         } else {
             $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = $e.Text }

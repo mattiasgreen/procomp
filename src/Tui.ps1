@@ -14,6 +14,10 @@ $script:C_REV     = "$script:ESC[7m"
 function Pad-Line {
     param([string]$Text, [int]$Width)
     $plain = $Text -replace "$script:ESC\[[0-9;]*m", ""
+    if ($plain.Length -gt $Width) {
+        # Strip ANSI and truncate cleanly so the terminal never wraps and scrolls the viewport
+        return $plain.Substring(0, $Width)
+    }
     $pad = $Width - $plain.Length
     if ($pad -gt 0) {
         return $Text + (" " * $pad)
@@ -42,8 +46,8 @@ function Render-Tui {
     $width = 120
     $height = 30
     try {
-        $width = [Math]::Max(90, [Console]::WindowWidth - 1)
-        $height = [Math]::Max(20, [Console]::WindowHeight)
+        $width = [Math]::Max(40, [Console]::WindowWidth - 1)
+        $height = [Math]::Max(15, [Console]::WindowHeight)
     } catch { }
 
     $sb = New-Object System.Text.StringBuilder
@@ -141,6 +145,5 @@ function Render-Tui {
     if ($DryRun) {
         return $sb.ToString()
     }
-    [Console]::SetCursorPosition(0, 0)
-    [Console]::Write($sb.ToString())
+    [Console]::Write("$script:ESC[H" + $sb.ToString() + "$script:ESC[J")
 }

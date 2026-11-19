@@ -184,7 +184,8 @@ $bgWorker = Start-BackgroundMonitor -SharedState $sharedState
 $origCtrlC = [Console]::TreatControlCAsInput
 [Console]::TreatControlCAsInput = $true
 [Console]::CursorVisible = $false
-Clear-Host
+# Enter ANSI alternate screen buffer so Windows Terminal never scrolls or duplicates frames
+[Console]::Write("$([char]27)[?1049h$([char]27)[2J$([char]27)[H")
 
 try {
     $running = $true
@@ -420,10 +421,10 @@ try {
     }
 } finally {
     Stop-BackgroundMonitor -Worker $bgWorker
+    [Console]::Write("$([char]27)[?1049l")
     [Console]::CursorVisible = $true
     [Console]::TreatControlCAsInput = $origCtrlC
     $HttpClient.Dispose()
-    Clear-Host
     if ($detachOnExit) {
         Write-Host "Detached. Services remain running in the background. Re-run .\procomp.cmd to re-attach, or .\procomp.cmd -Action down to stop all."
     } else {

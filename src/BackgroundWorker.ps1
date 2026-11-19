@@ -206,10 +206,22 @@ function Get-UnifiedLogsFromMemory {
         $entries = @($entries | Where-Object { $_.Text.IndexOf($FilterText, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
     }
 
+    $latestStackIdx = -1
+    if ($ExpandStacks) {
+        for ($i = $entries.Count - 1; $i -ge 0; $i--) {
+            $e = $entries[$i]
+            if ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0)) {
+                $latestStackIdx = $i
+                break
+            }
+        }
+    }
+
     $displayRows = @()
-    foreach ($e in $entries) {
+    for ($i = 0; $i -lt $entries.Count; $i++) {
+        $e = $entries[$i]
         $hasStack = ($e.PSObject.Properties["StackLines"] -and $e.StackLines -and ($e.StackLines.Count -gt 0))
-        if ($hasStack -and (-not $ExpandStacks)) {
+        if ($hasStack -and ($i -ne $latestStackIdx)) {
             $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = "$($e.Text) [+$($e.StackLines.Count) stack lines]" }
         } else {
             $displayRows += [PSCustomObject]@{ SortKey = $e.SortKey; Level = $e.Level; Text = $e.Text }

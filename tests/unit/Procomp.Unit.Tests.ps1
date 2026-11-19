@@ -122,6 +122,33 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $filtered.Count 1
             Assert-Match $filtered[0].Text "Boom"
         }
+
+        It 'folds plain-text exception headers and expands only the latest stack trace' {
+            $logPath = Join-Path $TestDrive "plain-stack.log"
+            @(
+                "2026-11-18 09:00:01.000  ERROR [auth-service] --- First failure"
+                "java.lang.IllegalStateException: First boom"
+                "`tat com.foo.A.run(A.java:10)"
+                "2026-11-18 09:00:02.000  ERROR [auth-service] --- Second failure"
+                "java.lang.RuntimeException: Second boom"
+                "`tat com.foo.B.run(B.java:20)"
+                "`tCaused by: java.io.IOException: Closed"
+            ) | Set-Content -Path $logPath -Encoding UTF8
+
+            $svc = [PSCustomObject]@{
+                Name = "auth-service"; LogFile = $logPath; ErrFile = (Join-Path $TestDrive "plain-stack.err.log")
+                StatusText = "HEALTHY"; CachedLogRawMode = $null
+            }
+            $svcs = @($svc)
+
+            # ExpandStacks=$true should keep first trace folded (+2) and expand only the latest (+3 lines -> 1 header + 3 stack)
+            $rows = @(Get-UnifiedLogs -Services $svcs -SelectedIndex 0 -AllMode $false -ErrorsOnly $false -RawMode $false -MaxRows 10 -ExpandStacks $true)
+            Assert-Eq $rows.Count 5
+            Assert-Match $rows[0].Text "First failure \[\+2 stack lines\]"
+            Assert-Match $rows[1].Text "Second failure"
+            Assert-Match $rows[2].Text "java\.lang\.RuntimeException: Second boom"
+            Assert-Match $rows[4].Text "Caused by: java\.io\.IOException: Closed"
+        }
     }
 
     Context 'TUI DryRun Renderer' {
