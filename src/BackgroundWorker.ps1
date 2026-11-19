@@ -28,6 +28,9 @@ function New-SharedTuiState {
         ServiceMetrics     = [Hashtable]::Synchronized(@{})
         LogBuffers         = [Hashtable]::Synchronized(@{})
         ProcompLogEntries  = @()
+        ActiveViewMode     = "SERVICES"
+        WireMockSubMode    = "JOURNAL"
+        WireMockEntries    = @()
     })
 }
 
@@ -52,12 +55,14 @@ function Start-BackgroundMonitor {
         . (Join-Path $root "src\IdeDetector.ps1")
         . (Join-Path $root "src\ProcessManager.ps1")
         . (Join-Path $root "src\HealthMonitor.ps1")
+        . (Join-Path $root "src\WireMockBridge.ps1")
         . (Join-Path $root "src\LogViewer.ps1")
 
         $httpClient = New-HealthHttpClient -TimeoutMs 400
         try {
             $cfg = Load-ProcompConfig -ConfigPath $State.ConfigPath -StateDir $State.StateDir -LogDir $State.LogDir -ReposRootOverride $State.ReposRoot
             $bgServices = @($cfg.Services)
+            $gwAdminUrl = Get-GatewayAdminUrl -Config $cfg
             $traceOffsets = @{}
             Write-ProcompTraceLog -Category "BG" -Message "BackgroundMonitor started ($($bgServices.Count) service(s))"
             $lastGit = [datetime]::MinValue
@@ -220,6 +225,9 @@ function Start-BackgroundMonitor {
                     }
 
                     $State.ProcompLogEntries = @(Read-ProcompTraceEntries -TailCount 400)
+                    if ($State.ActiveViewMode -eq "WIREMOCK") {
+                        $State.WireMockEntries = @(Get-WireMockViewerEntries -WireMockBaseUrl $gwAdminUrl -SubMode ([string]$State.WireMockSubMode))
+                    }
                     $State.SnapshotVersion = [int]$State.SnapshotVersion + 1
                     $State.RefreshNow = $false
                 } catch {

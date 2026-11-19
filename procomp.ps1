@@ -265,6 +265,7 @@ try {
     $gatewaySynced = $false
     $needsRender = $true
     $viewMode = "SERVICES"
+    $wireMockSubMode = "JOURNAL"
     $localOnly = $false
     $showHelp = $false
     $filterText = ""
@@ -341,16 +342,34 @@ try {
             }
             "logs" {
                 $script:viewMode = "LOGS"
+                $sharedState.ActiveViewMode = "LOGS"
                 $script:scrollOffset = 0
                 $script:banner = "Log Viewer: $($curSvc.Name) (Wheel/PgUp/PgDn to scroll, Esc to return)"
             }
             "procomp-logs" {
                 $script:viewMode = "PROCOMP"
+                $sharedState.ActiveViewMode = "PROCOMP"
                 $script:scrollOffset = 0
                 $script:banner = "procomp Trace Log (Wheel/PgUp/PgDn to scroll, Esc to return)"
             }
+            "wiremock" {
+                $script:viewMode = "WIREMOCK"
+                $sharedState.ActiveViewMode = "WIREMOCK"
+                $sharedState.WireMockSubMode = $script:wireMockSubMode
+                $sharedState.RefreshNow = $true
+                $script:scrollOffset = 0
+                $script:banner = "WireMock Viewer ($($script:wireMockSubMode)) - [m]/Tab to switch Journal/Mappings, Esc to return"
+            }
+            "wm-toggle" {
+                $script:wireMockSubMode = if ($script:wireMockSubMode -eq "JOURNAL") { "MAPPINGS" } else { "JOURNAL" }
+                $sharedState.WireMockSubMode = $script:wireMockSubMode
+                $sharedState.RefreshNow = $true
+                $script:scrollOffset = 0
+                $script:banner = "WireMock Viewer: $($script:wireMockSubMode)"
+            }
             "back" {
                 $script:viewMode = "SERVICES"
+                $sharedState.ActiveViewMode = "SERVICES"
                 $script:scrollOffset = 0
                 $script:banner = "Services view"
             }
@@ -563,7 +582,7 @@ try {
 
         if ($needsRender) {
             $layoutRef = [ref]$uiLayout
-            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -LayoutOut $layoutRef
+            Render-Tui -Services $visServices -SelectedIndex $selected -BannerMsg $banner -AllLogs $allLogs -ErrorsOnly $errorsOnly -RawLogs $rawLogs -ConfirmQuit $confirmQuit -ViewMode $viewMode -ProjectName $ProjectName -LocalOnly $localOnly -ShowHelp $showHelp -FilterText $filterText -FilterInputMode $filterInputMode -ExpandStacks $expandStacks -ScrollOffset $scrollOffset -ExpandedEntryIds $expandedEntryIds -LogBuffers $sharedState.LogBuffers -ProcompLogEntries $sharedState.ProcompLogEntries -WireMockSubMode $wireMockSubMode -WireMockEntries $sharedState.WireMockEntries -LayoutOut $layoutRef
             if ($uiLayout) { $scrollOffset = $uiLayout.ClampedOffset }
             $needsRender = $false
         }
@@ -680,7 +699,7 @@ try {
 
                 $pageStep = if ($uiLayout -and $uiLayout.PageHeight -gt 2) { $uiLayout.PageHeight - 2 } else { 10 }
 
-                if ($viewMode -eq "LOGS" -or $viewMode -eq "PROCOMP") {
+                if ($viewMode -eq "LOGS" -or $viewMode -eq "PROCOMP" -or $viewMode -eq "WIREMOCK") {
                     switch ($vk) {
                         0x1B { Invoke-UiAction -Cmd "back"; $needsRender = $true; continue }   # Esc
                         0x26 { $scrollOffset++; $needsRender = $true; continue }              # Up
@@ -691,11 +710,13 @@ try {
                         0x23 { Invoke-UiAction -Cmd "follow"; $needsRender = $true; continue } # End
                         0x25 { $selected = ($selected - 1 + $visServices.Count) % $visServices.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($visServices[$selected].Name)"; $needsRender = $true; continue } # Left
                         0x27 { $selected = ($selected + 1) % $visServices.Count; $scrollOffset = 0; $allLogs = $false; $banner = "Logs: $($visServices[$selected].Name)"; $needsRender = $true; continue } # Right
-                        0x09 { Invoke-UiAction -Cmd "all"; $needsRender = $true; continue }   # Tab
+                        0x09 { if ($viewMode -eq "WIREMOCK") { Invoke-UiAction -Cmd "wm-toggle" } else { Invoke-UiAction -Cmd "all" }; $needsRender = $true; continue }   # Tab
                     }
                     switch -CaseSensitive ($ch) {
                         'l' { Invoke-UiAction -Cmd "back"; $needsRender = $true }
                         'L' { if ($viewMode -eq "PROCOMP") { Invoke-UiAction -Cmd "back" } else { Invoke-UiAction -Cmd "procomp-logs" }; $needsRender = $true }
+                        'w' { if ($viewMode -eq "WIREMOCK") { Invoke-UiAction -Cmd "back" } else { Invoke-UiAction -Cmd "wiremock" }; $needsRender = $true }
+                        'm' { if ($viewMode -eq "WIREMOCK") { Invoke-UiAction -Cmd "wm-toggle"; $needsRender = $true } }
                         'k' { $scrollOffset++; $needsRender = $true }
                         'j' { $scrollOffset = [Math]::Max(0, $scrollOffset - 1); $needsRender = $true }
                         'G' { Invoke-UiAction -Cmd "follow"; $needsRender = $true }
@@ -721,6 +742,7 @@ try {
                         'o' { Invoke-UiAction -Cmd "swagger"; $needsRender = $true }
                         'l' { Invoke-UiAction -Cmd "logs"; $needsRender = $true }
                         'L' { Invoke-UiAction -Cmd "procomp-logs"; $needsRender = $true }
+                        'w' { Invoke-UiAction -Cmd "wiremock"; $needsRender = $true }
                         'a' { Invoke-UiAction -Cmd "all"; $needsRender = $true }
                         'e' { Invoke-UiAction -Cmd "err"; $needsRender = $true }
                         'v' { Invoke-UiAction -Cmd "raw"; $needsRender = $true }

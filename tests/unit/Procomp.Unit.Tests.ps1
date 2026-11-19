@@ -543,6 +543,47 @@ Describe 'procomp Unit Tests' {
             Assert-Match $pFrame "procomp TRACE LOG"
             Assert-Match $pFrame "BUILD-FAIL"
             Assert-Eq ($pFrame.Contains("Action=tui")) $false
+
+            # WireMock Journal & Mappings formatting and WIREMOCK view rendering
+            $wmReqResp = [PSCustomObject]@{
+                requests = @(
+                    [PSCustomObject]@{
+                        request = [PSCustomObject]@{ method = "POST"; url = "/orders/pay"; loggedDateString = "2026-11-19T11:00:02.000Z" }
+                        wasMatched = $false
+                        responseDefinition = [PSCustomObject]@{ status = 404 }
+                        timing = [PSCustomObject]@{ totalTime = 5 }
+                    },
+                    [PSCustomObject]@{
+                        request = [PSCustomObject]@{ method = "GET"; url = "/orders/1"; loggedDateString = "2026-11-19T11:00:01.000Z" }
+                        wasMatched = $true
+                        response = [PSCustomObject]@{ status = 200 }
+                        responseDefinition = [PSCustomObject]@{ proxyBaseUrl = "http://127.0.0.1:8082" }
+                        timing = [PSCustomObject]@{ totalTime = 12 }
+                    }
+                )
+            }
+            $jEntries = @(Format-WireMockJournalEntries -Resp $wmReqResp)
+            Assert-Eq $jEntries.Count 2
+            Assert-Match $jEntries[0].Text "GET\s+/orders/1 => 200 -> http://127\.0\.0\.1:8082 \[12ms\]"
+            Assert-Eq $jEntries[1].Level "ERROR"
+            Assert-Match $jEntries[1].Text "POST\s+/orders/pay => 404 \(UNMATCHED\)"
+
+            $wmMapResp = [PSCustomObject]@{
+                mappings = @(
+                    [PSCustomObject]@{
+                        name = "procomp-orders"; priority = 5
+                        request = [PSCustomObject]@{ method = "ANY"; urlPathPattern = "/orders/(.*)" }
+                        response = [PSCustomObject]@{ proxyBaseUrl = "http://127.0.0.1:8082" }
+                    }
+                )
+            }
+            $mEntries = @(Format-WireMockMappingEntries -Resp $wmMapResp)
+            Assert-Eq $mEntries.Count 1
+            Assert-Match $mEntries[0].Text "ANY\s+/orders/\(\.\*\) -> http://127\.0\.0\.1:8082 \(p=5\) \[procomp-orders\]"
+
+            $wmFrame = Render-Tui -Services $svcs -SelectedIndex 0 -BannerMsg "ok" -AllLogs $false -ErrorsOnly $false -RawLogs $false -ConfirmQuit $false -ViewMode "WIREMOCK" -WireMockSubMode "MAPPINGS" -WireMockEntries $mEntries -DryRun
+            Assert-Match $wmFrame "procomp WIREMOCK \(MAPPINGS\)"
+            Assert-Match $wmFrame "procomp-orders"
         }
 
         It 'windows large service tables (25 apps) and renders the help overlay' {

@@ -110,6 +110,8 @@ function Render-Tui {
         [hashtable]$ExpandedEntryIds = @{},
         [hashtable]$LogBuffers = $null,
         [array]$ProcompLogEntries = @(),
+        [string]$WireMockSubMode = "JOURNAL",
+        [array]$WireMockEntries = @(),
         $LayoutOut = $null,
         [switch]$DryRun
     )
@@ -134,8 +136,9 @@ function Render-Tui {
             "  r                 Restart selected       b                      Rebuild selected",
             "  f / F             Git fetch one / all    p / P                  Git pull (--ff-only) one / all",
             "  t / Click ROUTING Toggle LOCAL <-> REMOTE  o                    Open Swagger URI in browser",
-            "  L                 procomp Trace/Debug Log  g                    Toggle LOCAL-only view",
-            "  d                 Detach (keep running)    q / Ctrl+C           Confirm & stop all",
+            "  L                 procomp Trace/Debug Log  w                    WireMock Journal / Mappings",
+            "  g                 Toggle LOCAL-only view   d                    Detach (keep running)",
+            "  q / Ctrl+C        Confirm & stop all",
             "",
             "$script:C_BOLD LOG VIEWER MODE (Full-Screen)$script:C_RESET",
             "  Esc / l           Return to Services     Left / Right           Switch service logs",
@@ -174,7 +177,19 @@ function Render-Tui {
     $logStartY = 3
     $logRows = 4
 
-    if ($ViewMode -eq "PROCOMP") {
+    if ($ViewMode -eq "WIREMOCK") {
+        $wmToggleLabel = if ($WireMockSubMode -eq "MAPPINGS") { "[m]Journal" } else { "[m]Mappings" }
+        $toolbar = Build-ToolbarLine -Items @(
+            @{ Label = "[Esc]Services"; Command = "back";      Active = $false },
+            @{ Label = $wmToggleLabel;   Command = "wm-toggle"; Active = $true },
+            @{ Label = "[e]Warn/Err";    Command = "err";       Active = $ErrorsOnly },
+            @{ Label = "[/]Find";        Command = "find";      Active = ($FilterText -ne "") },
+            @{ Label = "[End]Follow";    Command = "follow";    Active = ($ScrollOffset -eq 0) },
+            @{ Label = "[?]Help";        Command = "help";      Active = $false }
+        )
+        $logStartY = 3
+        $logRows = [Math]::Max(4, $height - 4)
+    } elseif ($ViewMode -eq "PROCOMP") {
         $toolbar = Build-ToolbarLine -Items @(
             @{ Label = "[Esc]Services"; Command = "back";   Active = $false },
             @{ Label = "[e]Warn/Err";   Command = "err";    Active = $ErrorsOnly },
@@ -208,6 +223,7 @@ function Render-Tui {
             @{ Label = "[t]Route";  Command = "route";        Active = $false },
             @{ Label = "[l]Logs";   Command = "logs";         Active = $false },
             @{ Label = "[L]Trace";  Command = "procomp-logs"; Active = $false },
+            @{ Label = "[w]WM";     Command = "wiremock";     Active = $false },
             @{ Label = "[o]Docs";   Command = "swagger";      Active = $false },
             @{ Label = "[?]Help";   Command = "help";         Active = $false },
             @{ Label = "[q]Quit";   Command = "quit";         Active = $false }
@@ -224,8 +240,8 @@ function Render-Tui {
     }
 
     # Fetch log viewport first so header can display FOLLOW / PAUSED scroll position accurately
-    if ($ViewMode -eq "PROCOMP") {
-        $pEntries = @($ProcompLogEntries)
+    if ($ViewMode -eq "PROCOMP" -or $ViewMode -eq "WIREMOCK") {
+        $pEntries = if ($ViewMode -eq "WIREMOCK") { @($WireMockEntries) } else { @($ProcompLogEntries) }
         if ($ErrorsOnly) {
             $pEntries = @($pEntries | Where-Object { $_.Level -eq "ERROR" -or $_.Level -eq "WARN" })
         }
@@ -242,7 +258,11 @@ function Render-Tui {
 
     $followTag = if ($vp.IsFollowing) { " | ${script:C_GREEN}FOLLOW${script:C_RESET}" } else { " | ${script:C_YELLOW}PAUSED ^$($vp.ClampedOffset)/$($vp.TotalRows)${script:C_RESET}" }
 
-    if ($ViewMode -eq "PROCOMP") {
+    if ($ViewMode -eq "WIREMOCK") {
+        [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag WIREMOCK ($WireMockSubMode)$script:C_RESET $script:C_DIM| (m/Tab: Journal/Mappings, Wheel/PgUp/PgDn: scroll, Esc: services)$script:C_RESET$errTag$followTag$filtTag" $width) + "`n")
+        [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
+        [void]$sb.Append(("-" * $width) + "`n")
+    } elseif ($ViewMode -eq "PROCOMP") {
         [void]$sb.Append((Pad-Line "$script:C_BOLD$script:C_CYAN procomp$projTag TRACE LOG$script:C_RESET $script:C_DIM| (Wheel/PgUp/PgDn: scroll, Esc: services)$script:C_RESET$errTag$followTag$filtTag" $width) + "`n")
         [void]$sb.Append((Pad-Line $toolbar.Text $width) + "`n")
         [void]$sb.Append(("-" * $width) + "`n")
@@ -349,7 +369,7 @@ function Render-Tui {
         [void]$sb.Append((Pad-Line "$script:C_DIM $BannerMsg$script:C_RESET" $width))
     }
 
-    $routingStartX = if ($ViewMode -eq "LOGS" -or $ViewMode -eq "PROCOMP") { 67 } else { 46 + $svcColWidth }
+    $routingStartX = if ($ViewMode -eq "LOGS" -or $ViewMode -eq "PROCOMP" -or $ViewMode -eq "WIREMOCK") { 67 } else { 46 + $svcColWidth }
     if ($null -ne $LayoutOut) {
         $LayoutOut.Value = [PSCustomObject]@{
             ViewMode         = $ViewMode

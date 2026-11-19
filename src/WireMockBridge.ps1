@@ -118,3 +118,127 @@ function Get-WireMockDrift {
     }
     return $report
 }
+
+function Format-WireMockJournalEntries {
+    param($Resp)
+    $entries = @()
+    if (-not $Resp -or (-not $Resp.PSObject.Properties["requests"]) -or (-not $Resp.requests)) {
+        return $entries
+    }
+    $reqs = @($Resp.requests)
+    [Array]::Reverse($reqs)
+    $idx = 0
+    foreach ($r in $reqs) {
+        $idx++
+        $req = if ($r.PSObject.Properties["request"]) { $r.request } else { $null }
+        if (-not $req) { continue }
+        $method = if ($req.PSObject.Properties["method"] -and $req.method) { [string]$req.method } else { "?" }
+        $url = if ($req.PSObject.Properties["url"] -and $req.url) { [string]$req.url } else { "/" }
+        $tsStr = "-"
+        if ($req.PSObject.Properties["loggedDateString"] -and $req.loggedDateString) {
+            $dto = [DateTimeOffset]::MinValue
+            if ([DateTimeOffset]::TryParse([string]$req.loggedDateString, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$dto)) {
+                $tsStr = $dto.LocalDateTime.ToString("HH:mm:ss.fff")
+            }
+        }
+        $matched = if ($r.PSObject.Properties["wasMatched"]) { [bool]$r.wasMatched } else { $false }
+        $status = 0
+        if ($r.PSObject.Properties["response"] -and $r.response -and $r.response.PSObject.Properties["status"]) {
+            $status = [int]$r.response.status
+        } elseif ($r.PSObject.Properties["responseDefinition"] -and $r.responseDefinition -and $r.responseDefinition.PSObject.Properties["status"]) {
+            $status = [int]$r.responseDefinition.status
+        }
+        $target = ""
+        if ($r.PSObject.Properties["responseDefinition"] -and $r.responseDefinition -and $r.responseDefinition.PSObject.Properties["proxyBaseUrl"] -and $r.responseDefinition.proxyBaseUrl) {
+            $target = " -> $($r.responseDefinition.proxyBaseUrl)"
+        } elseif (-not $matched) {
+            $target = " (UNMATCHED)"
+        }
+        $ms = ""
+        if ($r.PSObject.Properties["timing"] -and $r.timing -and $r.timing.PSObject.Properties["totalTime"]) {
+            $ms = " [$($r.timing.totalTime)ms]"
+        }
+        $statusStr = if ($status -gt 0) { [string]$status } else { "-" }
+        $lvl = if ((-not $matched) -or ($status -ge 500)) { "ERROR" } elseif ($status -ge 400) { "WARN" } else { "INFO" }
+        $entries += [PSCustomObject]@{
+            EntryId    = "wm-j-$idx"
+            SortKey    = $idx.ToString("D6")
+            Level      = $lvl
+            Text       = ("{0}  {1,-6} {2} => {3}{4}{5}" -f $tsStr, $method, $url, $statusStr, $target, $ms)
+            StackLines = @()
+            IsJson     = $false
+        }
+    }
+    return $entries
+}
+
+function Format-WireMockMappingEntries {
+    param($Resp)
+    $entries = @()
+    if (-not $Resp -or (-not $Resp.PSObject.Properties["mappings"]) -or (-not $Resp.mappings)) {
+        return $entries
+    }
+    $idx = 0
+    foreach ($m in $Resp.mappings) {
+        $idx++
+        $req = if ($m.PSObject.Properties["request"]) { $m.request } else { $null }
+        $resp = if ($m.PSObject.Properties["response"]) { $m.response } else { $null }
+        $method = if ($req -and $req.PSObject.Properties["method"] -and $req.method) { [string]$req.method } else { "ANY" }
+        $pat = "*"
+        if ($req) {
+            foreach ($pf in @("urlPathPattern", "urlPattern", "urlPath", "url")) {
+                if ($req.PSObject.Properties[$pf] -and $req.$pf) {
+                    $pat = [string]$req.$pf
+                    break
+                }
+            }
+        }
+        $dest = "(stub)"
+        if ($resp -and $resp.PSObject.Properties["proxyBaseUrl"] -and $resp.proxyBaseUrl) {
+            $dest = [string]$resp.proxyBaseUrl
+        } elseif ($resp -and $resp.PSObject.Properties["status"]) {
+            $dest = "stub:$($resp.status)"
+        }
+        $prio = if ($m.PSObject.Properties["priority"] -and $null -ne $m.priority) { "p=$($m.priority)" } else { "p=-" }
+        $name = if ($m.PSObject.Properties["name"] -and $m.name) { " [$($m.name)]" } else { "" }
+        $lvl = if ($dest -match '127\.0\.0\.1|localhost') { "INFO" } elseif ($dest -like "http*") { "WARN" } else { "INFO" }
+        $entries += [PSCustomObject]@{
+            EntryId    = "wm-m-$idx"
+            SortKey    = $idx.ToString("D6")
+            Level      = $lvl
+            Text       = ("{0,-6} {1} -> {2} ({3}){4}" -f $method, $pat, $dest, $prio, $name)
+            StackLines = @()
+            IsJson     = $false
+        }
+    }
+    return $entries
+}
+
+function Get-WireMockViewerEntries {
+    param(
+        [string]$WireMockBaseUrl,
+        [string]$SubMode = "JOURNAL"
+    )
+    if (-not $WireMockBaseUrl) {
+        return @([PSCustomObject]@{ EntryId = "wm-none"; SortKey = "000001"; Level = "WARN"; Text = "No gateway.adminUrl configured in procomp.json"; StackLines = @(); IsJson = $false })
+    }
+    try {
+        if ($SubMode -eq "MAPPINGS") {
+            $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/mappings" -Method Get -TimeoutSec 1
+            $list = @(Format-WireMockMappingEntries -Resp $resp)
+            if ($list.Count -eq 0) {
+                return @([PSCustomObject]@{ EntryId = "wm-empty"; SortKey = "000001"; Level = "INFO"; Text = "(no mappings registered in WireMock at $WireMockBaseUrl)"; StackLines = @(); IsJson = $false })
+            }
+            return $list
+        } else {
+            $resp = Invoke-RestMethod -Uri "$WireMockBaseUrl/__admin/requests?limit=200" -Method Get -TimeoutSec 1
+            $list = @(Format-WireMockJournalEntries -Resp $resp)
+            if ($list.Count -eq 0) {
+                return @([PSCustomObject]@{ EntryId = "wm-empty"; SortKey = "000001"; Level = "INFO"; Text = "(no requests recorded yet in WireMock at $WireMockBaseUrl)"; StackLines = @(); IsJson = $false })
+            }
+            return $list
+        }
+    } catch {
+        return @([PSCustomObject]@{ EntryId = "wm-err"; SortKey = "000001"; Level = "ERROR"; Text = "Cannot reach WireMock at $WireMockBaseUrl : $($_.Exception.Message)"; StackLines = @(); IsJson = $false })
+    }
+}
