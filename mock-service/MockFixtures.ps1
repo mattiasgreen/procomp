@@ -6,18 +6,31 @@ function Ensure-MockServiceJar {
     $mockJar = Join-Path $mockDir "mock-service.jar"
     if (Test-Path $mockJar) { return $mockJar }
 
-    if (-not (Get-Command "javac" -ErrorAction SilentlyContinue)) {
-        throw "javac not found on PATH. A JDK (not just JRE) is required to compile mock-service.jar."
+    $javacExe = if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\javac.exe"))) {
+        Join-Path $env:JAVA_HOME "bin\javac.exe"
+    } else {
+        $c = Get-Command "javac" -ErrorAction SilentlyContinue
+        if ($c) { $c.Source } else { $null }
     }
-    if (-not (Get-Command "jar" -ErrorAction SilentlyContinue)) {
-        throw "jar not found on PATH. A JDK is required to package mock-service.jar."
+    $jarExe = if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\jar.exe"))) {
+        Join-Path $env:JAVA_HOME "bin\jar.exe"
+    } else {
+        $c = Get-Command "jar" -ErrorAction SilentlyContinue
+        if ($c) { $c.Source } else { $null }
+    }
+
+    if (-not $javacExe) {
+        throw "javac not found in JAVA_HOME or PATH. A JDK is required to compile mock-service.jar."
+    }
+    if (-not $jarExe) {
+        throw "jar not found in JAVA_HOME or PATH. A JDK is required to package mock-service.jar."
     }
 
     Push-Location $mockDir
     try {
-        & javac MockService.java
+        & $javacExe MockService.java
         if ($LASTEXITCODE -ne 0) { throw "javac failed with exit code $LASTEXITCODE" }
-        & jar cfe mock-service.jar MockService MockService.class
+        & $jarExe cfe mock-service.jar MockService MockService.class
         if ($LASTEXITCODE -ne 0) { throw "jar failed with exit code $LASTEXITCODE" }
     } finally {
         Pop-Location

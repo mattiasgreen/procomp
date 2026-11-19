@@ -1,5 +1,18 @@
 Set-StrictMode -Version Latest
 
+function Resolve-JavaTool {
+    param([string]$Tool = "java")
+    if ($env:JAVA_HOME) {
+        $candidate = Join-Path (Join-Path $env:JAVA_HOME "bin") "$Tool.exe"
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    $cmd = Get-Command $Tool -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $Tool
+}
+
 function Expand-Template {
     param([string]$Template, [hashtable]$Vars)
     if (-not $Template) { return "" }
@@ -271,6 +284,7 @@ function Build-ServiceTemplateVars {
 
     $vars = @{
         root                 = $RootDir
+        java                 = (Resolve-JavaTool -Tool "java")
         servicename          = $Svc.Name
         name                 = $Svc.Name
         localport            = [string]$Svc.Port

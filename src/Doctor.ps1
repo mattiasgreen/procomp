@@ -14,11 +14,21 @@ function Invoke-ProcompDoctor {
         if ($checkedExes.ContainsKey($exe)) { continue }
         $checkedExes[$exe] = $true
 
-        $cmd = Get-Command $exe -ErrorAction SilentlyContinue
-        if ($cmd) {
-            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "OK"; Detail = $cmd.Source }
+        $resolvedExe = $null
+        if (($exe -eq "java" -or $exe -eq "java.exe" -or $exe -eq "{{java}}") -and (Get-Command Resolve-JavaTool -ErrorAction SilentlyContinue)) {
+            $cand = Resolve-JavaTool -Tool "java"
+            if (Test-Path $cand) { $resolvedExe = $cand }
+        }
+        if (-not $resolvedExe) {
+            $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+            if ($cmd) { $resolvedExe = $cmd.Source }
+        }
+
+        if ($resolvedExe) {
+            $srcTag = if ($env:JAVA_HOME -and $resolvedExe.StartsWith($env:JAVA_HOME, [System.StringComparison]::OrdinalIgnoreCase)) { " (JAVA_HOME)" } else { "" }
+            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "OK"; Detail = "$resolvedExe$srcTag" }
         } else {
-            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "FAIL"; Detail = "'$exe' not found on PATH" }
+            $checks += [PSCustomObject]@{ Check = "runtime:$exe"; Status = "FAIL"; Detail = "'$exe' not found in JAVA_HOME or PATH" }
         }
     }
 

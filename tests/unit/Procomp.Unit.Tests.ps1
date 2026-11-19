@@ -84,6 +84,22 @@ Describe 'procomp Unit Tests' {
             Assert-Eq $loaded["order-service"] "REMOTE"
             Assert-Eq $loaded["auth-service"] "LOCAL"
         }
+
+        It 'prefers JAVA_HOME\bin\java.exe when JAVA_HOME is set' {
+            $fakeJdk = Join-Path $TestDrive "fake-jdk"
+            $fakeBin = Join-Path $fakeJdk "bin"
+            New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+            $fakeJava = Join-Path $fakeBin "java.exe"
+            Set-Content -Path $fakeJava -Value ""
+
+            $prevJh = $env:JAVA_HOME
+            try {
+                $env:JAVA_HOME = $fakeJdk
+                Assert-Eq (Resolve-JavaTool -Tool "java") $fakeJava
+            } finally {
+                $env:JAVA_HOME = $prevJh
+            }
+        }
     }
 
     Context 'IdeDetector' {

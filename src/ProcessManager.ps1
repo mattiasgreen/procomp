@@ -158,6 +158,9 @@ function Start-ServiceProcess {
 
     $resolved = Resolve-ServiceCommand -Svc $Svc -RootDir $RootDir
     $parsed = Split-CommandLine -CommandLine $resolved.CommandLine
+    if (($parsed.FilePath -eq "java" -or $parsed.FilePath -eq "java.exe") -and (Get-Command Resolve-JavaTool -ErrorAction SilentlyContinue)) {
+        $parsed.FilePath = Resolve-JavaTool -Tool "java"
+    }
 
     $envToInject = @{}
     if ($RootDir -and (Get-Command Resolve-ServiceEnvironment -ErrorAction SilentlyContinue)) {
