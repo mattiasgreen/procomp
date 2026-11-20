@@ -27,12 +27,12 @@ public final class FsRoutingPersistenceTest {
     public static void testFsStateStoreRoundTripsRoutingJsonAcrossTempProcompStateDir() throws Exception {
         Path tempRoot = Files.createTempDirectory("procomp-routing-l3");
         try {
-            Path workspaceDir = tempRoot.resolve("workspace");
+            Path projectDir = tempRoot.resolve("project");
             Path stateDir = tempRoot.resolve("state");
-            Files.createDirectories(workspaceDir);
+            Files.createDirectories(projectDir);
             Files.createDirectories(stateDir);
 
-            Path configPath = workspaceDir.resolve("procomp.json");
+            Path configPath = projectDir.resolve("procomp.json");
             Files.writeString(configPath, """
                 {
                   "project": "acme",

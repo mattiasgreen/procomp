@@ -20,8 +20,8 @@ import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
 
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -79,31 +79,20 @@ public final class GatewayCli {
 
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
-            switch (arg) {
-                case "-d", "--detach" -> detach = true;
-                case "--timeout" -> {
-                    if (i + 1 >= args.size()) {
-                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
-                    }
-                    Result<Duration, String> tRes = ProcessCli.parsePositiveSeconds(args.get(++i));
-                    if (tRes instanceof Result.Err<Duration, String>(String msg)) {
-                        return Result.err(msg);
-                    }
-                    timeout = ((Result.Ok<Duration, String>) tRes).value();
+            if ("-d".equals(arg) || "--detach".equals(arg)) {
+                detach = true;
+            } else if (CliFormat.isTimeoutOption(arg)) {
+                Result<CliFormat.ParsedOption<Duration>, String> tRes = CliFormat.parseTimeoutOption(args, i);
+                if (tRes instanceof Result.Err<CliFormat.ParsedOption<Duration>, String>(String msg)) {
+                    return Result.err(msg);
                 }
-                default -> {
-                    if (arg.startsWith("--timeout=")) {
-                        Result<Duration, String> tRes = ProcessCli.parsePositiveSeconds(arg.substring("--timeout=".length()));
-                        if (tRes instanceof Result.Err<Duration, String>(String msg)) {
-                            return Result.err(msg);
-                        }
-                        timeout = ((Result.Ok<Duration, String>) tRes).value();
-                    } else if (arg.startsWith("-")) {
-                        return Result.err("Unknown option '" + arg + "' for 'gateway start'. Usage: procomp gateway start [-d|--detach] [--timeout <seconds>]");
-                    } else {
-                        return Result.err("Unexpected argument '" + arg + "' for 'gateway start'. Usage: procomp gateway start [-d|--detach] [--timeout <seconds>]");
-                    }
-                }
+                var opt = ((Result.Ok<CliFormat.ParsedOption<Duration>, String>) tRes).value();
+                timeout = opt.value();
+                i = opt.nextIndex();
+            } else if (arg.startsWith("-")) {
+                return Result.err("Unknown option '" + arg + "' for 'gateway start'. Usage: procomp gateway start [-d|--detach] [--timeout <seconds>]");
+            } else {
+                return Result.err("Unexpected argument '" + arg + "' for 'gateway start'. Usage: procomp gateway start [-d|--detach] [--timeout <seconds>]");
             }
         }
         return Result.ok(new Action.Start(detach, timeout));
@@ -130,18 +119,18 @@ public final class GatewayCli {
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer,
         PrintWriter out,
         PrintWriter err
     ) {
-        if (processRunner == null || portScanner == null || httpClient == null || workspaceFiles == null) {
+        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
             err.println("Error: Gateway ports are not configured.");
             return 1;
         }
         GatewayShell shell = new GatewayShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
         );
         return switch (action) {
             case Action.Start(boolean detach, Duration timeout) ->

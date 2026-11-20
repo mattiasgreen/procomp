@@ -90,4 +90,38 @@ final class CliFormat {
     static JsonValue jsonUptimeOrNull(Optional<Duration> uptime) {
         return uptime.<JsonValue>map(d -> Json.num(d.toSeconds())).orElse(Json.nil());
     }
+
+    record ParsedOption<T>(T value, int nextIndex) {}
+
+    static boolean isTimeoutOption(String arg) {
+        return "--timeout".equals(arg) || arg.startsWith("--timeout=");
+    }
+
+    static Result<ParsedOption<Duration>, String> parseTimeoutOption(List<String> args, int index) {
+        String arg = args.get(index);
+        if ("--timeout".equals(arg)) {
+            if (index + 1 >= args.size()) {
+                return Result.err("Option '--timeout' requires a positive integer number of seconds.");
+            }
+            return parsePositiveSeconds(args.get(index + 1))
+                .map(duration -> new ParsedOption<>(duration, index + 1));
+        }
+        return parsePositiveSeconds(arg.substring("--timeout=".length()))
+            .map(duration -> new ParsedOption<>(duration, index));
+    }
+
+    static Result<Duration, String> parsePositiveSeconds(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Result.err("Invalid --timeout value: must be a positive integer number of seconds.");
+        }
+        try {
+            long seconds = Long.parseLong(raw.trim());
+            if (seconds <= 0) {
+                return Result.err("Invalid --timeout value '" + raw + "': must be greater than 0 seconds.");
+            }
+            return Result.ok(Duration.ofSeconds(seconds));
+        } catch (NumberFormatException e) {
+            return Result.err("Invalid --timeout value '" + raw + "': must be a positive integer number of seconds.");
+        }
+    }
 }

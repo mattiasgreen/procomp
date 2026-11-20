@@ -47,7 +47,7 @@ public final class DiscoveryEngineTest {
             Optional.of(record),
             Optional.empty(),
             Optional.of(aliveProc),
-            new HealthProbe.HttpResult(200, "OK"),
+            new HealthCheck.HttpResult(200, "OK"),
             Optional.of(T0)
         ));
         Assert.assertEquals("orders", healthyFresh.target(), "target name");
@@ -64,7 +64,7 @@ public final class DiscoveryEngineTest {
             Optional.of(record),
             Optional.empty(),
             Optional.of(aliveProc),
-            new HealthProbe.HttpResult(503, "Service Unavailable"),
+            new HealthCheck.HttpResult(503, "Service Unavailable"),
             Optional.of(T2)
         ));
         Assert.assertEquals(Ownership.MANAGED, startingStale.ownership(), "still MANAGED");
@@ -95,7 +95,7 @@ public final class DiscoveryEngineTest {
             Optional.of(record),
             Optional.of(new PortBinding(9001, Optional.of(9999L), "127.0.0.1:9001")),
             Optional.empty(),
-            new HealthProbe.HttpResult(200, "OK"),
+            new HealthCheck.HttpResult(200, "OK"),
             Optional.of(T2)
         ));
         Assert.assertEquals(Ownership.MANAGED, crashed.ownership(), "recorded managed process keeps MANAGED ownership");
@@ -136,7 +136,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(listener),
             Optional.of(ideProcess),
-            new HealthProbe.HttpFailure("Connection refused"),
+            new HealthCheck.HttpFailure("Connection refused"),
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.UNMANAGED, ideBooting.ownership(), "booting IDE child is UNMANAGED");
@@ -151,7 +151,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(listener),
             Optional.of(ideProcess),
-            new HealthProbe.HttpResult(200, "OK"),
+            new HealthCheck.HttpResult(200, "OK"),
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.UNMANAGED, ideHealthy.ownership(), "healthy IDE child is UNMANAGED");
@@ -174,7 +174,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(new PortBinding(9002, Optional.of(5511L), "127.0.0.1:9002")),
             Optional.of(vscodeInsiders),
-            new HealthProbe.HttpResult(503, "Unavailable"),
+            new HealthCheck.HttpResult(503, "Unavailable"),
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.UNMANAGED, vsCodeBooting.ownership(), "VS Code Insiders ancestor is UNMANAGED");
@@ -196,7 +196,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(new PortBinding(9002, Optional.of(5512L), "127.0.0.1:9002")),
             Optional.of(shellProcess),
-            new HealthProbe.HttpResult(204, "No Content"),
+            new HealthCheck.HttpResult(204, "No Content"),
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.UNMANAGED, shellHealthy.ownership(), "healthy shell listener is UNMANAGED");
@@ -209,7 +209,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(new PortBinding(9002, Optional.of(5512L), "127.0.0.1:9002")),
             Optional.of(shellProcess),
-            new HealthProbe.HttpResult(404, "Not Found"),
+            new HealthCheck.HttpResult(404, "Not Found"),
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.CONFLICT, conflict.ownership(), "non-IDE listener failing health is CONFLICT");
@@ -222,7 +222,7 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.empty(),
             Optional.empty(),
-            HealthProbe.None.INSTANCE,
+            HealthCheck.None.INSTANCE,
             Optional.empty()
         ));
         Assert.assertEquals(Ownership.NONE, stopped.ownership(), "no process -> NONE");
@@ -244,12 +244,12 @@ public final class DiscoveryEngineTest {
         ObservedProcess tcpProc = new ObservedProcess(6001L, true, Optional.of(T0), Optional.of("redis-server"), List.of(), List.of(), Optional.empty(), Optional.of("redis-server"));
 
         DiscoveryResult tcpListening = DiscoveryEngine.discover(new DiscoveryInput(
-            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthProbe.TcpResult(true), Optional.empty()
+            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(true), Optional.empty()
         ));
         Assert.assertEquals(HealthState.HEALTHY, tcpListening.health(), "port-only target is HEALTHY when TCP listening");
 
         DiscoveryResult tcpNotYet = DiscoveryEngine.discover(new DiscoveryInput(
-            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthProbe.TcpResult(false), Optional.empty()
+            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(false), Optional.empty()
         ));
         Assert.assertEquals(HealthState.STARTING, tcpNotYet.health(), "port-only target is STARTING when TCP not listening");
 
@@ -265,7 +265,7 @@ public final class DiscoveryEngineTest {
         ObservedProcess workerProc = new ObservedProcess(7001L, true, Optional.of(T0), Optional.of("node worker.js"), List.of("worker.js"), List.of(), Optional.empty(), Optional.of("node"));
 
         DiscoveryResult workerHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            workerOnly, Optional.of(workerRec), Optional.empty(), Optional.of(workerProc), HealthProbe.None.INSTANCE, Optional.empty()
+            workerOnly, Optional.of(workerRec), Optional.empty(), Optional.of(workerProc), HealthCheck.None.INSTANCE, Optional.empty()
         ));
         Assert.assertEquals(HealthState.HEALTHY, workerHealthy.health(), "no port/healthPath is HEALTHY whenever process is alive");
     }

@@ -44,7 +44,7 @@ public final class DiscoveryEngine {
             Optional<ObservedProcess> proc = input.process().filter(ObservedProcess::alive);
             if (proc.isPresent()) {
                 ObservedProcess aliveProc = proc.get();
-                boolean healthy = isHealthy(target, true, input.healthProbe());
+                boolean healthy = isHealthy(target, true, input.healthCheck());
                 HealthState health = healthy ? HealthState.HEALTHY : HealthState.STARTING;
                 Instant startedAt = aliveProc.startTime().orElse(rec.startedAt());
                 boolean stale = isStale(rec, input.latestArtifactTimestamp());
@@ -57,7 +57,7 @@ public final class DiscoveryEngine {
                     Optional.of(startedAt),
                     stale,
                     healthEndpoint,
-                    describeHealth(target, health, Optional.of(rec.pid()), input.healthProbe()),
+                    describeHealth(target, health, Optional.of(rec.pid()), input.healthCheck()),
                     Optional.of(aliveProc)
                 );
             }
@@ -70,7 +70,7 @@ public final class DiscoveryEngine {
                 Optional.of(rec.startedAt()),
                 false,
                 healthEndpoint,
-                describeHealth(target, HealthState.CRASHED, Optional.of(rec.pid()), input.healthProbe()),
+                describeHealth(target, HealthState.CRASHED, Optional.of(rec.pid()), input.healthCheck()),
                 Optional.empty()
             );
         }
@@ -81,7 +81,7 @@ public final class DiscoveryEngine {
             Optional<Long> pid = listenerProc.map(ObservedProcess::pid).or(listener::pid);
             Optional<Instant> startedAt = listenerProc.flatMap(ObservedProcess::startTime);
             boolean ideAncestor = listenerProc.map(DiscoveryEngine::hasIdeAncestor).orElse(false);
-            boolean healthy = isHealthy(target, true, input.healthProbe());
+            boolean healthy = isHealthy(target, true, input.healthCheck());
 
             if (healthy) {
                 String provenance = ideAncestor ? "IDE" : "shell";
@@ -94,7 +94,7 @@ public final class DiscoveryEngine {
                     startedAt,
                     false,
                     healthEndpoint,
-                    describeHealth(target, HealthState.HEALTHY, pid, input.healthProbe()),
+                    describeHealth(target, HealthState.HEALTHY, pid, input.healthCheck()),
                     listenerProc
                 );
             }
@@ -108,7 +108,7 @@ public final class DiscoveryEngine {
                     startedAt,
                     false,
                     healthEndpoint,
-                    describeHealth(target, HealthState.STARTING, pid, input.healthProbe()),
+                    describeHealth(target, HealthState.STARTING, pid, input.healthCheck()),
                     listenerProc
                 );
             }
@@ -121,7 +121,7 @@ public final class DiscoveryEngine {
                 startedAt,
                 false,
                 healthEndpoint,
-                describeHealth(target, HealthState.STARTING, pid, input.healthProbe()),
+                describeHealth(target, HealthState.STARTING, pid, input.healthCheck()),
                 listenerProc
             );
         }
@@ -135,7 +135,7 @@ public final class DiscoveryEngine {
             Optional.empty(),
             false,
             healthEndpoint,
-            describeHealth(target, HealthState.STOPPED, Optional.empty(), input.healthProbe()),
+            describeHealth(target, HealthState.STOPPED, Optional.empty(), input.healthCheck()),
             Optional.empty()
         );
     }
@@ -252,15 +252,15 @@ public final class DiscoveryEngine {
         return Optional.of(trimmed.substring(0, ws));
     }
 
-    static boolean isHealthy(ProcessTarget target, boolean processAlive, HealthProbe probe) {
+    static boolean isHealthy(ProcessTarget target, boolean processAlive, HealthCheck check) {
         if (!processAlive) {
             return false;
         }
         if (target.healthEndpoint().isPresent()) {
-            return probe instanceof HealthProbe.HttpResult http && http.is2xx();
+            return check instanceof HealthCheck.HttpResult http && http.is2xx();
         }
         if (target.port().isPresent()) {
-            return probe instanceof HealthProbe.TcpResult tcp && tcp.listening();
+            return check instanceof HealthCheck.TcpResult tcp && tcp.listening();
         }
         return true;
     }
@@ -277,7 +277,7 @@ public final class DiscoveryEngine {
         ProcessTarget target,
         HealthState health,
         Optional<Long> pid,
-        HealthProbe probe
+        HealthCheck check
     ) {
         if (health == HealthState.STOPPED) {
             return target.port()
@@ -289,22 +289,22 @@ public final class DiscoveryEngine {
         }
         if (target.healthEndpoint().isPresent()) {
             String endpoint = target.healthEndpoint().get();
-            return switch (probe) {
-                case HealthProbe.HttpResult(int code, String summary) ->
+            return switch (check) {
+                case HealthCheck.HttpResult(int code, String summary) ->
                     "HTTP " + code + (summary.isBlank() ? "" : " " + summary) + " (GET " + endpoint + ")";
-                case HealthProbe.HttpFailure(String detail) ->
-                    "Probe failed: " + detail + " (GET " + endpoint + ")";
-                default -> "Health probe pending (GET " + endpoint + ")";
+                case HealthCheck.HttpFailure(String detail) ->
+                    "Health check failed: " + detail + " (GET " + endpoint + ")";
+                default -> "Health check pending (GET " + endpoint + ")";
             };
         }
         if (target.port().isPresent()) {
             int port = target.port().get();
-            if (probe instanceof HealthProbe.TcpResult(boolean listening)) {
+            if (check instanceof HealthCheck.TcpResult(boolean listening)) {
                 return listening
                     ? "TCP listening on 127.0.0.1:" + port
                     : "TCP port 127.0.0.1:" + port + " not listening yet";
             }
-            return "TCP probe pending on 127.0.0.1:" + port;
+            return "TCP health check pending on 127.0.0.1:" + port;
         }
         return "Process alive (no port or healthPath configured)";
     }

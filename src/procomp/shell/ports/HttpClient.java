@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * HTTP client port used for health probes and WireMock Gateway Admin API requests.
+ * HTTP client port used for health checks and WireMock Gateway Admin API requests.
  */
 public interface HttpClient {
 

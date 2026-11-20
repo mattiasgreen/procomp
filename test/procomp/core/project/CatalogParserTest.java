@@ -109,4 +109,27 @@ public final class CatalogParserTest {
         String missingPathJson = "{\"other\":[]}";
         Assert.assertErr(CatalogParser.parse(mapping, missingPathJson), "missing itemsPath must fail");
     }
+
+    public static void testPreservesExplicitEmptyHealthPathVersusOmittedOrNull() {
+        CatalogMapping mapping = new CatalogMapping(
+            "idx.json",
+            Optional.empty(),
+            Map.of("name", "id", "runtime", "rt", "healthPath", "hp")
+        );
+        String json = """
+            [
+              { "id": "cleared", "rt": "java", "hp": "" },
+              { "id": "omitted", "rt": "java" },
+              { "id": "nulled", "rt": "java", "hp": null }
+            ]
+            """;
+
+        Map<String, RawProjectConfig.RawServiceConfig> services = Assert.assertOk(
+            CatalogParser.parse(mapping, json),
+            "catalog parses"
+        );
+        Assert.assertEquals(Optional.of(""), services.get("cleared").healthPath(), "explicit empty healthPath preserved");
+        Assert.assertEquals(Optional.empty(), services.get("omitted").healthPath(), "omitted healthPath is empty");
+        Assert.assertEquals(Optional.empty(), services.get("nulled").healthPath(), "null healthPath is empty");
+    }
 }

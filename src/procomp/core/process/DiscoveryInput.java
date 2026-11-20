@@ -12,7 +12,7 @@ public record DiscoveryInput(
     Optional<ManagedRecordView> managedRecord,
     Optional<PortBinding> portListener,
     Optional<ObservedProcess> process,
-    HealthProbe healthProbe,
+    HealthCheck healthCheck,
     Optional<Instant> latestArtifactTimestamp
 ) {
     public DiscoveryInput {
@@ -20,7 +20,7 @@ public record DiscoveryInput(
         Objects.requireNonNull(managedRecord, "managedRecord must not be null");
         Objects.requireNonNull(portListener, "portListener must not be null");
         Objects.requireNonNull(process, "process must not be null");
-        Objects.requireNonNull(healthProbe, "healthProbe must not be null");
+        Objects.requireNonNull(healthCheck, "healthCheck must not be null");
         Objects.requireNonNull(latestArtifactTimestamp, "latestArtifactTimestamp must not be null");
     }
 }

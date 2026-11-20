@@ -14,7 +14,7 @@ import procomp.fakes.FakeClock;
 import procomp.fakes.FakeHttpClient;
 import procomp.fakes.FakePortScanner;
 import procomp.fakes.FakeProcessRunner;
-import procomp.fakes.FakeWorkspaceFiles;
+import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
@@ -57,18 +57,16 @@ public final class StatusShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles();
+        var projectFiles = new FakeProjectFiles();
 
         Assert.assertOk(new RoutingShell(stateStore).updateRoutes(project, List.of("alpha"), Route.LOCAL), "route alpha local");
 
-        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock);
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock);
         StatusShell.EstateStatus status = Assert.assertOk(statusShell.status(project), "status without gateway succeeds");
 
         Assert.assertEquals("nogw", status.project(), "project name");
         Assert.assertFalse(status.gateway().configured(), "gateway not configured");
         Assert.assertEquals(Optional.empty(), status.gateway().report(), "empty gateway report");
-        Assert.assertEquals(Optional.empty(), status.gateway().syncStatus(), "empty sync status");
-        Assert.assertNotEquals(Optional.of(GatewaySyncStatus.IN_SYNC), status.gateway().syncStatus(), "not IN_SYNC");
 
         Assert.assertEquals(2, status.services().size(), "two services in order");
         StatusShell.ServiceStatusRow row0 = status.services().get(0);
@@ -94,7 +92,7 @@ public final class StatusShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withDirectory(root.resolve("billing"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:55:00Z"));
@@ -149,15 +147,16 @@ public final class StatusShellTest {
 
         // 5. shipping: REMOTE + NONE + STOPPED (and uncloned repo directory absent on disk)
 
-        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer);
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer);
 
         // Phase A: Gateway OFFLINE
         StatusShell.EstateStatus offline = Assert.assertOk(statusShell.status(project), "status with offline gateway");
         Assert.assertTrue(offline.gateway().configured(), "gateway configured");
-        Assert.assertEquals(Optional.of(8080), offline.gateway().port(), "gateway port 8080");
-        Assert.assertEquals(Optional.of(Ownership.NONE), offline.gateway().ownership(), "gateway owner NONE");
-        Assert.assertEquals(Optional.of(HealthState.STOPPED), offline.gateway().health(), "gateway STOPPED");
-        Assert.assertEquals(Optional.of(GatewaySyncStatus.OFFLINE), offline.gateway().syncStatus(), "gateway OFFLINE");
+        GatewayShell.GatewayStatusReport offlineGw = offline.gateway().report().orElseThrow();
+        Assert.assertEquals(8080, offlineGw.gateway().port(), "gateway port 8080");
+        Assert.assertEquals(Ownership.NONE, offlineGw.discovery().ownership(), "gateway owner NONE");
+        Assert.assertEquals(HealthState.STOPPED, offlineGw.discovery().health(), "gateway STOPPED");
+        Assert.assertEquals(GatewaySyncStatus.OFFLINE, offlineGw.drift().syncStatus(), "gateway OFFLINE");
         Assert.assertEquals(5, offline.services().size(), "all 5 services reported in order");
 
         StatusShell.ServiceStatusRow ordersRow = offline.services().get(0);
@@ -230,19 +229,21 @@ public final class StatusShellTest {
         });
 
         StatusShell.EstateStatus drifted = Assert.assertOk(statusShell.status(project), "status with drifted gateway");
-        Assert.assertEquals(Optional.of(Ownership.MANAGED), drifted.gateway().ownership(), "gateway MANAGED");
-        Assert.assertEquals(Optional.of(HealthState.HEALTHY), drifted.gateway().health(), "gateway HEALTHY");
-        Assert.assertEquals(Optional.of(8100L), drifted.gateway().pid(), "gateway pid");
-        Assert.assertEquals(Optional.of(Duration.ofMinutes(10)), drifted.gateway().uptime(), "gateway uptime");
-        Assert.assertEquals(Optional.of(GatewaySyncStatus.DRIFTED), drifted.gateway().syncStatus(), "gateway DRIFTED");
-        Assert.assertEquals(5, drifted.gateway().drift().orElseThrow().drifted().size(), "all 5 services UNSET");
+        GatewayShell.GatewayStatusReport driftedGw = drifted.gateway().report().orElseThrow();
+        Assert.assertEquals(Ownership.MANAGED, driftedGw.discovery().ownership(), "gateway MANAGED");
+        Assert.assertEquals(HealthState.HEALTHY, driftedGw.discovery().health(), "gateway HEALTHY");
+        Assert.assertEquals(Optional.of(8100L), driftedGw.discovery().pid(), "gateway pid");
+        Assert.assertEquals(Optional.of(Duration.ofMinutes(10)), driftedGw.uptime(), "gateway uptime");
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, driftedGw.drift().syncStatus(), "gateway DRIFTED");
+        Assert.assertEquals(5, driftedGw.drift().drifted().size(), "all 5 services UNSET");
 
-        GatewayShell gatewayShell = new GatewayShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer);
+        GatewayShell gatewayShell = new GatewayShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer);
         Assert.assertOk(gatewayShell.reconcile(project), "reconcile converges");
 
         StatusShell.EstateStatus synced = Assert.assertOk(statusShell.status(project), "status after reconcile");
-        Assert.assertEquals(Optional.of(GatewaySyncStatus.IN_SYNC), synced.gateway().syncStatus(), "gateway IN_SYNC");
-        Assert.assertTrue(synced.gateway().drift().orElseThrow().drifted().isEmpty(), "no drifted services");
+        GatewayShell.GatewayStatusReport syncedGw = synced.gateway().report().orElseThrow();
+        Assert.assertEquals(GatewaySyncStatus.IN_SYNC, syncedGw.drift().syncStatus(), "gateway IN_SYNC");
+        Assert.assertTrue(syncedGw.drift().drifted().isEmpty(), "no drifted services");
         Assert.assertEquals(0, processRunner.spawnedRequests().size(), "status never spawns processes");
         Assert.assertEquals(0, processRunner.stoppedPids().size(), "status never stops processes");
         Assert.assertNotContains(synced.toString(), "top-secret-estate", "EstateStatus never holds secrets");
@@ -263,7 +264,7 @@ public final class StatusShellTest {
             .stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK")
             .stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 500, "boom");
 
-        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, new FakeWorkspaceFiles(), clock);
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, new FakeProjectFiles(), clock);
         DomainError err = Assert.assertErr(statusShell.status(project), "status propagates gateway admin failure");
         Assert.assertEquals("GATEWAY_ADMIN_ERROR", err.code(), "GATEWAY_ADMIN_ERROR code");
     }

@@ -8,6 +8,8 @@ import java.util.Optional;
 
 /**
  * Unresolved, schema-validated representation of procomp.json prior to catalog/env/template resolution.
+ * For {@code healthPath}, {@link Optional#empty()} indicates omitted/inherited whereas {@code Optional.of("")}
+ * preserves an explicit empty override that disables HTTP health checks.
  */
 public record RawProjectConfig(
     String project,

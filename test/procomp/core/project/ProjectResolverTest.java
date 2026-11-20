@@ -329,6 +329,180 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testExplicitEmptyHealthPathOverridesRuntimeAndCatalogHealthPath() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String configJson = """
+            {
+              "project": "acme",
+              "defaults": {
+                "workingDir": "."
+              },
+              "runtimes": {
+                "java": {
+                  "command": ["java", "-jar", "app.jar"],
+                  "healthPath": "/actuator/health"
+                },
+                "tcp": {
+                  "command": ["redis-server"],
+                  "healthPath": ""
+                }
+              },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "healthPath": ""
+              },
+              "catalog": {
+                "path": "./idx.json",
+                "map": {
+                  "name": "name",
+                  "runtime": "runtime",
+                  "healthPath": "health"
+                }
+              },
+              "services": {
+                "tcp-override": { "runtime": "java", "port": 9001, "healthPath": "" },
+                "inherited": { "runtime": "java", "port": 9002 },
+                "cat-cleared-inline": { "port": 9003, "healthPath": "" }
+              }
+            }
+            """;
+        String catalogJson = """
+            [
+              { "name": "cat-cleared", "runtime": "java", "health": "" },
+              { "name": "cat-cleared-inline", "runtime": "java", "health": "/svc-health" }
+            ]
+            """;
+
+        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parses");
+        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
+            CatalogParser.parse(raw.catalog().orElseThrow(), catalogJson),
+            "catalog parses"
+        );
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, raw, catalog, Map.of(), Map.of()),
+            "project resolves"
+        );
+
+        Assert.assertEquals(Optional.empty(), project.service("tcp-override").orElseThrow().healthPath(),
+            "explicit empty service healthPath overrides runtime /actuator/health");
+        Assert.assertEquals(Optional.of("/actuator/health"), project.service("inherited").orElseThrow().healthPath(),
+            "omitted service healthPath inherits runtime /actuator/health");
+        Assert.assertEquals(Optional.empty(), project.service("cat-cleared").orElseThrow().healthPath(),
+            "catalog explicit empty healthPath overrides runtime /actuator/health");
+        Assert.assertEquals(Optional.empty(), project.service("cat-cleared-inline").orElseThrow().healthPath(),
+            "inline explicit empty healthPath overrides catalog /svc-health");
+        Assert.assertEquals(Optional.empty(), project.runtimes().get("tcp").healthPath(),
+            "runtime explicit empty healthPath normalizes to Optional.empty()");
+        Assert.assertEquals(Optional.empty(), project.gateway().orElseThrow().healthPath(),
+            "gateway explicit empty healthPath normalizes to Optional.empty()");
+    }
+
+    public static void testValidatesTemplatesInOverriddenDefaultsAndUnusedRuntimes() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+
+        // 1. Overridden defaults templates with undefined {{typo}} fail fast across all defaults fields
+        List<String> badDefaults = List.of(
+            """
+            {"project":"acme","defaults":{"proxyPathTemplate":"/{{typo}}"},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":".","proxyPath":"/s1"}}}
+            """,
+            """
+            {"project":"acme","defaults":{"remoteUrlTemplate":"https://dev/{{typo}}"},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":".","remoteUrl":"https://dev/s1"}}}
+            """,
+            """
+            {"project":"acme","defaults":{"workingDir":"{{typo}}"},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","defaults":{"env":{"BAD":"{{typo}}"}},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":".","env":{"BAD":"override"}}}}
+            """,
+            """
+            {"project":"acme","defaults":{"workingDir":"{{repositoriesRoot}}/sub"},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """
+        );
+        for (String bad : badDefaults) {
+            assertResolveErr(configPath, bad, "CONFIG_UNDEFINED_TEMPLATE_VAR");
+        }
+
+        // 2. Unused runtime templates with undefined {{typo}} or unset {{repositoriesRoot}} fail fast across all runtime fields
+        List<String> badUnusedRuntimes = List.of(
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java","{{typo}}"]}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java"],"workingDir":"{{typo}}"}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java"],"artifactGlob":"{{typo}}/*.jar"}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java"],"env":{"BAD":"{{typo}}"}}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java"],"workingDir":"{{repositoriesRoot}}/app"}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """
+        );
+        for (String bad : badUnusedRuntimes) {
+            assertResolveErr(configPath, bad, "CONFIG_UNDEFINED_TEMPLATE_VAR");
+        }
+
+        // 3. {{subproject}} in an unused runtime fails if nowhere provided
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["java","-jar","{{artifact}}"],"artifactGlob":"{{subproject}}/build/libs/*.jar"}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            "CONFIG_UNDEFINED_TEMPLATE_VAR"
+        );
+
+        // 4. {{subproject}} in an unused runtime passes when provided by a service, and built-in vars + configured repositoriesRoot pass in overridden defaults & unused runtimes
+        String validConfig = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "..",
+              "defaults": {
+                "proxyPathTemplate": "/{{service}}",
+                "remoteUrlTemplate": "https://dev.corp/{{service}}/{{port}}",
+                "workingDir": "{{repositoriesRoot}}/{{service}}",
+                "vars": {
+                  "jvmArgs": ["-Xmx256m"]
+                },
+                "env": {
+                  "CFG": "{{configDir}}",
+                  "REPO": "{{repository}}"
+                }
+              },
+              "runtimes": {
+                "used": { "command": ["echo", "{{service}}"] },
+                "unused": {
+                  "command": ["java", "{{jvmArgs}}", "-Dserver.port={{port}}", "-jar", "{{artifact}}"],
+                  "workingDir": "{{repositoriesRoot}}/{{subproject}}",
+                  "artifactGlob": "{{subproject}}/build/libs/*.jar",
+                  "env": {
+                    "SVC": "{{service}}",
+                    "SUB": "{{subproject}}"
+                  }
+                }
+              },
+              "services": {
+                "s1": {
+                  "runtime": "used",
+                  "port": 9001,
+                  "workingDir": ".",
+                  "proxyPath": "/custom",
+                  "remoteUrl": "https://other/s1",
+                  "vars": { "subproject": "mod-a" },
+                  "env": { "CFG": "override", "REPO": "override" }
+                }
+              }
+            }
+            """;
+        RawProjectConfig rawValid = Assert.assertOk(ProjectConfigParser.parse(validConfig), "valid config parses");
+        Assert.assertOk(
+            ProjectResolver.resolve(configPath, rawValid, Map.of(), Map.of(), Map.of()),
+            "valid built-in and service.vars references in overridden defaults and unused runtimes pass"
+        );
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(json), "config parses cleanly: " + json);
         DomainError err = Assert.assertErr(

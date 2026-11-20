@@ -2,7 +2,7 @@ package procomp.platform;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
-import procomp.shell.ports.WorkspaceFiles;
+import procomp.shell.ports.ProjectFiles;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -14,9 +14,9 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 /**
- * Real filesystem adapter for {@link WorkspaceFiles}.
+ * Real filesystem adapter for {@link ProjectFiles}.
  */
-public final class FsWorkspaceFiles implements WorkspaceFiles {
+public final class FsProjectFiles implements ProjectFiles {
 
     @Override
     public boolean directoryExists(Path dir) {
@@ -36,7 +36,7 @@ public final class FsWorkspaceFiles implements WorkspaceFiles {
         try (Stream<Path> walk = Files.walk(normBase)) {
             Optional<ArtifactInfo> newest = walk
                 .filter(Files::isRegularFile)
-                .filter(p -> WorkspaceFiles.matchesGlob(normBase, p, glob, excludeGlob))
+                .filter(p -> ProjectFiles.matchesGlob(normBase, p, glob, excludeGlob))
                 .map(p -> toArtifactInfo(p))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
@@ -45,7 +45,7 @@ public final class FsWorkspaceFiles implements WorkspaceFiles {
             return Result.ok(newest);
         } catch (IOException e) {
             return Result.err(DomainError.of(
-                "WORKSPACE_IO_ERROR",
+                "PROJECT_IO_ERROR",
                 "Failed scanning artifacts under '" + normBase + "': " + e.getMessage(),
                 Map.of("baseDir", normBase.toString(), "glob", glob)
             ));

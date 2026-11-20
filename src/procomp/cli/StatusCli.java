@@ -16,8 +16,8 @@ import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
 
 import java.io.PrintWriter;
 import java.time.Instant;
@@ -64,18 +64,18 @@ public final class StatusCli {
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer,
         PrintWriter out,
         PrintWriter err
     ) {
-        if (processRunner == null || portScanner == null || httpClient == null || workspaceFiles == null) {
+        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
             err.println("Error: Status ports are not configured.");
             return 1;
         }
         StatusShell shell = new StatusShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
         );
         return CliFormat.handleResult(shell.status(project), err, status -> {
             if (action instanceof Action.Show(boolean json) && json) {
@@ -142,7 +142,7 @@ public final class StatusCli {
 
     private static JsonValue.JsonObject buildGatewayJson(GatewaySummary summary) {
         Map<String, JsonValue> gw = new LinkedHashMap<>();
-        if (!summary.configured() || summary.report().isEmpty()) {
+        if (summary.report().isEmpty()) {
             gw.put("configured", Json.bool(false));
             gw.put("type", Json.nil());
             gw.put("port", Json.nil());
@@ -165,7 +165,7 @@ public final class StatusCli {
     }
 
     private static String formatGatewayLine(GatewaySummary summary) {
-        if (!summary.configured() || summary.report().isEmpty()) {
+        if (summary.report().isEmpty()) {
             return "Gateway: not configured";
         }
         GatewayStatusReport report = summary.report().get();

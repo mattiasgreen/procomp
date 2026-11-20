@@ -89,7 +89,7 @@ public final class CatalogParser {
             }
 
             Result<Optional<String>, DomainError> nameRes = readOptionalNonBlankString(itemObj, nameSourceField, i, "name");
-            if (nameRes.isErr()) return castErr(nameRes);
+            if (nameRes.isErr()) return nameRes.castError();
             Optional<String> nameOpt = ((Result.Ok<Optional<String>, DomainError>) nameRes).value();
             if (nameOpt.isEmpty()) {
                 return Result.err(DomainError.of(
@@ -108,7 +108,7 @@ public final class CatalogParser {
             }
 
             Result<RawProjectConfig.RawServiceConfig, DomainError> svcRes = mapItem(itemObj, fieldMap, i, serviceName);
-            if (svcRes.isErr()) return castErr(svcRes);
+            if (svcRes.isErr()) return svcRes.castError();
             result.put(serviceName, ((Result.Ok<RawProjectConfig.RawServiceConfig, DomainError>) svcRes).value());
         }
         return Result.ok(result);
@@ -145,7 +145,7 @@ public final class CatalogParser {
             if (target.startsWith("vars.")) {
                 String varKey = target.substring("vars.".length());
                 Result<VarValue, DomainError> varRes = parseCatalogVar(rawVal, index, serviceName, sourceField, target);
-                if (varRes.isErr()) return castErr(varRes);
+                if (varRes.isErr()) return varRes.castError();
                 vars.put(varKey, ((Result.Ok<VarValue, DomainError>) varRes).value());
                 continue;
             }
@@ -153,43 +153,43 @@ public final class CatalogParser {
             switch (target) {
                 case "port" -> {
                     Result<Integer, DomainError> portRes = parseCatalogPort(rawVal, index, serviceName, sourceField);
-                    if (portRes.isErr()) return castErr(portRes);
+                    if (portRes.isErr()) return portRes.castError();
                     port = Optional.of(((Result.Ok<Integer, DomainError>) portRes).value());
                 }
                 case "runtime" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     runtime = Optional.of(okVal(s));
                 }
                 case "repository" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     repository = Optional.of(okVal(s));
                 }
                 case "repositoryUrl" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     repositoryUrl = Optional.of(okVal(s));
                 }
                 case "workingDir" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     workingDir = Optional.of(okVal(s));
                 }
                 case "healthPath" -> {
                     if (!(rawVal instanceof JsonValue.JsonString(String s))) {
                         return Result.err(invalidFieldType(index, serviceName, sourceField, target, "string"));
                     }
-                    healthPath = s.isEmpty() ? Optional.empty() : Optional.of(s);
+                    healthPath = Optional.of(s);
                 }
                 case "proxyPath" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     proxyPath = Optional.of(okVal(s));
                 }
                 case "remoteUrl" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
-                    if (s.isErr()) return castErr(s);
+                    if (s.isErr()) return s.castError();
                     remoteUrl = Optional.of(okVal(s));
                 }
                 default -> {
@@ -335,13 +335,6 @@ public final class CatalogParser {
             "CATALOG_INVALID_TYPE",
             "Catalog item '" + serviceName + "' field '" + sourceField + "' (mapped to '" + target + "') must be " + expected,
             Map.of("service", serviceName, "index", Integer.toString(index), "sourceField", sourceField, "target", target)
-        );
-    }
-
-    private static <T, U> Result<U, DomainError> castErr(Result<T, DomainError> err) {
-        return err.fold(
-            ignored -> { throw new IllegalStateException("Expected Err result"); },
-            Result::err
         );
     }
 

@@ -52,59 +52,59 @@ public final class ProjectConfigParser {
     private static Result<RawProjectConfig, DomainError> parseRoot(JsonValue rootValue) {
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(rootValue, "root");
         if (objRes.isErr()) {
-            return castErr(objRes);
+            return objRes.castError();
         }
         JsonValue.JsonObject root = okVal(objRes);
 
         Result<procomp.core.common.Unit, DomainError> unknownCheck = rejectUnknownKeys(root, TOP_LEVEL_KEYS, "procomp.json");
         if (unknownCheck.isErr()) {
-            return castErr(unknownCheck);
+            return unknownCheck.castError();
         }
 
         Result<String, DomainError> projectRes = requireNonBlankString(root, "project", "procomp.json")
             .flatMap(ProjectConfigParser::validateProjectIdentifier);
         if (projectRes.isErr()) {
-            return castErr(projectRes);
+            return projectRes.castError();
         }
 
         Result<Optional<String>, DomainError> reposRootRes = optionalNonBlankString(root, "repositoriesRoot", "procomp.json");
         if (reposRootRes.isErr()) {
-            return castErr(reposRootRes);
+            return reposRootRes.castError();
         }
 
         Result<List<EnvFileSpec>, DomainError> envFilesRes = parseOptionalEnvFiles(root, "envFiles", "procomp.json");
         if (envFilesRes.isErr()) {
-            return castErr(envFilesRes);
+            return envFilesRes.castError();
         }
 
         Result<RawProjectConfig.RawDefaultsConfig, DomainError> defaultsRes = parseOptionalDefaults(root);
         if (defaultsRes.isErr()) {
-            return castErr(defaultsRes);
+            return defaultsRes.castError();
         }
 
         Result<Map<String, RawProjectConfig.RawRuntimeConfig>, DomainError> runtimesRes = parseRuntimes(root);
         if (runtimesRes.isErr()) {
-            return castErr(runtimesRes);
+            return runtimesRes.castError();
         }
 
         Result<Optional<RawProjectConfig.RawGatewayConfig>, DomainError> gatewayRes = parseOptionalGateway(root);
         if (gatewayRes.isErr()) {
-            return castErr(gatewayRes);
+            return gatewayRes.castError();
         }
 
         Result<Optional<CatalogMapping>, DomainError> catalogRes = parseOptionalCatalog(root);
         if (catalogRes.isErr()) {
-            return castErr(catalogRes);
+            return catalogRes.castError();
         }
 
         Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> servicesRes = parseOptionalServices(root);
         if (servicesRes.isErr()) {
-            return castErr(servicesRes);
+            return servicesRes.castError();
         }
 
         Result<Map<String, ProfileDefinition>, DomainError> profilesRes = parseOptionalProfiles(root);
         if (profilesRes.isErr()) {
-            return castErr(profilesRes);
+            return profilesRes.castError();
         }
 
         return Result.ok(new RawProjectConfig(
@@ -138,24 +138,24 @@ public final class ProjectConfigParser {
         }
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), "defaults");
         if (objRes.isErr()) {
-            return castErr(objRes);
+            return objRes.castError();
         }
         JsonValue.JsonObject obj = okVal(objRes);
         Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, DEFAULTS_KEYS, "defaults");
         if (unknown.isErr()) {
-            return castErr(unknown);
+            return unknown.castError();
         }
 
         Result<Optional<String>, DomainError> proxyPath = optionalNonBlankString(obj, "proxyPathTemplate", "defaults");
-        if (proxyPath.isErr()) return castErr(proxyPath);
+        if (proxyPath.isErr()) return proxyPath.castError();
         Result<Optional<String>, DomainError> remoteUrl = optionalNonBlankString(obj, "remoteUrlTemplate", "defaults");
-        if (remoteUrl.isErr()) return castErr(remoteUrl);
+        if (remoteUrl.isErr()) return remoteUrl.castError();
         Result<Optional<String>, DomainError> workingDir = optionalNonBlankString(obj, "workingDir", "defaults");
-        if (workingDir.isErr()) return castErr(workingDir);
+        if (workingDir.isErr()) return workingDir.castError();
         Result<Map<String, VarValue>, DomainError> vars = parseOptionalVars(obj, "defaults.vars");
-        if (vars.isErr()) return castErr(vars);
+        if (vars.isErr()) return vars.castError();
         Result<Map<String, String>, DomainError> env = parseOptionalStringMap(obj, "env", "defaults.env");
-        if (env.isErr()) return castErr(env);
+        if (env.isErr()) return env.castError();
 
         return Result.ok(new RawProjectConfig.RawDefaultsConfig(
             okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env)
@@ -173,7 +173,7 @@ public final class ProjectConfigParser {
         }
         Result<JsonValue.JsonObject, DomainError> mapObjRes = asObject(maybe.get(), "runtimes");
         if (mapObjRes.isErr()) {
-            return castErr(mapObjRes);
+            return mapObjRes.castError();
         }
         Map<String, RawProjectConfig.RawRuntimeConfig> runtimes = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
@@ -183,24 +183,24 @@ public final class ProjectConfigParser {
             }
             String path = "runtimes." + runtimeName;
             Result<JsonValue.JsonObject, DomainError> rtObjRes = asObject(entry.getValue(), path);
-            if (rtObjRes.isErr()) return castErr(rtObjRes);
+            if (rtObjRes.isErr()) return rtObjRes.castError();
             JsonValue.JsonObject rtObj = okVal(rtObjRes);
 
             Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(rtObj, RUNTIME_KEYS, path);
-            if (unknown.isErr()) return castErr(unknown);
+            if (unknown.isErr()) return unknown.castError();
 
             Result<List<String>, DomainError> cmdRes = requireNonEmptyStringArray(rtObj, "command", path);
-            if (cmdRes.isErr()) return castErr(cmdRes);
+            if (cmdRes.isErr()) return cmdRes.castError();
             Result<Optional<String>, DomainError> healthPath = optionalString(rtObj, "healthPath", path);
-            if (healthPath.isErr()) return castErr(healthPath);
+            if (healthPath.isErr()) return healthPath.castError();
             Result<Optional<String>, DomainError> artifactGlob = optionalNonBlankString(rtObj, "artifactGlob", path);
-            if (artifactGlob.isErr()) return castErr(artifactGlob);
+            if (artifactGlob.isErr()) return artifactGlob.castError();
             Result<Optional<String>, DomainError> artifactExclude = optionalNonBlankString(rtObj, "artifactExclude", path);
-            if (artifactExclude.isErr()) return castErr(artifactExclude);
+            if (artifactExclude.isErr()) return artifactExclude.castError();
             Result<Optional<String>, DomainError> workingDir = optionalNonBlankString(rtObj, "workingDir", path);
-            if (workingDir.isErr()) return castErr(workingDir);
+            if (workingDir.isErr()) return workingDir.castError();
             Result<Map<String, String>, DomainError> env = parseOptionalStringMap(rtObj, "env", path + ".env");
-            if (env.isErr()) return castErr(env);
+            if (env.isErr()) return env.castError();
 
             runtimes.put(runtimeName, new RawProjectConfig.RawRuntimeConfig(
                 okVal(cmdRes), okVal(healthPath), okVal(artifactGlob), okVal(artifactExclude), okVal(workingDir), okVal(env)
@@ -215,14 +215,14 @@ public final class ProjectConfigParser {
             return Result.ok(Optional.empty());
         }
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), "gateway");
-        if (objRes.isErr()) return castErr(objRes);
+        if (objRes.isErr()) return objRes.castError();
         JsonValue.JsonObject obj = okVal(objRes);
 
         Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, GATEWAY_KEYS, "gateway");
-        if (unknown.isErr()) return castErr(unknown);
+        if (unknown.isErr()) return unknown.castError();
 
         Result<String, DomainError> typeRes = requireNonBlankString(obj, "type", "gateway");
-        if (typeRes.isErr()) return castErr(typeRes);
+        if (typeRes.isErr()) return typeRes.castError();
         String type = okVal(typeRes);
         if (!"wiremock".equals(type)) {
             return Result.err(DomainError.of(
@@ -237,16 +237,16 @@ public final class ProjectConfigParser {
             return Result.err(DomainError.of("CONFIG_MISSING_FIELD", "Missing required field 'gateway.port'", Map.of("field", "gateway.port")));
         }
         Result<Integer, DomainError> portRes = parsePort(portVal.get(), "gateway.port");
-        if (portRes.isErr()) return castErr(portRes);
+        if (portRes.isErr()) return portRes.castError();
 
         Result<Optional<String>, DomainError> healthPath = optionalString(obj, "healthPath", "gateway");
-        if (healthPath.isErr()) return castErr(healthPath);
+        if (healthPath.isErr()) return healthPath.castError();
         Result<List<String>, DomainError> command = parseOptionalNonEmptyStringArray(obj, "command", "gateway");
-        if (command.isErr()) return castErr(command);
+        if (command.isErr()) return command.castError();
         Result<Optional<String>, DomainError> workingDir = optionalNonBlankString(obj, "workingDir", "gateway");
-        if (workingDir.isErr()) return castErr(workingDir);
+        if (workingDir.isErr()) return workingDir.castError();
         Result<Map<String, String>, DomainError> env = parseOptionalStringMap(obj, "env", "gateway.env");
-        if (env.isErr()) return castErr(env);
+        if (env.isErr()) return env.castError();
 
         return Result.ok(Optional.of(new RawProjectConfig.RawGatewayConfig(
             type, okVal(portRes), okVal(healthPath), okVal(command), okVal(workingDir), okVal(env)
@@ -259,23 +259,23 @@ public final class ProjectConfigParser {
             return Result.ok(Optional.empty());
         }
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), "catalog");
-        if (objRes.isErr()) return castErr(objRes);
+        if (objRes.isErr()) return objRes.castError();
         JsonValue.JsonObject obj = okVal(objRes);
 
         Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, CATALOG_KEYS, "catalog");
-        if (unknown.isErr()) return castErr(unknown);
+        if (unknown.isErr()) return unknown.castError();
 
         Result<String, DomainError> pathRes = requireNonBlankString(obj, "path", "catalog");
-        if (pathRes.isErr()) return castErr(pathRes);
+        if (pathRes.isErr()) return pathRes.castError();
         Result<Optional<String>, DomainError> itemsPathRes = optionalNonBlankString(obj, "itemsPath", "catalog");
-        if (itemsPathRes.isErr()) return castErr(itemsPathRes);
+        if (itemsPathRes.isErr()) return itemsPathRes.castError();
 
         Optional<JsonValue> mapVal = obj.get("map");
         if (mapVal.isEmpty()) {
             return Result.err(DomainError.of("CONFIG_MISSING_FIELD", "Missing required field 'catalog.map'", Map.of("field", "catalog.map")));
         }
         Result<JsonValue.JsonObject, DomainError> mapObjRes = asObject(mapVal.get(), "catalog.map");
-        if (mapObjRes.isErr()) return castErr(mapObjRes);
+        if (mapObjRes.isErr()) return mapObjRes.castError();
         Map<String, String> mapping = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
             String target = entry.getKey();
@@ -319,7 +319,7 @@ public final class ProjectConfigParser {
             return Result.ok(Map.of());
         }
         Result<JsonValue.JsonObject, DomainError> mapObjRes = asObject(maybe.get(), "services");
-        if (mapObjRes.isErr()) return castErr(mapObjRes);
+        if (mapObjRes.isErr()) return mapObjRes.castError();
 
         Map<String, RawProjectConfig.RawServiceConfig> services = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
@@ -329,39 +329,39 @@ public final class ProjectConfigParser {
             }
             String path = "services." + svcName;
             Result<JsonValue.JsonObject, DomainError> svcObjRes = asObject(entry.getValue(), path);
-            if (svcObjRes.isErr()) return castErr(svcObjRes);
+            if (svcObjRes.isErr()) return svcObjRes.castError();
             JsonValue.JsonObject svcObj = okVal(svcObjRes);
 
             Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(svcObj, SERVICE_KEYS, path);
-            if (unknown.isErr()) return castErr(unknown);
+            if (unknown.isErr()) return unknown.castError();
 
             Optional<Integer> port = Optional.empty();
             if (svcObj.containsKey("port")) {
                 Result<Integer, DomainError> portRes = parsePort(svcObj.fields().get("port"), path + ".port");
-                if (portRes.isErr()) return castErr(portRes);
+                if (portRes.isErr()) return portRes.castError();
                 port = Optional.of(okVal(portRes));
             }
 
             Result<Optional<String>, DomainError> runtime = optionalNonBlankString(svcObj, "runtime", path);
-            if (runtime.isErr()) return castErr(runtime);
+            if (runtime.isErr()) return runtime.castError();
             Result<Optional<String>, DomainError> repository = optionalNonBlankString(svcObj, "repository", path);
-            if (repository.isErr()) return castErr(repository);
+            if (repository.isErr()) return repository.castError();
             Result<Optional<String>, DomainError> repositoryUrl = optionalNonBlankString(svcObj, "repositoryUrl", path);
-            if (repositoryUrl.isErr()) return castErr(repositoryUrl);
+            if (repositoryUrl.isErr()) return repositoryUrl.castError();
             Result<Optional<String>, DomainError> workingDir = optionalNonBlankString(svcObj, "workingDir", path);
-            if (workingDir.isErr()) return castErr(workingDir);
+            if (workingDir.isErr()) return workingDir.castError();
             Result<Optional<String>, DomainError> healthPath = optionalString(svcObj, "healthPath", path);
-            if (healthPath.isErr()) return castErr(healthPath);
+            if (healthPath.isErr()) return healthPath.castError();
             Result<Optional<String>, DomainError> proxyPath = optionalNonBlankString(svcObj, "proxyPath", path);
-            if (proxyPath.isErr()) return castErr(proxyPath);
+            if (proxyPath.isErr()) return proxyPath.castError();
             Result<Optional<String>, DomainError> remoteUrl = optionalNonBlankString(svcObj, "remoteUrl", path);
-            if (remoteUrl.isErr()) return castErr(remoteUrl);
+            if (remoteUrl.isErr()) return remoteUrl.castError();
             Result<Map<String, VarValue>, DomainError> vars = parseOptionalVars(svcObj, path + ".vars");
-            if (vars.isErr()) return castErr(vars);
+            if (vars.isErr()) return vars.castError();
             Result<Map<String, String>, DomainError> env = parseOptionalStringMap(svcObj, "env", path + ".env");
-            if (env.isErr()) return castErr(env);
+            if (env.isErr()) return env.castError();
             Result<List<EnvFileSpec>, DomainError> envFiles = parseOptionalEnvFiles(svcObj, "envFiles", path);
-            if (envFiles.isErr()) return castErr(envFiles);
+            if (envFiles.isErr()) return envFiles.castError();
 
             services.put(svcName, new RawProjectConfig.RawServiceConfig(
                 port, okVal(runtime), okVal(repository), okVal(repositoryUrl), okVal(workingDir),
@@ -377,7 +377,7 @@ public final class ProjectConfigParser {
             return Result.ok(Map.of());
         }
         Result<JsonValue.JsonObject, DomainError> mapObjRes = asObject(maybe.get(), "profiles");
-        if (mapObjRes.isErr()) return castErr(mapObjRes);
+        if (mapObjRes.isErr()) return mapObjRes.castError();
 
         Map<String, ProfileDefinition> profiles = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
@@ -387,18 +387,18 @@ public final class ProjectConfigParser {
             }
             String path = "profiles." + profileName;
             Result<JsonValue.JsonObject, DomainError> profObjRes = asObject(entry.getValue(), path);
-            if (profObjRes.isErr()) return castErr(profObjRes);
+            if (profObjRes.isErr()) return profObjRes.castError();
             JsonValue.JsonObject profObj = okVal(profObjRes);
 
             Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(profObj, PROFILE_KEYS, path);
-            if (unknown.isErr()) return castErr(unknown);
+            if (unknown.isErr()) return unknown.castError();
 
             Optional<JsonValue> localVal = profObj.get("local");
             if (localVal.isEmpty()) {
                 return Result.err(DomainError.of("CONFIG_MISSING_FIELD", "Missing required field '" + path + ".local'", Map.of("field", path + ".local")));
             }
             Result<List<String>, DomainError> localListRes = parseStringArray(localVal.get(), path + ".local", false);
-            if (localListRes.isErr()) return castErr(localListRes);
+            if (localListRes.isErr()) return localListRes.castError();
 
             profiles.put(profileName, new ProfileDefinition(profileName, okVal(localListRes)));
         }
@@ -427,9 +427,9 @@ public final class ProjectConfigParser {
                 }
                 case JsonValue.JsonObject obj -> {
                     Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, ENV_FILE_KEYS, elemPath);
-                    if (unknown.isErr()) return castErr(unknown);
+                    if (unknown.isErr()) return unknown.castError();
                     Result<String, DomainError> pRes = requireNonBlankString(obj, "path", elemPath);
-                    if (pRes.isErr()) return castErr(pRes);
+                    if (pRes.isErr()) return pRes.castError();
                     boolean optional = false;
                     if (obj.containsKey("optional")) {
                         if (!(obj.fields().get("optional") instanceof JsonValue.JsonBoolean(boolean b))) {
@@ -453,7 +453,7 @@ public final class ProjectConfigParser {
             return Result.ok(Map.of());
         }
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), path);
-        if (objRes.isErr()) return castErr(objRes);
+        if (objRes.isErr()) return objRes.castError();
 
         Map<String, VarValue> vars = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(objRes).fields().entrySet()) {
@@ -466,7 +466,7 @@ public final class ProjectConfigParser {
                 case JsonValue.JsonString(String s) -> vars.put(k, new VarValue.Scalar(s));
                 case JsonValue.JsonArray arr -> {
                     Result<List<String>, DomainError> listRes = parseStringArray(arr, fieldPath, false);
-                    if (listRes.isErr()) return castErr(listRes);
+                    if (listRes.isErr()) return listRes.castError();
                     vars.put(k, new VarValue.ListValue(okVal(listRes)));
                 }
                 default -> {
@@ -483,7 +483,7 @@ public final class ProjectConfigParser {
             return Result.ok(Map.of());
         }
         Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), path);
-        if (objRes.isErr()) return castErr(objRes);
+        if (objRes.isErr()) return objRes.castError();
         Map<String, String> out = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(objRes).fields().entrySet()) {
             if (!(entry.getValue() instanceof JsonValue.JsonString(String s))) {
@@ -594,14 +594,7 @@ public final class ProjectConfigParser {
         if (!(maybe.get() instanceof JsonValue.JsonString(String s))) {
             return Result.err(DomainError.of("CONFIG_INVALID_TYPE", "'" + context + "." + key + "' must be a string", Map.of("field", context + "." + key)));
         }
-        return Result.ok(s.isEmpty() ? Optional.empty() : Optional.of(s));
-    }
-
-    private static <T, U> Result<U, DomainError> castErr(Result<T, DomainError> err) {
-        return err.fold(
-            ignored -> { throw new IllegalStateException("Expected Err result"); },
-            Result::err
-        );
+        return Result.ok(Optional.of(s));
     }
 
     private static <T> T okVal(Result<T, DomainError> res) {

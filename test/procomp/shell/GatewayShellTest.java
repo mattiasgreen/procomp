@@ -16,7 +16,7 @@ import procomp.fakes.FakeClock;
 import procomp.fakes.FakeHttpClient;
 import procomp.fakes.FakePortScanner;
 import procomp.fakes.FakeProcessRunner;
-import procomp.fakes.FakeWorkspaceFiles;
+import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
@@ -46,11 +46,11 @@ public final class GatewayShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles().withDirectory(root.resolve("wiremock"));
+        var projectFiles = new FakeProjectFiles().withDirectory(root.resolve("wiremock"));
         var observer = new RecordingObserver();
 
         Assert.assertOk(new RoutingShell(stateStore).updateRoutes(project, List.of("orders"), Route.LOCAL), "seed orders local");
-        GatewayShell shell = new GatewayShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer);
+        GatewayShell shell = new GatewayShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer);
 
         // 1. NONE -> spawns Managed Gateway and waits for /__admin/health 200 OK
         clock.onSleep(step -> {
@@ -175,9 +175,9 @@ public final class GatewayShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles().withDirectory(root.resolve("wiremock"));
+        var projectFiles = new FakeProjectFiles().withDirectory(root.resolve("wiremock"));
         GatewayShell shell = new GatewayShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, new RecordingObserver()
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
         );
 
         // 1. Offline status -> OFFLINE, empty drift; offline reconcile fails fast
@@ -312,7 +312,7 @@ public final class GatewayShellTest {
             .stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
 
         GatewayShell shell = new GatewayShell(
-            stateStore, processRunner, portScanner, httpClient, new FakeWorkspaceFiles(), clock, new RecordingObserver()
+            stateStore, processRunner, portScanner, httpClient, new FakeProjectFiles(), clock, new RecordingObserver()
         );
         DomainError missingRemote = Assert.assertErr(shell.reconcile(project), "REMOTE without remoteUrl fails reconcile");
         Assert.assertEquals("GATEWAY_MISSING_REMOTE_URL", missingRemote.code(), "GATEWAY_MISSING_REMOTE_URL code");

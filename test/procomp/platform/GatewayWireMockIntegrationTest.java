@@ -49,7 +49,7 @@ public final class GatewayWireMockIntegrationTest {
             Project project = writeAndLoadProject(tmpDir, stub.port());
             FsStateStore stateStore = new FsStateStore(System.getProperty("os.name", ""), Map.of("PROCOMP_STATE_DIR", tmpDir.resolve("state").toString()), tmpDir);
             GatewayShell gatewayShell = new GatewayShell(
-                stateStore, new OsProcessRunner(), new OsPortScanner(), new JdkHttpClient(), new FsWorkspaceFiles(), new SystemClock(), new RecordingObserver()
+                stateStore, new OsProcessRunner(), new OsPortScanner(), new JdkHttpClient(), new FsProjectFiles(), new SystemClock(), new RecordingObserver()
             );
             RoutingShell routingShell = new RoutingShell(stateStore);
 
@@ -112,7 +112,7 @@ public final class GatewayWireMockIntegrationTest {
             Project project = writeAndLoadProject(tmpDir, stub.port());
             FsStateStore stateStore = new FsStateStore(System.getProperty("os.name", ""), Map.of("PROCOMP_STATE_DIR", tmpDir.resolve("state").toString()), tmpDir);
             GatewayShell gatewayShell = new GatewayShell(
-                stateStore, new OsProcessRunner(), new OsPortScanner(), new JdkHttpClient(), new FsWorkspaceFiles(), new SystemClock(), new RecordingObserver()
+                stateStore, new OsProcessRunner(), new OsPortScanner(), new JdkHttpClient(), new FsProjectFiles(), new SystemClock(), new RecordingObserver()
             );
 
             GatewayShell.GatewayReconcileResult res = Assert.assertOk(gatewayShell.reconcile(project), "reconcile with 404 fallback succeeds");

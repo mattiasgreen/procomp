@@ -14,7 +14,7 @@ import procomp.fakes.FakeClock;
 import procomp.fakes.FakeHttpClient;
 import procomp.fakes.FakePortScanner;
 import procomp.fakes.FakeProcessRunner;
-import procomp.fakes.FakeWorkspaceFiles;
+import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
@@ -40,7 +40,7 @@ public final class ProcessShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withDirectory(root.resolve("billing"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:50:00Z"))
@@ -74,7 +74,7 @@ public final class ProcessShellTest {
         httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "{\"status\":\"UP\"}");
 
         ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, new RecordingObserver()
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
         );
 
         InspectionReport ordersReport = Assert.assertOk(shell.inspect(project, "orders"), "inspect orders succeeds");
@@ -82,6 +82,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(Optional.of("procomp"), ordersReport.provenance(), "orders provenance");
         Assert.assertEquals(HealthState.HEALTHY, ordersReport.health(), "orders health");
         Assert.assertEquals(Optional.of("LOCAL"), ordersReport.desiredRoute(), "orders desiredRoute");
+        Assert.assertEquals(Optional.of("OFFLINE"), ordersReport.liveGatewayRoute(), "orders liveGatewayRoute OFFLINE when gateway stopped");
         Assert.assertEquals(Optional.of(Duration.ofMinutes(15)), ordersReport.uptime(), "orders uptime");
         Assert.assertTrue(ordersReport.stale(), "orders is stale due to newer non-plain jar");
         Assert.assertNotContains(ordersReport.toString(), "super-secret-db-pass", "report never contains secret env");
@@ -120,6 +121,125 @@ public final class ProcessShellTest {
         Assert.assertEquals("UNKNOWN_SERVICE", unknownErr.code(), "unknown service error code");
     }
 
+    public static void testInspectPopulatesLiveGatewayRouteAcrossOfflineInSyncDriftedAndNoGateway() {
+        Path root = Path.of("C:/work/acme-gw").toAbsolutePath().normalize();
+        var noGwConfig = new InMemoryConfigSource(root)
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "no-gw",
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+                  "services": {
+                    "orders": { "runtime": "java", "port": 9001, "workingDir": "orders" }
+                  }
+                }
+                """);
+        Project noGwProject = Assert.assertOk(new ProjectLoader(noGwConfig).load(Optional.empty()), "no-gw project loads");
+
+        var gwConfig = new InMemoryConfigSource(root)
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "acme",
+                  "defaults": {
+                    "proxyPathTemplate": "/{{service}}",
+                    "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}"
+                  },
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+                  "gateway": {
+                    "type": "wiremock",
+                    "port": 8080,
+                    "healthPath": "/__admin/health"
+                  },
+                  "services": {
+                    "orders": { "runtime": "java", "port": 9001, "workingDir": "orders" },
+                    "billing": { "runtime": "java", "port": 9002, "workingDir": "billing" }
+                  }
+                }
+                """);
+        Project gwProject = Assert.assertOk(new ProjectLoader(gwConfig).load(Optional.empty()), "gw project loads");
+
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient();
+        var projectFiles = new FakeProjectFiles();
+        var observer = new RecordingObserver();
+
+        ProcessShell shell = new ProcessShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer);
+        GatewayShell gatewayShell = new GatewayShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer);
+
+        // 1. No gateway configured -> liveGatewayRoute is empty
+        InspectionReport noGwReport = Assert.assertOk(shell.inspect(noGwProject, "orders"), "inspect without gateway");
+        Assert.assertEquals(Optional.empty(), noGwReport.liveGatewayRoute(), "no gateway -> empty liveGatewayRoute");
+
+        // 2. Gateway configured but STOPPED -> OFFLINE (never queries /__admin/mappings)
+        InspectionReport stoppedGwReport = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect with stopped gateway");
+        Assert.assertEquals(Optional.of("OFFLINE"), stoppedGwReport.liveGatewayRoute(), "stopped gateway -> OFFLINE");
+
+        // 3. Gateway STARTING (health 503) -> OFFLINE even if /__admin/mappings would error
+        portScanner.bind(8080, 8100L);
+        processRunner.registerProcess(new ProcessSnapshot(
+            8100L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 503, "starting");
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 500, "not ready");
+        InspectionReport startingGwReport = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect with starting gateway stays resilient");
+        Assert.assertEquals(Optional.of("OFFLINE"), startingGwReport.liveGatewayRoute(), "starting gateway -> OFFLINE");
+
+        // 4. Gateway HEALTHY and UNSET -> UNSET
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 200, "{\"mappings\":[]}");
+        InspectionReport unsetReport = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect when UNSET");
+        Assert.assertEquals(Optional.of("UNSET"), unsetReport.liveGatewayRoute(), "healthy empty WireMock -> UNSET");
+
+        // 5. Reconcile orders LOCAL & billing REMOTE -> IN_SYNC -> liveGatewayRoute matches desiredRoute
+        Assert.assertOk(new RoutingShell(stateStore).updateRoutes(gwProject, List.of("orders"), Route.LOCAL), "route orders local");
+        java.util.Map<String, JsonValue.JsonObject> liveMappings = new java.util.LinkedHashMap<>();
+        httpClient.stub("GET", URI.create("http://127.0.0.1:8080/__admin/mappings"), _ -> {
+            java.util.List<JsonValue> arr = new java.util.ArrayList<>(liveMappings.values());
+            return procomp.core.common.Result.ok(new procomp.shell.ports.HttpClient.HttpResponseData(
+                200, java.util.Map.of(), Json.stringify(Json.obj(java.util.Map.of("mappings", Json.arr(arr))))
+            ));
+        });
+        httpClient.stub("POST", URI.create("http://127.0.0.1:8080/__admin/mappings/import"), req -> {
+            JsonValue.JsonObject payload = (JsonValue.JsonObject) Assert.assertOk(Json.parse(req.body()), "import json");
+            JsonValue.JsonArray arr = (JsonValue.JsonArray) payload.get("mappings").orElseThrow();
+            for (JsonValue el : arr.elements()) {
+                JsonValue.JsonObject m = (JsonValue.JsonObject) el;
+                String id = ((JsonValue.JsonString) m.get("id").orElseThrow()).value();
+                liveMappings.put(id, m);
+            }
+            return procomp.core.common.Result.ok(new procomp.shell.ports.HttpClient.HttpResponseData(200, java.util.Map.of(), "{}"));
+        });
+        Assert.assertOk(gatewayShell.reconcile(gwProject), "reconcile succeeds");
+
+        InspectionReport inSyncOrders = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect orders IN_SYNC");
+        Assert.assertEquals(Optional.of("LOCAL"), inSyncOrders.desiredRoute(), "orders desired LOCAL");
+        Assert.assertEquals(Optional.of("LOCAL"), inSyncOrders.liveGatewayRoute(), "orders live LOCAL");
+
+        InspectionReport inSyncBilling = Assert.assertOk(shell.inspect(gwProject, "billing"), "inspect billing IN_SYNC");
+        Assert.assertEquals(Optional.of("REMOTE"), inSyncBilling.desiredRoute(), "billing desired REMOTE");
+        Assert.assertEquals(Optional.of("REMOTE"), inSyncBilling.liveGatewayRoute(), "billing live REMOTE");
+
+        // 6. Flip orders to REMOTE in Routing Table -> DRIFTED -> desired REMOTE, live LOCAL
+        Assert.assertOk(new RoutingShell(stateStore).updateRoutes(gwProject, List.of("orders"), Route.REMOTE), "flip orders remote");
+        InspectionReport driftedOrders = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect orders DRIFTED");
+        Assert.assertEquals(Optional.of("REMOTE"), driftedOrders.desiredRoute(), "orders desired REMOTE");
+        Assert.assertEquals(Optional.of("LOCAL"), driftedOrders.liveGatewayRoute(), "orders live still LOCAL");
+
+        // 7. MISMATCH mapping + genuine HTTP error when healthy
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 200, """
+            {"mappings":[{"id":"bad-id","request":{"method":"ANY","urlPathPattern":"/orders(/.*)?"},"response":{"proxyBaseUrl":"http://127.0.0.1:9999","proxyUrlPrefixToRemove":"/orders"},"metadata":{"procomp":true,"procompProject":"acme","service":"orders","route":"LOCAL"}}]}
+            """);
+        InspectionReport mismatchOrders = Assert.assertOk(shell.inspect(gwProject, "orders"), "inspect orders MISMATCH");
+        Assert.assertEquals(Optional.of("MISMATCH"), mismatchOrders.liveGatewayRoute(), "mismatched mapping -> MISMATCH");
+
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 500, "boom");
+        DomainError adminErr = Assert.assertErr(shell.inspect(gwProject, "orders"), "unexpected admin HTTP 500 propagates when healthy");
+        Assert.assertEquals("GATEWAY_ADMIN_ERROR", adminErr.code(), "GATEWAY_ADMIN_ERROR propagated");
+    }
+
     public static void testStartBareTargetsLocalOnlyAndExplicitStartWaitsOrDetaches() {
         Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
         Project project = loadSampleProject(root, "secret-start-val");
@@ -130,14 +250,14 @@ public final class ProcessShellTest {
         var httpClient = new FakeHttpClient();
         var observer = new RecordingObserver();
         // Note: billing and worker dirs intentionally absent initially to verify bare REMOTE skip
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:50:00Z"))
             .withFile(root.resolve("orders/build/libs/orders-2.0.jar"), Instant.parse("2026-11-20T11:55:00Z"))
             .withFile(root.resolve("orders/build/libs/orders-2.0-plain.jar"), Instant.parse("2026-11-20T11:59:00Z"));
 
         ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
         );
 
         // 1. Fresh project: bare start has 0 LOCAL services -> spawns nothing, touches nothing
@@ -193,7 +313,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(ProcessShell.StartDisposition.REUSED_MANAGED, reuseRes.outcomes().get(0).disposition(), "reused managed");
 
         // 4. Explicit start with -d on REMOTE worker spawns detached without mutating Routing Table
-        workspaceFiles.withDirectory(root.resolve("worker"));
+        projectFiles.withDirectory(root.resolve("worker"));
         ProcessShell.StartResult detachedRes = Assert.assertOk(
             shell.start(project, new ProcessShell.StartRequest(List.of("worker"), true, Duration.ofSeconds(5))),
             "detached start worker succeeds"
@@ -204,7 +324,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(Route.REMOTE, routesAfter.routeOf("worker").orElseThrow(), "start never mutates Routing Table");
     }
 
-    public static void testStartReusesUnmanagedFailsFastOnConflictMissingWorkspaceCrashAndTimeout() {
+    public static void testStartReusesUnmanagedFailsFastOnConflictMissingWorkingDirCrashAndTimeout() {
         Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
         Project project = loadSampleProject(root, "sec");
         var stateStore = new InMemoryStateStore();
@@ -212,7 +332,7 @@ public final class ProcessShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withDirectory(root.resolve("billing"))
             .withDirectory(root.resolve("worker"))
@@ -220,7 +340,7 @@ public final class ProcessShellTest {
             .withFile(root.resolve("billing/build/libs/billing-1.0.jar"), Instant.parse("2026-11-20T11:00:00Z"));
 
         ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, new RecordingObserver()
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
         );
 
         // 1. Conflict on billing + NONE on orders -> fail fast BEFORE spawning orders!
@@ -275,7 +395,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(1, processRunner.spawnedRequests().size(), "spawned replacement");
 
         // 4. Lazy artifact / workingDir check fails fast without spawning
-        workspaceFiles.removeDirectory(root.resolve("orders"));
+        projectFiles.removeDirectory(root.resolve("orders"));
         DomainError missingWd = Assert.assertErr(
             shell.start(project, new ProcessShell.StartRequest(List.of("orders"), false, Duration.ofSeconds(5))),
             "missing workingDir fails fast"
@@ -284,7 +404,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(1, processRunner.spawnedRequests().size(), "no spawn on missing workingDir");
 
         // 5. Crash while waiting fails fast
-        workspaceFiles.withDirectory(root.resolve("orders"))
+        projectFiles.withDirectory(root.resolve("orders"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:00:00Z"));
         httpClient.remove("GET", URI.create("http://127.0.0.1:9001/actuator/health"));
         clock.onSleep(step -> {
@@ -315,7 +435,7 @@ public final class ProcessShellTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withDirectory(root.resolve("billing"))
             .withDirectory(root.resolve("worker"));
@@ -361,7 +481,7 @@ public final class ProcessShellTest {
         ));
 
         ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, new RecordingObserver()
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
         );
 
         // Bare stop -> stops orders (4100), cleans worker record (6300), spares billing (5200), leaves gateway (7400) running!
