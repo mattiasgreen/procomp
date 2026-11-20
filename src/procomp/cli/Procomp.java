@@ -5,12 +5,20 @@ import procomp.core.common.Result;
 import procomp.core.project.Project;
 import procomp.platform.FsConfigSource;
 import procomp.platform.FsStateStore;
+import procomp.platform.FsWorkspaceFiles;
+import procomp.platform.JdkHttpClient;
+import procomp.platform.OsPortScanner;
+import procomp.platform.OsProcessRunner;
 import procomp.platform.SystemClock;
 import procomp.shell.ProjectLoader;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.HttpClient;
+import procomp.shell.ports.PortScanner;
+import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProgressObserver;
 import procomp.shell.ports.StateStore;
+import procomp.shell.ports.WorkspaceFiles;
 
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
@@ -34,7 +42,19 @@ public final class Procomp {
     public static void main(String[] args) {
         PrintWriter out = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
         PrintWriter err = new PrintWriter(System.err, true, StandardCharsets.UTF_8);
-        int exitCode = run(args, new FsConfigSource(), new FsStateStore(), out, err);
+        int exitCode = run(
+            args,
+            new FsConfigSource(),
+            new FsStateStore(),
+            new OsProcessRunner(),
+            new OsPortScanner(),
+            new JdkHttpClient(),
+            new FsWorkspaceFiles(),
+            new SystemClock(),
+            ProgressObserver.noop(),
+            out,
+            err
+        );
         out.flush();
         err.flush();
         System.exit(exitCode);
@@ -54,6 +74,34 @@ public final class Procomp {
         String[] args,
         ConfigSource configSource,
         StateStore stateStore,
+        Clock clock,
+        ProgressObserver observer,
+        PrintWriter out,
+        PrintWriter err
+    ) {
+        return run(
+            args,
+            configSource,
+            stateStore,
+            new OsProcessRunner(),
+            new OsPortScanner(),
+            new JdkHttpClient(),
+            new FsWorkspaceFiles(),
+            clock,
+            observer,
+            out,
+            err
+        );
+    }
+
+    public static int run(
+        String[] args,
+        ConfigSource configSource,
+        StateStore stateStore,
+        ProcessRunner processRunner,
+        PortScanner portScanner,
+        HttpClient httpClient,
+        WorkspaceFiles workspaceFiles,
         Clock clock,
         ProgressObserver observer,
         PrintWriter out,
@@ -109,6 +157,17 @@ public final class Procomp {
             routingAction = ((Result.Ok<RoutingCli.Action, String>) actionRes).value();
         }
 
+        Optional<Result<ProcessCli.Action, String>> processParse = ProcessCli.parse(command, subArgs);
+        ProcessCli.Action processAction = null;
+        if (processParse.isPresent()) {
+            Result<ProcessCli.Action, String> actionRes = processParse.get();
+            if (actionRes instanceof Result.Err<ProcessCli.Action, String>(String msg)) {
+                err.println("Error: " + msg);
+                return 2;
+            }
+            processAction = ((Result.Ok<ProcessCli.Action, String>) actionRes).value();
+        }
+
         Result<Project, DomainError> projRes = new ProjectLoader(configSource).load(parsed.configOverride());
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
             err.println("Error: " + error.format());
@@ -123,6 +182,21 @@ public final class Procomp {
         }
         if (routingAction != null) {
             return RoutingCli.execute(routingAction, project, stateStore, out, err);
+        }
+        if (processAction != null) {
+            return ProcessCli.execute(
+                processAction,
+                project,
+                stateStore,
+                processRunner,
+                portScanner,
+                httpClient,
+                workspaceFiles,
+                effectiveClock,
+                effectiveObserver,
+                out,
+                err
+            );
         }
         return switch (command) {
             case "logs" -> LogsCli.run(project, subArgs, stateStore, effectiveClock, effectiveObserver, out, err);
@@ -179,10 +253,10 @@ public final class Procomp {
                   --config <path> Use explicit procomp.json path (overrides PROCOMP_CONFIG and walk-up)
 
             Commands:
-              start [service...]                  Start local Service Process(es) (bare targets LOCAL routes)
+              start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
               status                              Show estate Routing Table, Process ownership, Health, and Gateway
-              inspect <service>                   Deep read-only Inspection of a Service's local Process
+              inspect <service>                   Deep read-only Inspection of a Service's local Process (--json)
               logs <service>                      Read raw stdout/stderr logs (-n, -f, --err, --path)
               route [service... <local|remote>]   Show or update the Project's Routing Table
               profile <list|use <name>>           List or apply named routing Profiles
