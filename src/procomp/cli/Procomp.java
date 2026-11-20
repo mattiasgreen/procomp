@@ -5,8 +5,11 @@ import procomp.core.common.Result;
 import procomp.core.project.Project;
 import procomp.platform.FsConfigSource;
 import procomp.platform.FsStateStore;
+import procomp.platform.SystemClock;
 import procomp.shell.ProjectLoader;
+import procomp.shell.ports.Clock;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.ProgressObserver;
 import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
@@ -44,6 +47,20 @@ public final class Procomp {
         PrintWriter out,
         PrintWriter err
     ) {
+        return run(args, configSource, stateStore, new SystemClock(), ProgressObserver.noop(), out, err);
+    }
+
+    public static int run(
+        String[] args,
+        ConfigSource configSource,
+        StateStore stateStore,
+        Clock clock,
+        ProgressObserver observer,
+        PrintWriter out,
+        PrintWriter err
+    ) {
+        Clock effectiveClock = clock != null ? clock : new SystemClock();
+        ProgressObserver effectiveObserver = observer != null ? observer : ProgressObserver.noop();
         Result<ParsedArgs, String> parsedRes = parseArgs(args);
         if (parsedRes instanceof Result.Err<ParsedArgs, String>(String msg)) {
             err.println("Error: " + msg);
@@ -107,8 +124,13 @@ public final class Procomp {
         if (routingAction != null) {
             return RoutingCli.execute(routingAction, project, stateStore, out, err);
         }
-        err.println("Error: Command '" + command + "' is not yet implemented.");
-        return 2;
+        return switch (command) {
+            case "logs" -> LogsCli.run(project, subArgs, stateStore, effectiveClock, effectiveObserver, out, err);
+            default -> {
+                err.println("Error: Command '" + command + "' is not yet implemented.");
+                yield 2;
+            }
+        };
     }
 
     private static Result<ParsedArgs, String> parseArgs(String[] args) {
