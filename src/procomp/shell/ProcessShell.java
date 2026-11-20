@@ -3,36 +3,26 @@ package procomp.shell;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.process.DiscoveryEngine;
-import procomp.core.process.DiscoveryInput;
-import procomp.core.process.DiscoveryResult;
-import procomp.core.process.HealthProbe;
 import procomp.core.process.InspectionReport;
-import procomp.core.process.ManagedRecordView;
-import procomp.core.process.ObservedProcess;
 import procomp.core.process.Ownership;
-import procomp.core.process.ParentProcess;
-import procomp.core.process.PortBinding;
 import procomp.core.process.ProcessPlanner;
 import procomp.core.process.ProcessPlanner.StartAction;
 import procomp.core.process.ProcessPlanner.StopAction;
 import procomp.core.process.ProcessTarget;
+import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
-import procomp.core.project.GatewayDefinition;
 import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
+import procomp.shell.TargetDiscoverySupport.DiscoveryContext;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.HttpClient.HttpResponseData;
 import procomp.shell.ports.ManagedProcessRecord;
 import procomp.shell.ports.PortScanner;
-import procomp.shell.ports.PortScanner.PortListener;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProcessRunner;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
 import procomp.shell.ports.ProgressObserver;
@@ -41,7 +31,6 @@ import procomp.shell.ports.StateStore;
 import procomp.shell.ports.WorkspaceFiles;
 import procomp.shell.ports.WorkspaceFiles.ArtifactInfo;
 
-import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -61,17 +50,16 @@ import java.util.stream.Collectors;
  */
 public final class ProcessShell {
 
-    public static final Duration DEFAULT_HEALTH_PROBE_TIMEOUT = Duration.ofSeconds(2);
-    public static final Duration DEFAULT_STARTUP_POLL_INTERVAL = Duration.ofMillis(200);
+    public static final Duration DEFAULT_HEALTH_PROBE_TIMEOUT = TargetDiscoverySupport.DEFAULT_HEALTH_PROBE_TIMEOUT;
+    public static final Duration DEFAULT_STARTUP_POLL_INTERVAL = TargetDiscoverySupport.DEFAULT_STARTUP_POLL_INTERVAL;
 
     private final StateStore stateStore;
     private final ProcessRunner processRunner;
-    private final PortScanner portScanner;
-    private final HttpClient httpClient;
     private final WorkspaceFiles workspaceFiles;
     private final Clock clock;
     private final ProgressObserver observer;
     private final RoutingShell routingShell;
+    private final TargetDiscoverySupport discoverySupport;
 
     public ProcessShell(
         StateStore stateStore,
@@ -84,12 +72,13 @@ public final class ProcessShell {
     ) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore must not be null");
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner must not be null");
-        this.portScanner = Objects.requireNonNull(portScanner, "portScanner must not be null");
-        this.httpClient = Objects.requireNonNull(httpClient, "httpClient must not be null");
+        Objects.requireNonNull(portScanner, "portScanner must not be null");
+        Objects.requireNonNull(httpClient, "httpClient must not be null");
         this.workspaceFiles = Objects.requireNonNull(workspaceFiles, "workspaceFiles must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.observer = Objects.requireNonNull(observer, "observer must not be null");
         this.routingShell = new RoutingShell(stateStore);
+        this.discoverySupport = new TargetDiscoverySupport(stateStore, processRunner, portScanner, httpClient, workspaceFiles);
     }
 
     /**
@@ -101,7 +90,7 @@ public final class ProcessShell {
         if (svcOpt.isEmpty()) {
             return Result.err(unknownServiceError(project, serviceName));
         }
-        return discoverServiceInternal(project, svcOpt.get()).map(DiscoveryContext::discovery);
+        return discoverySupport.discoverService(project.name(), svcOpt.get()).map(DiscoveryContext::discovery);
     }
 
     /**
@@ -122,11 +111,11 @@ public final class ProcessShell {
         RoutingTable routing = ((Result.Ok<RoutingTable, DomainError>) routingRes).value();
         Optional<String> desiredRoute = routing.routeOf(service.name()).map(Route::name);
 
-        return discoverServiceInternal(project, service)
+        return discoverySupport.discoverService(project.name(), service)
             .map(ctx -> DiscoveryEngine.inspect(
                 ctx.target(),
                 ctx.discovery(),
-                ctx.managedRecord().map(ProcessShell::toManagedView),
+                ctx.managedRecord().map(TargetDiscoverySupport::toManagedView),
                 desiredRoute,
                 Optional.empty(),
                 clock.now()
@@ -161,7 +150,7 @@ public final class ProcessShell {
         Map<String, DiscoveryContext> preDiscovery = new LinkedHashMap<>();
         List<InspectionReport> conflicts = new ArrayList<>();
         for (ServiceDefinition svc : targets) {
-            Result<DiscoveryContext, DomainError> discRes = discoverServiceInternal(project, svc);
+            Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -172,7 +161,7 @@ public final class ProcessShell {
                 conflicts.add(DiscoveryEngine.inspect(
                     ctx.target(),
                     ctx.discovery(),
-                    ctx.managedRecord().map(ProcessShell::toManagedView),
+                    ctx.managedRecord().map(TargetDiscoverySupport::toManagedView),
                     desiredRoute,
                     Optional.empty(),
                     clock.now()
@@ -206,24 +195,16 @@ public final class ProcessShell {
             switch (action) {
                 case SPAWN -> {
                     LaunchPlan plan = launchPlans.get(svc.name());
-                    Result<SpawnedProcess, DomainError> spawnRes = processRunner.spawnDetached(plan.spawnRequest());
+                    Result<SpawnedProcess, DomainError> spawnRes = discoverySupport.spawnAndRecord(
+                        project.name(),
+                        ProcessKey.service(svc.name()),
+                        plan.spawnRequest(),
+                        plan.artifactTimestamp()
+                    );
                     if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
                         return Result.err(err);
                     }
                     SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnRes).value();
-                    ManagedProcessRecord record = new ManagedProcessRecord(
-                        spawned.pid(),
-                        spawned.startedAt(),
-                        plan.spawnRequest().command(),
-                        plan.artifactTimestamp(),
-                        plan.spawnRequest().stdoutLog(),
-                        plan.spawnRequest().stderrLog()
-                    );
-                    Result<procomp.core.common.Unit, DomainError> writeRes =
-                        stateStore.writeManagedProcess(project.name(), ProcessKey.service(svc.name()), record);
-                    if (writeRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
-                        return Result.err(err);
-                    }
                     dispositions.put(svc.name(), StartDisposition.SPAWNED);
                     pendingHealth.add(svc.name());
                     observer.onEvent(new ProgressEvent.StatusMessage(
@@ -262,7 +243,7 @@ public final class ProcessShell {
         Map<String, DiscoveryResult> finalDiscoveries = new LinkedHashMap<>();
         if (request.detach()) {
             for (ServiceDefinition svc : targets) {
-                Result<DiscoveryContext, DomainError> discRes = discoverServiceInternal(project, svc);
+                Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
                 if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                     return Result.err(err);
                 }
@@ -274,7 +255,7 @@ public final class ProcessShell {
                 List<String> stillPending = new ArrayList<>();
                 for (String name : pendingHealth) {
                     ServiceDefinition svc = project.service(name).orElseThrow();
-                    Result<DiscoveryContext, DomainError> discRes = discoverServiceInternal(project, svc);
+                    Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
                     if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                         return Result.err(err);
                     }
@@ -367,7 +348,7 @@ public final class ProcessShell {
 
         List<StopServiceOutcome> outcomes = new ArrayList<>(targets.size());
         for (ServiceDefinition svc : targets) {
-            Result<DiscoveryContext, DomainError> discRes = discoverServiceInternal(project, svc);
+            Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -461,7 +442,7 @@ public final class ProcessShell {
                 return Result.ok(new GatewayStopResult(GatewayStopOutcome.LEFT_RUNNING, Optional.of(gwRec.get().pid())));
             }
             if (project.gateway().isPresent()) {
-                Result<DiscoveryContext, DomainError> gwDiscRes = discoverGatewayInternal(project.name(), project.gateway().get());
+                Result<DiscoveryContext, DomainError> gwDiscRes = discoverySupport.discoverGateway(project.name(), project.gateway().get());
                 if (gwDiscRes instanceof Result.Ok<DiscoveryContext, DomainError>(DiscoveryContext ctx)
                     && ctx.discovery().ownership() != Ownership.NONE
                     && ctx.discovery().health() != HealthState.CRASHED) {
@@ -493,7 +474,7 @@ public final class ProcessShell {
         }
 
         if (project.gateway().isPresent()) {
-            Result<DiscoveryContext, DomainError> gwDiscRes = discoverGatewayInternal(project.name(), project.gateway().get());
+            Result<DiscoveryContext, DomainError> gwDiscRes = discoverySupport.discoverGateway(project.name(), project.gateway().get());
             if (gwDiscRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -563,7 +544,7 @@ public final class ProcessShell {
                 Map.of("service", service.name(), "workingDir", service.workingDir().toString())
             ));
         }
-        Result<Optional<ArtifactInfo>, DomainError> artRes = findLatestArtifact(service);
+        Result<Optional<ArtifactInfo>, DomainError> artRes = discoverySupport.findLatestArtifact(service);
         if (artRes instanceof Result.Err<Optional<ArtifactInfo>, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -588,21 +569,7 @@ public final class ProcessShell {
 
     private static DomainError conflictError(List<InspectionReport> conflicts) {
         InspectionReport first = conflicts.get(0);
-        Map<String, String> details = new LinkedHashMap<>();
-        details.put("service", first.service());
-        first.port().ifPresent(p -> details.put("port", Integer.toString(p)));
-        first.pid().ifPresent(p -> details.put("pid", Long.toString(p)));
-        first.commandLine().ifPresent(c -> details.put("commandLine", c));
-        if (!first.parentChain().isEmpty()) {
-            String parents = first.parentChain().stream()
-                .map(p -> p.pid() + ":" + p.commandLine().or(p::executable).orElse("?"))
-                .collect(Collectors.joining(" <- "));
-            details.put("parentChain", parents);
-        }
-        first.healthEndpoint().ifPresent(ep -> details.put("healthEndpoint", ep));
-        details.put("healthResponse", first.healthResponse());
-        details.put("outLogPath", first.outLogPath().toString());
-        details.put("errLogPath", first.errLogPath().toString());
+        Map<String, String> details = TargetDiscoverySupport.conflictDetails(first, "service");
         if (conflicts.size() > 1) {
             details.put("allConflicts", conflicts.stream().map(InspectionReport::service).collect(Collectors.joining(", ")));
         }
@@ -616,146 +583,6 @@ public final class ProcessShell {
         msg.append("Inspect with 'procomp inspect ").append(first.service())
             .append("' or kill with 'procomp stop ").append(first.service()).append(" --kill-conflict'.");
         return DomainError.of("PORT_CONFLICT", msg.toString(), details);
-    }
-
-    private Result<DiscoveryContext, DomainError> discoverServiceInternal(Project project, ServiceDefinition service) {
-        ProcessTarget target = targetForService(project.name(), service);
-        return discoverTargetInternal(project.name(), ProcessKey.service(service.name()), target, Optional.of(service));
-    }
-
-    private Result<DiscoveryContext, DomainError> discoverGatewayInternal(String projectName, GatewayDefinition gateway) {
-        Path outLog = stateStore.logPath(projectName, ProcessKey.gateway(), false);
-        Path errLog = stateStore.logPath(projectName, ProcessKey.gateway(), true);
-        ProcessTarget target = ProcessTarget.forGateway(gateway, outLog, errLog);
-        return discoverTargetInternal(projectName, ProcessKey.gateway(), target, Optional.empty());
-    }
-
-    private Result<DiscoveryContext, DomainError> discoverTargetInternal(
-        String projectName,
-        ProcessKey key,
-        ProcessTarget target,
-        Optional<ServiceDefinition> serviceOpt
-    ) {
-        Result<Optional<ManagedProcessRecord>, DomainError> recRes =
-            stateStore.readManagedProcess(projectName, key);
-        if (recRes instanceof Result.Err<Optional<ManagedProcessRecord>, DomainError>(DomainError err)) {
-            return Result.err(err);
-        }
-        Optional<ManagedProcessRecord> managedRecord = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) recRes).value();
-
-        if (managedRecord.isPresent()) {
-            ManagedProcessRecord rec = managedRecord.get();
-            Result<Optional<ProcessSnapshot>, DomainError> snapRes = processRunner.inspect(rec.pid());
-            if (snapRes instanceof Result.Err<Optional<ProcessSnapshot>, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            Optional<ProcessSnapshot> snapshot = ((Result.Ok<Optional<ProcessSnapshot>, DomainError>) snapRes).value();
-            Optional<ObservedProcess> observed = snapshot.map(ProcessShell::toObservedProcess);
-
-            HealthProbe probe = HealthProbe.None.INSTANCE;
-            Optional<Instant> latestArtifactTs = Optional.empty();
-            if (observed.filter(ObservedProcess::alive).isPresent()) {
-                probe = probeTarget(target, false);
-                if (serviceOpt.isPresent()) {
-                    Result<Optional<ArtifactInfo>, DomainError> artRes = findLatestArtifact(serviceOpt.get());
-                    if (artRes instanceof Result.Err<Optional<ArtifactInfo>, DomainError>(DomainError err)) {
-                        return Result.err(err);
-                    }
-                    latestArtifactTs = ((Result.Ok<Optional<ArtifactInfo>, DomainError>) artRes).value()
-                        .map(ArtifactInfo::lastModified);
-                }
-            }
-
-            DiscoveryResult discovery = DiscoveryEngine.discover(new DiscoveryInput(
-                target,
-                Optional.of(toManagedView(rec)),
-                Optional.empty(),
-                observed,
-                probe,
-                latestArtifactTs
-            ));
-            return Result.ok(new DiscoveryContext(target, managedRecord, discovery));
-        }
-
-        Optional<PortBinding> portBinding = Optional.empty();
-        Optional<ObservedProcess> observed = Optional.empty();
-        HealthProbe probe = HealthProbe.None.INSTANCE;
-
-        if (target.port().isPresent()) {
-            Result<Optional<PortListener>, DomainError> listenerRes = portScanner.findListener(target.port().get());
-            if (listenerRes instanceof Result.Err<Optional<PortListener>, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            Optional<PortListener> listenerOpt = ((Result.Ok<Optional<PortListener>, DomainError>) listenerRes).value();
-            if (listenerOpt.isPresent()) {
-                PortListener listener = listenerOpt.get();
-                portBinding = Optional.of(new PortBinding(listener.port(), listener.pid(), listener.localAddress()));
-                if (listener.pid().isPresent()) {
-                    Result<Optional<ProcessSnapshot>, DomainError> snapRes = processRunner.inspect(listener.pid().get());
-                    if (snapRes instanceof Result.Err<Optional<ProcessSnapshot>, DomainError>(DomainError err)) {
-                        return Result.err(err);
-                    }
-                    observed = ((Result.Ok<Optional<ProcessSnapshot>, DomainError>) snapRes).value()
-                        .map(ProcessShell::toObservedProcess);
-                }
-                probe = probeTarget(target, true);
-            }
-        }
-
-        DiscoveryResult discovery = DiscoveryEngine.discover(new DiscoveryInput(
-            target,
-            Optional.empty(),
-            portBinding,
-            observed,
-            probe,
-            Optional.empty()
-        ));
-        return Result.ok(new DiscoveryContext(target, Optional.empty(), discovery));
-    }
-
-    private HealthProbe probeTarget(ProcessTarget target, boolean listenerConfirmed) {
-        if (target.healthEndpoint().isPresent()) {
-            URI uri = URI.create(target.healthEndpoint().get());
-            return switch (httpClient.get(uri, DEFAULT_HEALTH_PROBE_TIMEOUT)) {
-                case Result.Ok<HttpResponseData, DomainError>(HttpResponseData resp) ->
-                    new HealthProbe.HttpResult(resp.statusCode(), "");
-                case Result.Err<HttpResponseData, DomainError>(DomainError err) ->
-                    new HealthProbe.HttpFailure(err.message());
-            };
-        }
-        if (target.port().isPresent()) {
-            boolean listening = listenerConfirmed
-                || portScanner.isTcpListening(target.port().get(), DEFAULT_HEALTH_PROBE_TIMEOUT);
-            return new HealthProbe.TcpResult(listening);
-        }
-        return HealthProbe.None.INSTANCE;
-    }
-
-    private Result<Optional<ArtifactInfo>, DomainError> findLatestArtifact(ServiceDefinition service) {
-        if (service.artifactGlob().isEmpty()) {
-            return Result.ok(Optional.empty());
-        }
-        String glob = service.artifactGlob().get();
-        Result<Optional<ArtifactInfo>, DomainError> fromWorkingDir =
-            workspaceFiles.findNewestArtifact(service.workingDir(), glob, service.artifactExclude());
-        if (fromWorkingDir.isErr()) {
-            return fromWorkingDir;
-        }
-        Optional<ArtifactInfo> found = ((Result.Ok<Optional<ArtifactInfo>, DomainError>) fromWorkingDir).value();
-        if (found.isPresent() || service.repository().isEmpty()) {
-            return fromWorkingDir;
-        }
-        Path repoRoot = service.repository().get().root();
-        if (repoRoot.equals(service.workingDir())) {
-            return fromWorkingDir;
-        }
-        return workspaceFiles.findNewestArtifact(repoRoot, glob, service.artifactExclude());
-    }
-
-    private ProcessTarget targetForService(String projectName, ServiceDefinition service) {
-        Path outLog = stateStore.logPath(projectName, ProcessKey.service(service.name()), false);
-        Path errLog = stateStore.logPath(projectName, ProcessKey.service(service.name()), true);
-        return ProcessTarget.forService(service, outLog, errLog);
     }
 
     private static Optional<ServiceDefinition> requireService(Project project, String serviceName) {
@@ -774,44 +601,7 @@ public final class ProcessShell {
         );
     }
 
-    private static ManagedRecordView toManagedView(ManagedProcessRecord rec) {
-        return new ManagedRecordView(
-            rec.pid(),
-            rec.startedAt(),
-            rec.commandSummary(),
-            rec.artifactTimestamp(),
-            rec.stdoutLog(),
-            rec.stderrLog()
-        );
-    }
-
-    private static ObservedProcess toObservedProcess(ProcessSnapshot snap) {
-        List<ParentProcess> parents = snap.parentChain().stream()
-            .map(ProcessShell::toParentProcess)
-            .toList();
-        return new ObservedProcess(
-            snap.pid(),
-            snap.alive(),
-            snap.startTime(),
-            snap.commandLine(),
-            snap.arguments(),
-            parents,
-            snap.rssBytes(),
-            snap.executable()
-        );
-    }
-
-    private static ParentProcess toParentProcess(ParentProcessInfo info) {
-        return new ParentProcess(info.pid(), info.commandLine(), info.executable());
-    }
-
     private record LaunchPlan(SpawnRequest spawnRequest, Optional<Instant> artifactTimestamp) {}
-
-    private record DiscoveryContext(
-        ProcessTarget target,
-        Optional<ManagedProcessRecord> managedRecord,
-        DiscoveryResult discovery
-    ) {}
 
     public record StartRequest(List<String> serviceNames, boolean detach, Duration timeout) {
         public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
