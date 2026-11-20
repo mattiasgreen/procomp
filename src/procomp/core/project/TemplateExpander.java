@@ -46,7 +46,7 @@ final class TemplateExpander {
             } else {
                 Result<String, DomainError> expanded = expandScalar(elem, vars, deferredVars, elemContext);
                 if (expanded.isErr()) {
-                    return expanded.fold(ignored -> { throw new IllegalStateException(); }, Result::err);
+                    return expanded.castError();
                 }
                 out.add(((Result.Ok<String, DomainError>) expanded).value());
             }

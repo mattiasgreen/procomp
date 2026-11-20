@@ -4,6 +4,7 @@ import procomp.Assert;
 import procomp.core.common.DomainError;
 
 import java.util.List;
+import java.util.Optional;
 
 public final class ProjectConfigParserTest {
 
@@ -138,5 +139,33 @@ public final class ProjectConfigParserTest {
                 "expected CONFIG_* error code for " + bad + ", got " + err.code()
             );
         }
+    }
+
+    public static void testPreservesExplicitEmptyHealthPathVersusOmittedField() {
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": {
+                "java": { "command": ["java"], "healthPath": "/actuator/health" },
+                "tcp": { "command": ["redis"], "healthPath": "" }
+              },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "healthPath": ""
+              },
+              "services": {
+                "cleared": { "runtime": "java", "port": 9001, "workingDir": ".", "healthPath": "" },
+                "inherited": { "runtime": "java", "port": 9002, "workingDir": "." }
+              }
+            }
+            """;
+
+        RawProjectConfig cfg = Assert.assertOk(ProjectConfigParser.parse(json), "config parses");
+        Assert.assertEquals(Optional.of("/actuator/health"), cfg.runtimes().get("java").healthPath(), "runtime healthPath preserved");
+        Assert.assertEquals(Optional.of(""), cfg.runtimes().get("tcp").healthPath(), "runtime explicit empty healthPath preserved");
+        Assert.assertEquals(Optional.of(""), cfg.gateway().orElseThrow().healthPath(), "gateway explicit empty healthPath preserved");
+        Assert.assertEquals(Optional.of(""), cfg.services().get("cleared").healthPath(), "service explicit empty healthPath preserved");
+        Assert.assertEquals(Optional.empty(), cfg.services().get("inherited").healthPath(), "service omitted healthPath is empty");
     }
 }

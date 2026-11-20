@@ -13,7 +13,7 @@ import java.util.Optional;
 /**
  * Narrow read-only port for lazy Repository/workingDir checks and {{artifact}} glob resolution.
  */
-public interface WorkspaceFiles {
+public interface ProjectFiles {
 
     boolean directoryExists(Path dir);
 

@@ -9,7 +9,7 @@ import procomp.shell.ports.PortScanner.PortListener;
 import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
-import procomp.shell.ports.WorkspaceFiles.ArtifactInfo;
+import procomp.shell.ports.ProjectFiles.ArtifactInfo;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -32,10 +32,10 @@ import java.util.stream.Stream;
 
 public final class ProcessPlatformIntegrationTest {
 
-    public static void testFsWorkspaceFilesFindsNewestNonExcludedArtifactOnDisk() throws Exception {
+    public static void testFsProjectFilesFindsNewestNonExcludedArtifactOnDisk() throws Exception {
         Path tmp = Files.createTempDirectory("procomp-ws-files");
         try {
-            FsWorkspaceFiles files = new FsWorkspaceFiles();
+            FsProjectFiles files = new FsProjectFiles();
             Assert.assertTrue(files.directoryExists(tmp), "temp dir exists");
             Assert.assertFalse(files.directoryExists(tmp.resolve("missing")), "missing dir does not exist");
 

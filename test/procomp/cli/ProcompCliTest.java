@@ -92,4 +92,26 @@ public final class ProcompCliTest {
         Assert.assertContains(errBuf.toString(), "CONFIG_UNRECOGNIZED_FIELD", "stderr reports strict config error");
         Assert.assertContains(errBuf.toString(), "badKey", "stderr reports offending field");
     }
+
+    public static void testBareConfigOptionWithoutCommandPrintsUsageAndExitsZero() {
+        Path cwd = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(cwd)
+            .withFile(cwd.resolve("valid.json"), "{\"project\": \"acme\", \"runtimes\": {}}");
+        var stateStore = new InMemoryStateStore();
+
+        StringWriter outBuf = new StringWriter();
+        StringWriter errBuf = new StringWriter();
+        int code = Procomp.run(
+            new String[]{"--config", "valid.json"},
+            configSource,
+            stateStore,
+            new PrintWriter(outBuf, true),
+            new PrintWriter(errBuf, true)
+        );
+
+        Assert.assertEquals(0, code, "bare --config without command should print usage and exit 0");
+        Assert.assertContains(outBuf.toString(), "Usage: procomp", "bare --config prints usage");
+        Assert.assertNotContains(outBuf.toString(), "Config OK", "bare --config must not emit Config OK");
+        Assert.assertEquals("", errBuf.toString(), "bare --config writes nothing to stderr");
+    }
 }

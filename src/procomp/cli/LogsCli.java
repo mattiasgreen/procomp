@@ -14,6 +14,7 @@ import procomp.shell.ports.StateStore;
 import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * CLI argument parser and output renderer for {@code procomp logs}.
@@ -22,22 +23,22 @@ final class LogsCli {
 
     private LogsCli() {}
 
-    static int run(
+    static Optional<Result<LogsRequest, String>> parse(String command, List<String> args) {
+        if (!"logs".equals(command)) {
+            return Optional.empty();
+        }
+        return Optional.of(parseArgs(args));
+    }
+
+    static int execute(
+        LogsRequest request,
         Project project,
-        List<String> args,
         StateStore stateStore,
         Clock clock,
         ProgressObserver observer,
         PrintWriter out,
         PrintWriter err
     ) {
-        Result<LogsRequest, String> reqRes = parseArgs(args);
-        if (reqRes instanceof Result.Err<LogsRequest, String>(String msg)) {
-            err.println("Error: " + msg);
-            return 2;
-        }
-        LogsRequest request = ((Result.Ok<LogsRequest, String>) reqRes).value();
-
         ProgressObserver cliObserver = event -> {
             if (event instanceof ProgressEvent.LogLine logLine) {
                 out.print(logLine.line());

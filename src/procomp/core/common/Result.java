@@ -69,4 +69,11 @@ public sealed interface Result<T, E> permits Result.Ok, Result.Err {
             case Err<T, E>(E error) -> onErr.apply(error);
         };
     }
+
+    default <U> Result<U, E> castError() {
+        return switch (this) {
+            case Ok<T, E> _ -> throw new IllegalStateException("castError() called on Ok result");
+            case Err<T, E>(E error) -> err(error);
+        };
+    }
 }

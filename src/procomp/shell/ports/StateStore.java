@@ -25,11 +25,7 @@ public interface StateStore {
 
     Result<Unit, DomainError> deleteManagedProcess(String project, ProcessKey key);
 
-    Result<Map<String, ManagedProcessRecord>, DomainError> listManagedServiceProcesses(String project);
-
     Path logPath(String project, ProcessKey key, boolean stderr);
-
-    boolean logExists(Path logPath);
 
     Result<String, DomainError> readLogText(Path logPath);
 

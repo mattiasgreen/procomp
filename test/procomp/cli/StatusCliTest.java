@@ -8,7 +8,7 @@ import procomp.fakes.FakeClock;
 import procomp.fakes.FakeHttpClient;
 import procomp.fakes.FakePortScanner;
 import procomp.fakes.FakeProcessRunner;
-import procomp.fakes.FakeWorkspaceFiles;
+import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
@@ -38,7 +38,7 @@ public final class StatusCliTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:55:00Z"));
 
@@ -53,14 +53,14 @@ public final class StatusCliTest {
                   }
                 }
                 """);
-        CliResult noGwRes = runCli(noGwConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status");
+        CliResult noGwRes = runCli(noGwConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, noGwRes.exitCode(), "status without gateway exits 0; stderr=" + noGwRes.stderr());
         Assert.assertContains(noGwRes.stdout(), "SERVICE", "prints SERVICE header");
         Assert.assertContains(noGwRes.stdout(), "Gateway: not configured", "prints unconfigured gateway summary");
 
         // 2. Rich multi-service estate with Gateway OFFLINE -> DRIFTED (N) -> IN SYNC
         var richConfig = richConfigSource(root, "top-secret-cli-status");
-        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
+        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
         // orders: LOCAL + MANAGED + HEALTHY + STALE
         Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
@@ -102,7 +102,7 @@ public final class StatusCliTest {
             stateStore.logPath("acme", ProcessKey.service("inventory"), true)
         )), "seed crashed inventory");
 
-        CliResult offlineRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status");
+        CliResult offlineRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, offlineRes.exitCode(), "status offline exits 0; stderr=" + offlineRes.stderr());
         String offlineOut = offlineRes.stdout();
         for (String col : List.of("SERVICE", "ROUTE", "OWNER", "HEALTH", "PORT", "PID", "UPTIME", "STALE")) {
@@ -147,18 +147,18 @@ public final class StatusCliTest {
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "{\"status\":\"healthy\"}");
 
-        CliResult driftedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status");
+        CliResult driftedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, driftedRes.exitCode(), "status drifted exits 0");
         Assert.assertContains(driftedRes.stdout(), "DRIFTED (4)", "Gateway summary shows DRIFTED (4)");
 
-        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "gateway", "reconcile").exitCode(), "reconcile");
-        CliResult syncedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status");
+        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "gateway", "reconcile").exitCode(), "reconcile");
+        CliResult syncedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, syncedRes.exitCode(), "status synced exits 0");
         Assert.assertContains(syncedRes.stdout(), "IN SYNC", "Gateway summary shows IN SYNC");
 
         // 3. Domain error -> exit 1
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 500, "err");
-        CliResult errRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status");
+        CliResult errRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(1, errRes.exitCode(), "gateway admin error exits 1");
         Assert.assertContains(errRes.stderr(), "GATEWAY_ADMIN_ERROR", "stderr shows GATEWAY_ADMIN_ERROR");
 
@@ -168,7 +168,7 @@ public final class StatusCliTest {
             new String[]{"status", "orders"},
             new String[]{"status", "--json", "extra"}
         )) {
-            CliResult bad = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, badArgs);
+            CliResult bad = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, badArgs);
             Assert.assertEquals(2, bad.exitCode(), "bad status args " + String.join(" ", badArgs) + " exit 2");
         }
     }
@@ -180,7 +180,7 @@ public final class StatusCliTest {
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner();
         var httpClient = new FakeHttpClient();
-        var workspaceFiles = new FakeWorkspaceFiles()
+        var projectFiles = new FakeProjectFiles()
             .withDirectory(root.resolve("orders"))
             .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), Instant.parse("2026-11-20T11:55:00Z"));
 
@@ -192,7 +192,7 @@ public final class StatusCliTest {
                   "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } }
                 }
                 """);
-        CliResult emptyJsonRes = runCli(emptyNoGw, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status", "--json");
+        CliResult emptyJsonRes = runCli(emptyNoGw, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status", "--json");
         Assert.assertEquals(0, emptyJsonRes.exitCode(), "status --json without gateway exits 0; stderr=" + emptyJsonRes.stderr());
         JsonValue.JsonObject emptyObj = (JsonValue.JsonObject) Assert.assertOk(Json.parse(emptyJsonRes.stdout().trim()), "valid json");
         Assert.assertEquals("empty-nogw", ((JsonValue.JsonString) emptyObj.get("project").orElseThrow()).value(), "project name");
@@ -204,7 +204,7 @@ public final class StatusCliTest {
 
         // 2. Rich multi-service estate with Gateway DRIFTED (including stale mapping) -> reconcile -> IN_SYNC
         var richConfig = richConfigSource(root, "top-secret-json-status");
-        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
+        Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
         Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
             4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders-1.0.jar"),
@@ -260,7 +260,7 @@ public final class StatusCliTest {
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "{\"status\":\"healthy\"}");
 
-        CliResult jsonRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, "status", "--json");
+        CliResult jsonRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status", "--json");
         Assert.assertEquals(0, jsonRes.exitCode(), "status --json exits 0; stderr=" + jsonRes.stderr());
         Assert.assertNotContains(jsonRes.stdout(), "top-secret-json-status", "status --json never leaks secrets");
 
@@ -312,7 +312,7 @@ public final class StatusCliTest {
         FakeProcessRunner runner,
         FakePortScanner ports,
         FakeHttpClient http,
-        FakeWorkspaceFiles files,
+        FakeProjectFiles files,
         FakeClock clock,
         String... args
     ) {

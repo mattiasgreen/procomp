@@ -116,12 +116,11 @@ public final class FsStateStoreAndConfigTest {
                 store.logPath("acme", ProcessKey.gateway(), true)
             );
             Assert.assertOk(store.writeManagedProcess("acme", ProcessKey.gateway(), gwRec), "write gateway record");
-
-            Map<String, ManagedProcessRecord> svcList = Assert.assertOk(
-                store.listManagedServiceProcesses("acme"),
-                "listManagedServiceProcesses"
+            Assert.assertEquals(
+                Optional.of(gwRec),
+                Assert.assertOk(store.readManagedProcess("acme", ProcessKey.gateway()), "read gateway record"),
+                "gateway ManagedProcessRecord round-trips"
             );
-            Assert.assertEquals(Map.of("service1", rec), svcList, "gateway record is stored separately from services");
 
             Assert.assertOk(store.deleteManagedProcess("acme", ProcessKey.service("service1")), "delete service record");
             Assert.assertEquals(
@@ -129,10 +128,14 @@ public final class FsStateStoreAndConfigTest {
                 Assert.assertOk(store.readManagedProcess("acme", ProcessKey.service("service1")), "deleted record is absent"),
                 "deleted record absent"
             );
+            Assert.assertEquals(
+                Optional.of(gwRec),
+                Assert.assertOk(store.readManagedProcess("acme", ProcessKey.gateway()), "gateway record preserved"),
+                "gateway record is stored separately from services"
+            );
 
             Files.createDirectories(outLog.getParent());
             Files.writeString(outLog, "line1\n", StandardCharsets.UTF_8);
-            Assert.assertTrue(store.logExists(outLog), "logExists true after write");
             LogChunk first = Assert.assertOk(store.readLogChunk(outLog, 0), "read initial log chunk");
             Assert.assertEquals("line1\n", first.text(), "initial log chunk text");
 

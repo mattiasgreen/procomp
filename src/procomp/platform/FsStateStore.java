@@ -28,7 +28,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.stream.Stream;
 
 /**
  * Cross-platform filesystem implementation of {@link StateStore}.
@@ -154,38 +153,6 @@ public final class FsStateStore implements StateStore {
     }
 
     @Override
-    public Result<Map<String, ManagedProcessRecord>, DomainError> listManagedServiceProcesses(String project) {
-        Path processesDir = projectStateDir(project).resolve("processes");
-        if (!Files.isDirectory(processesDir)) {
-            return Result.ok(Map.of());
-        }
-        Map<String, ManagedProcessRecord> result = new LinkedHashMap<>();
-        List<Path> files;
-        try (Stream<Path> stream = Files.list(processesDir)) {
-            files = stream.filter(Files::isRegularFile)
-                .filter(p -> p.getFileName().toString().endsWith(".json"))
-                .sorted()
-                .toList();
-        } catch (IOException e) {
-            return Result.err(DomainError.of(
-                "STATE_IO_ERROR",
-                "Failed to list process records under '" + processesDir + "': " + e.getMessage(),
-                Map.of("path", processesDir.toString())
-            ));
-        }
-        for (Path file : files) {
-            String filename = file.getFileName().toString();
-            String serviceName = filename.substring(0, filename.length() - ".json".length());
-            Result<ManagedProcessRecord, DomainError> recRes = readManagedProcessFile(file);
-            if (recRes.isErr()) {
-                return recRes.fold(ignored -> { throw new IllegalStateException(); }, Result::err);
-            }
-            result.put(serviceName, ((Result.Ok<ManagedProcessRecord, DomainError>) recRes).value());
-        }
-        return Result.ok(result);
-    }
-
-    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
@@ -193,11 +160,6 @@ public final class FsStateStore implements StateStore {
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix).normalize();
-    }
-
-    @Override
-    public boolean logExists(Path logPath) {
-        return Files.isRegularFile(logPath);
     }
 
     @Override
@@ -263,7 +225,7 @@ public final class FsStateStore implements StateStore {
             }
 
             Result<Instant, DomainError> startedRes = requireInstant(obj, "startedAt", file);
-            if (startedRes.isErr()) return castErr(startedRes);
+            if (startedRes.isErr()) return startedRes.castError();
 
             Optional<JsonValue> cmdVal = obj.get("commandSummary");
             if (cmdVal.isEmpty() || !(cmdVal.get() instanceof JsonValue.JsonArray(List<JsonValue> elems))) {
@@ -291,9 +253,9 @@ public final class FsStateStore implements StateStore {
             }
 
             Result<String, DomainError> stdoutRes = requireString(obj, "stdoutLog", file);
-            if (stdoutRes.isErr()) return castErr(stdoutRes);
+            if (stdoutRes.isErr()) return stdoutRes.castError();
             Result<String, DomainError> stderrRes = requireString(obj, "stderrLog", file);
-            if (stderrRes.isErr()) return castErr(stderrRes);
+            if (stderrRes.isErr()) return stderrRes.castError();
 
             return Result.ok(new ManagedProcessRecord(
                 pidOpt.getAsLong(),
@@ -350,7 +312,7 @@ public final class FsStateStore implements StateStore {
 
     private static Result<Instant, DomainError> requireInstant(JsonValue.JsonObject obj, String key, Path file) {
         Result<String, DomainError> sRes = requireString(obj, key, file);
-        if (sRes.isErr()) return castErr(sRes);
+        if (sRes.isErr()) return sRes.castError();
         try {
             return Result.ok(Instant.parse(okVal(sRes)));
         } catch (DateTimeParseException e) {
@@ -377,10 +339,6 @@ public final class FsStateStore implements StateStore {
 
     private boolean isWindows() {
         return osName.toLowerCase(Locale.ROOT).contains("win");
-    }
-
-    private static <T, U> Result<U, DomainError> castErr(Result<T, DomainError> err) {
-        return err.fold(ignored -> { throw new IllegalStateException(); }, Result::err);
     }
 
     private static <T> T okVal(Result<T, DomainError> res) {

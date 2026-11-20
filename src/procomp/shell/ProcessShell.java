@@ -16,10 +16,12 @@ import procomp.core.project.ProjectResolver;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
-import procomp.shell.TargetDiscoverySupport.DiscoveryContext;
+import procomp.shell.GatewayShell.GatewayTeardownOutcome;
+import procomp.shell.GatewayShell.GatewayTeardownResult;
+import procomp.shell.TargetLifecycleSupport.DiscoveryContext;
+import procomp.shell.TargetLifecycleSupport.HealthWaitTarget;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.ManagedProcessRecord;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProcessRunner;
@@ -27,9 +29,9 @@ import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
 import procomp.shell.ports.ProgressObserver;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
+import procomp.shell.ports.ProjectFiles;
+import procomp.shell.ports.ProjectFiles.ArtifactInfo;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
-import procomp.shell.ports.WorkspaceFiles.ArtifactInfo;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -50,23 +52,24 @@ import java.util.stream.Collectors;
  */
 public final class ProcessShell {
 
-    public static final Duration DEFAULT_HEALTH_PROBE_TIMEOUT = TargetDiscoverySupport.DEFAULT_HEALTH_PROBE_TIMEOUT;
-    public static final Duration DEFAULT_STARTUP_POLL_INTERVAL = TargetDiscoverySupport.DEFAULT_STARTUP_POLL_INTERVAL;
+    public static final Duration DEFAULT_HEALTH_CHECK_TIMEOUT = TargetLifecycleSupport.DEFAULT_HEALTH_CHECK_TIMEOUT;
+    public static final Duration DEFAULT_HEALTH_CHECK_INTERVAL = TargetLifecycleSupport.DEFAULT_HEALTH_CHECK_INTERVAL;
 
     private final StateStore stateStore;
     private final ProcessRunner processRunner;
-    private final WorkspaceFiles workspaceFiles;
+    private final ProjectFiles projectFiles;
     private final Clock clock;
     private final ProgressObserver observer;
     private final RoutingShell routingShell;
-    private final TargetDiscoverySupport discoverySupport;
+    private final GatewayShell gatewayShell;
+    private final TargetLifecycleSupport lifecycleSupport;
 
     public ProcessShell(
         StateStore stateStore,
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer
     ) {
@@ -74,11 +77,14 @@ public final class ProcessShell {
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner must not be null");
         Objects.requireNonNull(portScanner, "portScanner must not be null");
         Objects.requireNonNull(httpClient, "httpClient must not be null");
-        this.workspaceFiles = Objects.requireNonNull(workspaceFiles, "workspaceFiles must not be null");
+        this.projectFiles = Objects.requireNonNull(projectFiles, "projectFiles must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.observer = Objects.requireNonNull(observer, "observer must not be null");
         this.routingShell = new RoutingShell(stateStore);
-        this.discoverySupport = new TargetDiscoverySupport(stateStore, processRunner, portScanner, httpClient, workspaceFiles);
+        this.gatewayShell = new GatewayShell(
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
+        );
+        this.lifecycleSupport = new TargetLifecycleSupport(stateStore, processRunner, portScanner, httpClient, projectFiles);
     }
 
     /**
@@ -90,7 +96,7 @@ public final class ProcessShell {
         if (svcOpt.isEmpty()) {
             return Result.err(unknownServiceError(project, serviceName));
         }
-        return discoverySupport.discoverService(project.name(), svcOpt.get()).map(DiscoveryContext::discovery);
+        return lifecycleSupport.discoverService(project.name(), svcOpt.get()).map(DiscoveryContext::discovery);
     }
 
     /**
@@ -111,13 +117,25 @@ public final class ProcessShell {
         RoutingTable routing = ((Result.Ok<RoutingTable, DomainError>) routingRes).value();
         Optional<String> desiredRoute = routing.routeOf(service.name()).map(Route::name);
 
-        return discoverySupport.discoverService(project.name(), service)
+        Optional<String> liveGatewayRoute = Optional.empty();
+        if (project.gateway().isPresent()) {
+            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes = gatewayShell.status(project);
+            if (gwStatusRes instanceof Result.Err<GatewayShell.GatewayStatusReport, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            GatewayShell.GatewayStatusReport gwStatus =
+                ((Result.Ok<GatewayShell.GatewayStatusReport, DomainError>) gwStatusRes).value();
+            liveGatewayRoute = Optional.ofNullable(gwStatus.drift().liveRoutes().get(service.name()));
+        }
+
+        Optional<String> resolvedLiveGatewayRoute = liveGatewayRoute;
+        return lifecycleSupport.discoverService(project.name(), service)
             .map(ctx -> DiscoveryEngine.inspect(
                 ctx.target(),
                 ctx.discovery(),
-                ctx.managedRecord().map(TargetDiscoverySupport::toManagedView),
+                ctx.managedRecord().map(TargetLifecycleSupport::toManagedView),
                 desiredRoute,
-                Optional.empty(),
+                resolvedLiveGatewayRoute,
                 clock.now()
             ));
     }
@@ -150,7 +168,7 @@ public final class ProcessShell {
         Map<String, DiscoveryContext> preDiscovery = new LinkedHashMap<>();
         List<InspectionReport> conflicts = new ArrayList<>();
         for (ServiceDefinition svc : targets) {
-            Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
+            Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverService(project.name(), svc);
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -161,7 +179,7 @@ public final class ProcessShell {
                 conflicts.add(DiscoveryEngine.inspect(
                     ctx.target(),
                     ctx.discovery(),
-                    ctx.managedRecord().map(TargetDiscoverySupport::toManagedView),
+                    ctx.managedRecord().map(TargetLifecycleSupport::toManagedView),
                     desiredRoute,
                     Optional.empty(),
                     clock.now()
@@ -195,7 +213,7 @@ public final class ProcessShell {
             switch (action) {
                 case SPAWN -> {
                     LaunchPlan plan = launchPlans.get(svc.name());
-                    Result<SpawnedProcess, DomainError> spawnRes = discoverySupport.spawnAndRecord(
+                    Result<SpawnedProcess, DomainError> spawnRes = lifecycleSupport.spawnAndRecord(
                         project.name(),
                         ProcessKey.service(svc.name()),
                         plan.spawnRequest(),
@@ -243,70 +261,31 @@ public final class ProcessShell {
         Map<String, DiscoveryResult> finalDiscoveries = new LinkedHashMap<>();
         if (request.detach()) {
             for (ServiceDefinition svc : targets) {
-                Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
+                Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverService(project.name(), svc);
                 if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                     return Result.err(err);
                 }
                 finalDiscoveries.put(svc.name(), ((Result.Ok<DiscoveryContext, DomainError>) discRes).value().discovery());
             }
         } else {
-            Instant deadline = clock.now().plus(request.timeout());
-            while (!pendingHealth.isEmpty()) {
-                List<String> stillPending = new ArrayList<>();
+            if (!pendingHealth.isEmpty()) {
+                List<HealthWaitTarget> waitTargets = new ArrayList<>(pendingHealth.size());
                 for (String name : pendingHealth) {
                     ServiceDefinition svc = project.service(name).orElseThrow();
-                    Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
-                    if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
-                        return Result.err(err);
-                    }
-                    DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
-                    DiscoveryResult disc = ctx.discovery();
-                    if (disc.health() == HealthState.CRASHED) {
-                        return Result.err(DomainError.of(
-                            "PROCESS_CRASHED",
-                            "Service '" + name + "' exited unexpectedly while starting"
-                                + disc.pid().map(p -> " (PID " + p + ")").orElse("")
-                                + ". Check logs: " + ctx.target().stdoutLog() + " / " + ctx.target().stderrLog(),
-                            Map.of(
-                                "service", name,
-                                "pid", disc.pid().map(Object::toString).orElse(""),
-                                "stdoutLog", ctx.target().stdoutLog().toString(),
-                                "stderrLog", ctx.target().stderrLog().toString()
-                            )
-                        ));
-                    }
-                    if (disc.ownership() == Ownership.NONE && disc.health() == HealthState.STOPPED) {
-                        return Result.err(DomainError.of(
-                            "PROCESS_EXITED",
-                            "Reused process for service '" + name + "' exited before becoming HEALTHY",
-                            Map.of("service", name)
-                        ));
-                    }
-                    if (disc.health() == HealthState.HEALTHY) {
-                        finalDiscoveries.put(name, disc);
-                        observer.onEvent(new ProgressEvent.StatusMessage(name, "Service is HEALTHY"));
-                    } else {
-                        stillPending.add(name);
-                    }
-                }
-                pendingHealth = stillPending;
-                if (pendingHealth.isEmpty()) {
-                    break;
-                }
-                if (!clock.now().isBefore(deadline)) {
-                    String list = String.join(", ", pendingHealth);
-                    return Result.err(DomainError.of(
-                        "START_TIMEOUT",
-                        "Timed out after " + request.timeout().toSeconds() + "s waiting for service(s) to become HEALTHY: " + list,
-                        Map.of("services", list, "timeoutSeconds", Long.toString(request.timeout().toSeconds()))
+                    waitTargets.add(new HealthWaitTarget(
+                        name,
+                        "service",
+                        "Service '" + name + "'",
+                        "Service is HEALTHY",
+                        () -> lifecycleSupport.discoverService(project.name(), svc)
                     ));
                 }
-                if (!clock.sleep(DEFAULT_STARTUP_POLL_INTERVAL)) {
-                    return Result.err(DomainError.of(
-                        "INTERRUPTED",
-                        "Interrupted while waiting for service(s) to become HEALTHY: " + String.join(", ", pendingHealth)
-                    ));
+                Result<Map<String, DiscoveryResult>, DomainError> waitRes =
+                    lifecycleSupport.waitUntilHealthy(clock, observer, request.timeout(), waitTargets);
+                if (waitRes instanceof Result.Err<Map<String, DiscoveryResult>, DomainError>(DomainError err)) {
+                    return Result.err(err);
                 }
+                finalDiscoveries.putAll(((Result.Ok<Map<String, DiscoveryResult>, DomainError>) waitRes).value());
             }
             for (ServiceDefinition svc : targets) {
                 if (!finalDiscoveries.containsKey(svc.name())) {
@@ -326,7 +305,7 @@ public final class ProcessShell {
 
     /**
      * Stops Managed Service Processes (and cleans CRASHED records), spares Unmanaged Processes,
-     * kills Conflicts only with explicit target + {@code killConflict} consent, and spares Managed Gateway unless {@code --all}.
+     * kills Conflicts only with explicit target + {@code killConflict} consent, and spares Managed Gateway unless {@code all} is true.
      */
     public Result<StopResult, DomainError> stop(Project project, StopRequest request) {
         Objects.requireNonNull(project, "project must not be null");
@@ -335,8 +314,8 @@ public final class ProcessShell {
         if (request.killConflict() && request.serviceNames().isEmpty()) {
             return Result.err(DomainError.of(
                 "INVALID_STOP_OPTIONS",
-                "--kill-conflict requires one or more explicit <service> targets",
-                Map.of("flag", "--kill-conflict")
+                "Killing a Conflict Process requires one or more explicit target Services",
+                Map.of("reason", "killConflictRequiresExplicitService")
             ));
         }
 
@@ -348,7 +327,7 @@ public final class ProcessShell {
 
         List<StopServiceOutcome> outcomes = new ArrayList<>(targets.size());
         for (ServiceDefinition svc : targets) {
-            Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverService(project.name(), svc);
+            Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverService(project.name(), svc);
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -359,21 +338,16 @@ public final class ProcessShell {
             switch (action) {
                 case KILL_MANAGED -> {
                     long pid = disc.pid().orElseThrow();
-                    if (disc.health() != HealthState.CRASHED) {
-                        Result<procomp.core.common.Unit, DomainError> stopRes =
-                            processRunner.stopTree(pid, request.gracefulTimeout());
-                        if (stopRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
-                            return Result.err(err);
-                        }
-                    }
-                    Result<procomp.core.common.Unit, DomainError> delRes =
-                        stateStore.deleteManagedProcess(project.name(), ProcessKey.service(svc.name()));
-                    if (delRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
+                    boolean alive = disc.health() != HealthState.CRASHED;
+                    Result<procomp.core.common.Unit, DomainError> stopRes = lifecycleSupport.stopManagedProcess(
+                        project.name(), ProcessKey.service(svc.name()), pid, alive, request.gracefulTimeout()
+                    );
+                    if (stopRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
                         return Result.err(err);
                     }
-                    StopDisposition disp = disc.health() == HealthState.CRASHED
-                        ? StopDisposition.CLEANED_CRASHED
-                        : StopDisposition.STOPPED_MANAGED;
+                    StopDisposition disp = alive
+                        ? StopDisposition.STOPPED_MANAGED
+                        : StopDisposition.CLEANED_CRASHED;
                     outcomes.add(new StopServiceOutcome(svc.name(), disp, disc.pid(), disc.provenance()));
                     observer.onEvent(new ProgressEvent.StatusMessage(
                         svc.name(),
@@ -421,69 +395,24 @@ public final class ProcessShell {
             }
         }
 
-        Result<GatewayStopResult, DomainError> gwStopRes = handleGatewayOnStop(project, request);
-        if (gwStopRes instanceof Result.Err<GatewayStopResult, DomainError>(DomainError err)) {
+        Result<GatewayTeardownResult, DomainError> gwStopRes = request.all()
+            ? gatewayShell.stopManagedGateway(project, request.gracefulTimeout())
+            : gatewayShell.observeRunningGateway(project);
+        if (gwStopRes instanceof Result.Err<GatewayTeardownResult, DomainError>(DomainError err)) {
             return Result.err(err);
         }
-        GatewayStopResult gwStop = ((Result.Ok<GatewayStopResult, DomainError>) gwStopRes).value();
-        return Result.ok(new StopResult(outcomes, gwStop.outcome(), gwStop.pid()));
+        GatewayTeardownResult gwStop = ((Result.Ok<GatewayTeardownResult, DomainError>) gwStopRes).value();
+        return Result.ok(new StopResult(outcomes, mapGatewayOutcome(gwStop.outcome()), gwStop.pid()));
     }
 
-    private Result<GatewayStopResult, DomainError> handleGatewayOnStop(Project project, StopRequest request) {
-        Result<Optional<ManagedProcessRecord>, DomainError> gwRecRes =
-            stateStore.readManagedProcess(project.name(), ProcessKey.gateway());
-        if (gwRecRes instanceof Result.Err<Optional<ManagedProcessRecord>, DomainError>(DomainError err)) {
-            return Result.err(err);
-        }
-        Optional<ManagedProcessRecord> gwRec = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) gwRecRes).value();
-
-        if (!request.all()) {
-            if (gwRec.isPresent() && processRunner.isAlive(gwRec.get().pid())) {
-                return Result.ok(new GatewayStopResult(GatewayStopOutcome.LEFT_RUNNING, Optional.of(gwRec.get().pid())));
-            }
-            if (project.gateway().isPresent()) {
-                Result<DiscoveryContext, DomainError> gwDiscRes = discoverySupport.discoverGateway(project.name(), project.gateway().get());
-                if (gwDiscRes instanceof Result.Ok<DiscoveryContext, DomainError>(DiscoveryContext ctx)
-                    && ctx.discovery().ownership() != Ownership.NONE
-                    && ctx.discovery().health() != HealthState.CRASHED) {
-                    return Result.ok(new GatewayStopResult(GatewayStopOutcome.LEFT_RUNNING, ctx.discovery().pid()));
-                }
-            }
-            return Result.ok(new GatewayStopResult(GatewayStopOutcome.NOT_RUNNING, Optional.empty()));
-        }
-
-        if (gwRec.isPresent()) {
-            ManagedProcessRecord rec = gwRec.get();
-            boolean alive = processRunner.isAlive(rec.pid());
-            if (alive) {
-                Result<procomp.core.common.Unit, DomainError> stopRes =
-                    processRunner.stopTree(rec.pid(), request.gracefulTimeout());
-                if (stopRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
-                    return Result.err(err);
-                }
-            }
-            Result<procomp.core.common.Unit, DomainError> delRes =
-                stateStore.deleteManagedProcess(project.name(), ProcessKey.gateway());
-            if (delRes instanceof Result.Err<procomp.core.common.Unit, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            return Result.ok(new GatewayStopResult(
-                alive ? GatewayStopOutcome.STOPPED_MANAGED : GatewayStopOutcome.CLEANED_CRASHED,
-                Optional.of(rec.pid())
-            ));
-        }
-
-        if (project.gateway().isPresent()) {
-            Result<DiscoveryContext, DomainError> gwDiscRes = discoverySupport.discoverGateway(project.name(), project.gateway().get());
-            if (gwDiscRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            DiscoveryResult disc = ((Result.Ok<DiscoveryContext, DomainError>) gwDiscRes).value().discovery();
-            if (disc.ownership() == Ownership.UNMANAGED || disc.ownership() == Ownership.CONFLICT) {
-                return Result.ok(new GatewayStopResult(GatewayStopOutcome.SPARED_NON_MANAGED, disc.pid()));
-            }
-        }
-        return Result.ok(new GatewayStopResult(GatewayStopOutcome.NOT_RUNNING, Optional.empty()));
+    private static GatewayStopOutcome mapGatewayOutcome(GatewayTeardownOutcome outcome) {
+        return switch (outcome) {
+            case LEFT_RUNNING -> GatewayStopOutcome.LEFT_RUNNING;
+            case STOPPED_MANAGED -> GatewayStopOutcome.STOPPED_MANAGED;
+            case CLEANED_CRASHED -> GatewayStopOutcome.CLEANED_CRASHED;
+            case SPARED_NON_MANAGED -> GatewayStopOutcome.SPARED_NON_MANAGED;
+            case NOT_RUNNING -> GatewayStopOutcome.NOT_RUNNING;
+        };
     }
 
     private Result<List<ServiceDefinition>, DomainError> resolveStartTargets(
@@ -529,7 +458,7 @@ public final class ProcessShell {
     private Result<LaunchPlan, DomainError> prepareLaunchPlan(String projectName, ServiceDefinition service) {
         if (service.repository().isPresent()) {
             Path repoRoot = service.repository().get().root();
-            if (!workspaceFiles.directoryExists(repoRoot)) {
+            if (!projectFiles.directoryExists(repoRoot)) {
                 return Result.err(DomainError.of(
                     "REPOSITORY_NOT_FOUND",
                     "Local Repository directory for service '" + service.name() + "' does not exist: " + repoRoot,
@@ -537,14 +466,14 @@ public final class ProcessShell {
                 ));
             }
         }
-        if (!workspaceFiles.directoryExists(service.workingDir())) {
+        if (!projectFiles.directoryExists(service.workingDir())) {
             return Result.err(DomainError.of(
                 "WORKING_DIR_NOT_FOUND",
                 "Working directory for service '" + service.name() + "' does not exist: " + service.workingDir(),
                 Map.of("service", service.name(), "workingDir", service.workingDir().toString())
             ));
         }
-        Result<Optional<ArtifactInfo>, DomainError> artRes = discoverySupport.findLatestArtifact(service);
+        Result<Optional<ArtifactInfo>, DomainError> artRes = lifecycleSupport.findLatestArtifact(service);
         if (artRes instanceof Result.Err<Optional<ArtifactInfo>, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -569,7 +498,7 @@ public final class ProcessShell {
 
     private static DomainError conflictError(List<InspectionReport> conflicts) {
         InspectionReport first = conflicts.get(0);
-        Map<String, String> details = TargetDiscoverySupport.conflictDetails(first, "service");
+        Map<String, String> details = TargetLifecycleSupport.conflictDetails(first, "service");
         if (conflicts.size() > 1) {
             details.put("allConflicts", conflicts.stream().map(InspectionReport::service).collect(Collectors.joining(", ")));
         }
@@ -580,8 +509,8 @@ public final class ProcessShell {
         first.pid().ifPresent(p -> msg.append(": occupied by PID ").append(p));
         first.commandLine().ifPresent(c -> msg.append(" [").append(c).append("]"));
         msg.append(". No processes were spawned and Routing Table was not modified. ");
-        msg.append("Inspect with 'procomp inspect ").append(first.service())
-            .append("' or kill with 'procomp stop ").append(first.service()).append(" --kill-conflict'.");
+        msg.append("Run Inspection on '").append(first.service())
+            .append("' for details, or stop the Conflict Process with explicit consent.");
         return DomainError.of("PORT_CONFLICT", msg.toString(), details);
     }
 
@@ -708,6 +637,4 @@ public final class ProcessShell {
             Objects.requireNonNull(gatewayPid, "gatewayPid must not be null");
         }
     }
-
-    private record GatewayStopResult(GatewayStopOutcome outcome, Optional<Long> pid) {}
 }

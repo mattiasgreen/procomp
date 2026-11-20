@@ -30,5 +30,16 @@ public final class ResultTest {
         Assert.assertEquals("CONFIG_INVALID", actual.code(), "error code");
         Assert.assertEquals("Invalid config", actual.message(), "error message");
         Assert.assertEquals("project", actual.details().get("field"), "error details");
+
+        Result<String, DomainError> castErr = res.castError();
+        Assert.assertEquals(error, Assert.assertErr(castErr, "castError preserves Err"), "castError error");
+
+        boolean threw = false;
+        try {
+            Result.ok(1).castError();
+        } catch (IllegalStateException expected) {
+            threw = true;
+        }
+        Assert.assertTrue(threw, "castError on Ok throws IllegalStateException");
     }
 }

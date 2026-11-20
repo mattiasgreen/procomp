@@ -2,8 +2,6 @@ package procomp.shell;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
-import procomp.core.gateway.GatewayDriftReport;
-import procomp.core.gateway.GatewaySyncStatus;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.Ownership;
@@ -17,8 +15,8 @@ import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -43,10 +41,10 @@ public final class StatusShell {
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock
     ) {
-        this(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, ProgressObserver.noop());
+        this(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, ProgressObserver.noop());
     }
 
     public StatusShell(
@@ -54,14 +52,14 @@ public final class StatusShell {
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer
     ) {
         this(
             new RoutingShell(stateStore),
-            new ProcessShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer),
-            new GatewayShell(stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer),
+            new ProcessShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
+            new GatewayShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
             clock
         );
     }
@@ -146,63 +144,21 @@ public final class StatusShell {
         }
     }
 
-    public record GatewaySummary(
-        boolean configured,
-        Optional<GatewayStatusReport> report
-    ) {
+    public record GatewaySummary(Optional<GatewayStatusReport> report) {
         public GatewaySummary {
             Objects.requireNonNull(report, "report must not be null");
-            if (configured != report.isPresent()) {
-                throw new IllegalArgumentException("configured must match report presence");
-            }
         }
 
         public static GatewaySummary notConfigured() {
-            return new GatewaySummary(false, Optional.empty());
+            return new GatewaySummary(Optional.empty());
         }
 
         public static GatewaySummary of(GatewayStatusReport report) {
-            return new GatewaySummary(true, Optional.of(Objects.requireNonNull(report, "report must not be null")));
+            return new GatewaySummary(Optional.of(Objects.requireNonNull(report, "report must not be null")));
         }
 
-        public Optional<String> type() {
-            return report.map(r -> r.gateway().type());
-        }
-
-        public Optional<Integer> port() {
-            return report.map(r -> r.gateway().port());
-        }
-
-        public Optional<String> adminUrl() {
-            return report.map(r -> r.gateway().adminUrl());
-        }
-
-        public Optional<Ownership> ownership() {
-            return report.map(r -> r.discovery().ownership());
-        }
-
-        public Optional<String> provenance() {
-            return report.flatMap(r -> r.discovery().provenance());
-        }
-
-        public Optional<HealthState> health() {
-            return report.map(r -> r.discovery().health());
-        }
-
-        public Optional<Long> pid() {
-            return report.flatMap(r -> r.discovery().pid());
-        }
-
-        public Optional<Duration> uptime() {
-            return report.flatMap(GatewayStatusReport::uptime);
-        }
-
-        public Optional<GatewayDriftReport> drift() {
-            return report.map(GatewayStatusReport::drift);
-        }
-
-        public Optional<GatewaySyncStatus> syncStatus() {
-            return report.map(r -> r.drift().syncStatus());
+        public boolean configured() {
+            return report.isPresent();
         }
     }
 

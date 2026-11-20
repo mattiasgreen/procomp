@@ -62,7 +62,7 @@ public final class ProjectResolver {
             "catalog.path"
         );
         if (expanded.isErr()) {
-            return castErr(expanded);
+            return expanded.castError();
         }
         Path resolved = configDir.resolve(okVal(expanded)).normalize();
         return Result.ok(Optional.of(resolved));
@@ -77,7 +77,7 @@ public final class ProjectResolver {
     ) {
         Result<ResolutionPlan, DomainError> planRes = planResolution(configPath, rawConfig, catalogServices);
         if (planRes.isErr()) {
-            return castErr(planRes);
+            return planRes.castError();
         }
         ResolutionPlan plan = okVal(planRes);
         for (EnvFileTarget target : plan.allEnvFileTargets()) {
@@ -112,7 +112,7 @@ public final class ProjectResolver {
         for (int i = 0; i < rawConfig.envFiles().size(); i++) {
             EnvFileSpec spec = rawConfig.envFiles().get(i);
             Result<String, DomainError> pRes = TemplateExpander.expandScalar(spec.path(), baseVars, Set.of(), "envFiles[" + i + "]");
-            if (pRes.isErr()) return castErr(pRes);
+            if (pRes.isErr()) return pRes.castError();
             Path resolved = configDir.resolve(okVal(pRes)).normalize();
             topEnvTargets.add(new EnvFileTarget(resolved, spec.optional(), "envFiles[" + i + "]"));
         }
@@ -142,7 +142,7 @@ public final class ProjectResolver {
             }
 
             Result<Optional<RepositoryRef>, DomainError> repoRes = deriveRepository(svcName, svc, configDir, reposRoot, baseVars);
-            if (repoRes.isErr()) return castErr(repoRes);
+            if (repoRes.isErr()) return repoRes.castError();
             Optional<RepositoryRef> repoRef = okVal(repoRes);
 
             Map<String, VarValue> effectiveVars = new LinkedHashMap<>(rawConfig.defaults().vars());
@@ -156,7 +156,7 @@ public final class ProjectResolver {
             Result<Path, DomainError> wdRes = resolveServiceWorkingDir(
                 svcName, svc, runtimeCfg, rawConfig.defaults(), repoRef, configDir, effectiveVars
             );
-            if (wdRes.isErr()) return castErr(wdRes);
+            if (wdRes.isErr()) return wdRes.castError();
             Path workingDir = okVal(wdRes);
 
             List<EnvFileTarget> svcEnvTargets = new ArrayList<>();
@@ -164,7 +164,7 @@ public final class ProjectResolver {
                 EnvFileSpec spec = svc.envFiles().get(i);
                 String ctx = "services." + svcName + ".envFiles[" + i + "]";
                 Result<String, DomainError> pRes = TemplateExpander.expandScalar(spec.path(), effectiveVars, Set.of(), ctx);
-                if (pRes.isErr()) return castErr(pRes);
+                if (pRes.isErr()) return pRes.castError();
                 Path resolved = workingDir.resolve(okVal(pRes)).normalize();
                 svcEnvTargets.add(new EnvFileTarget(resolved, spec.optional(), ctx));
             }
@@ -185,7 +185,7 @@ public final class ProjectResolver {
         RawProjectConfig rawConfig = plan.rawConfig();
 
         Result<Map<Path, Map<String, String>>, DomainError> parsedEnvFilesRes = parseAllLoadedEnvFiles(plan, loadedEnvFiles);
-        if (parsedEnvFilesRes.isErr()) return castErr(parsedEnvFilesRes);
+        if (parsedEnvFilesRes.isErr()) return parsedEnvFilesRes.castError();
         Map<Path, Map<String, String>> parsedEnvFiles = okVal(parsedEnvFilesRes);
 
         Map<String, String> topEnvFileOverlay = new LinkedHashMap<>();
@@ -196,26 +196,29 @@ public final class ProjectResolver {
             }
         }
 
-        // Fail fast on unset ${env:VAR} even if a default or runtime has no referencing services
-        Result<procomp.core.common.Unit, DomainError> defaultEnvCheck = validateHostEnvRefs(
-            rawConfig.defaults().env(), hostEnv, "defaults.env"
+        // Fail fast on unset ${env:VAR} and undefined {{var}} templates even if defaults or runtimes are overridden/unused
+        Map<String, VarValue> validationVars = buildTemplateValidationVars(plan);
+        Result<procomp.core.common.Unit, DomainError> defaultsCheck = validateDefaultsTemplates(
+            rawConfig.defaults(), validationVars, hostEnv
         );
-        if (defaultEnvCheck.isErr()) return castErr(defaultEnvCheck);
+        if (defaultsCheck.isErr()) return defaultsCheck.castError();
 
         Map<String, RuntimeDefinition> resolvedRuntimes = new LinkedHashMap<>();
         for (Map.Entry<String, RawProjectConfig.RawRuntimeConfig> entry : rawConfig.runtimes().entrySet()) {
             String rtName = entry.getKey();
             RawProjectConfig.RawRuntimeConfig rt = entry.getValue();
-            Result<Map<String, String>, DomainError> rtEnvRes = expandHostEnvMap(rt.env(), hostEnv, "runtimes." + rtName + ".env");
-            if (rtEnvRes.isErr()) return castErr(rtEnvRes);
+            Result<Map<String, String>, DomainError> rtEnvRes = validateRuntimeTemplates(
+                rtName, rt, validationVars, hostEnv
+            );
+            if (rtEnvRes.isErr()) return rtEnvRes.castError();
             resolvedRuntimes.put(rtName, new RuntimeDefinition(
-                rtName, rt.command(), rt.healthPath(), rt.artifactGlob(),
+                rtName, rt.command(), normalizeHealthPath(rt.healthPath()), rt.artifactGlob(),
                 rt.artifactExclude(), rt.workingDir(), SecretEnv.of(okVal(rtEnvRes))
             ));
         }
 
         Result<Optional<GatewayDefinition>, DomainError> gwRes = resolveGateway(plan, topEnvFileOverlay, hostEnv);
-        if (gwRes.isErr()) return castErr(gwRes);
+        if (gwRes.isErr()) return gwRes.castError();
         Optional<GatewayDefinition> gateway = okVal(gwRes);
 
         Map<String, ServiceDefinition> services = new LinkedHashMap<>();
@@ -225,7 +228,7 @@ public final class ProjectResolver {
             Result<ServiceDefinition, DomainError> svcRes = resolveService(
                 draft, rawConfig, parsedEnvFiles, topEnvFileOverlay, hostEnv
             );
-            if (svcRes.isErr()) return castErr(svcRes);
+            if (svcRes.isErr()) return svcRes.castError();
             ServiceDefinition svc = okVal(svcRes);
             services.put(svc.name(), svc);
 
@@ -323,20 +326,20 @@ public final class ProjectResolver {
         Result<Optional<String>, DomainError> artifactGlobRes = expandOptionalScalar(
             rt.artifactGlob(), vars, Set.of(), "runtimes." + rtName + ".artifactGlob"
         );
-        if (artifactGlobRes.isErr()) return castErr(artifactGlobRes);
+        if (artifactGlobRes.isErr()) return artifactGlobRes.castError();
         Optional<String> artifactGlob = okVal(artifactGlobRes);
 
         Set<String> deferredCmdVars = artifactGlob.isPresent() ? Set.of("artifact") : Set.of();
         Result<List<String>, DomainError> cmdRes = TemplateExpander.expandArgv(
             rt.command(), vars, deferredCmdVars, "services." + name + ".command"
         );
-        if (cmdRes.isErr()) return castErr(cmdRes);
+        if (cmdRes.isErr()) return cmdRes.castError();
 
         Optional<String> rawHealth = svc.healthPath().isPresent() ? svc.healthPath() : rt.healthPath();
         Result<Optional<String>, DomainError> healthRes = expandOptionalScalar(
             rawHealth, vars, Set.of(), "services." + name + ".healthPath"
         );
-        if (healthRes.isErr()) return castErr(healthRes);
+        if (healthRes.isErr()) return healthRes.castError();
 
         String rawProxy = svc.proxyPath()
             .or(() -> rawConfig.defaults().proxyPathTemplate())
@@ -344,7 +347,7 @@ public final class ProjectResolver {
         Result<String, DomainError> proxyRes = TemplateExpander.expandScalar(
             rawProxy, vars, Set.of(), "services." + name + ".proxyPath"
         );
-        if (proxyRes.isErr()) return castErr(proxyRes);
+        if (proxyRes.isErr()) return proxyRes.castError();
         String proxyPath = okVal(proxyRes);
         if (proxyPath.isBlank()) {
             return Result.err(DomainError.of(
@@ -363,7 +366,7 @@ public final class ProjectResolver {
         Result<Optional<String>, DomainError> remoteUrlRes = expandOptionalScalar(
             rawRemoteUrl, vars, Set.of(), "services." + name + ".remoteUrl"
         );
-        if (remoteUrlRes.isErr()) return castErr(remoteUrlRes);
+        if (remoteUrlRes.isErr()) return remoteUrlRes.castError();
 
         Map<String, String> envFromFiles = new LinkedHashMap<>(topEnvFileOverlay);
         for (EnvFileTarget target : draft.serviceEnvFiles()) {
@@ -381,9 +384,9 @@ public final class ProjectResolver {
         for (Map.Entry<String, String> entry : configEnvLayer.entrySet()) {
             String ctx = "services." + name + ".env." + entry.getKey();
             Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(entry.getValue(), hostEnv, ctx);
-            if (hostExpanded.isErr()) return castErr(hostExpanded);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
             Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(okVal(hostExpanded), vars, Set.of(), ctx);
-            if (tplExpanded.isErr()) return castErr(tplExpanded);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
             finalEnv.put(entry.getKey(), okVal(tplExpanded));
         }
 
@@ -393,7 +396,7 @@ public final class ProjectResolver {
             rtName,
             draft.repository(),
             draft.workingDir(),
-            okVal(healthRes),
+            normalizeHealthPath(okVal(healthRes)),
             proxyPath,
             okVal(remoteUrlRes),
             artifactGlob,
@@ -421,36 +424,36 @@ public final class ProjectResolver {
         Result<List<String>, DomainError> cmdRes = TemplateExpander.expandArgv(
             gw.command(), gwVars, Set.of(), "gateway.command"
         );
-        if (cmdRes.isErr()) return castErr(cmdRes);
+        if (cmdRes.isErr()) return cmdRes.castError();
 
         Optional<Path> workingDir = Optional.empty();
         if (gw.workingDir().isPresent()) {
             Result<String, DomainError> wdRes = TemplateExpander.expandScalar(
                 gw.workingDir().get(), gwVars, Set.of(), "gateway.workingDir"
             );
-            if (wdRes.isErr()) return castErr(wdRes);
+            if (wdRes.isErr()) return wdRes.castError();
             workingDir = Optional.of(plan.configDir().resolve(okVal(wdRes)).normalize());
         }
 
         Result<Optional<String>, DomainError> healthRes = expandOptionalScalar(
             gw.healthPath(), gwVars, Set.of(), "gateway.healthPath"
         );
-        if (healthRes.isErr()) return castErr(healthRes);
+        if (healthRes.isErr()) return healthRes.castError();
 
         Map<String, String> gwEnv = new LinkedHashMap<>(topEnvFileOverlay);
         for (Map.Entry<String, String> entry : gw.env().entrySet()) {
             String ctx = "gateway.env." + entry.getKey();
             Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(entry.getValue(), hostEnv, ctx);
-            if (hostExpanded.isErr()) return castErr(hostExpanded);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
             Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(okVal(hostExpanded), gwVars, Set.of(), ctx);
-            if (tplExpanded.isErr()) return castErr(tplExpanded);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
             gwEnv.put(entry.getKey(), okVal(tplExpanded));
         }
 
         return Result.ok(Optional.of(new GatewayDefinition(
             gw.type(),
             gw.port(),
-            okVal(healthRes),
+            normalizeHealthPath(okVal(healthRes)),
             okVal(cmdRes),
             workingDir,
             SecretEnv.of(gwEnv)
@@ -471,7 +474,7 @@ public final class ProjectResolver {
                 continue;
             }
             Result<Map<String, String>, DomainError> res = EnvFileParser.parse(target.path().toString(), content);
-            if (res.isErr()) return castErr(res);
+            if (res.isErr()) return res.castError();
             parsed.put(target.path(), okVal(res));
         }
         return Result.ok(parsed);
@@ -530,7 +533,7 @@ public final class ProjectResolver {
             Result<String, DomainError> expanded = TemplateExpander.expandScalar(
                 svc.repository().get(), baseVars, Set.of(), "services." + svcName + ".repository"
             );
-            if (expanded.isErr()) return castErr(expanded);
+            if (expanded.isErr()) return expanded.castError();
             Path repoPath = configDir.resolve(okVal(expanded)).normalize();
             return Result.ok(Optional.of(new RepositoryRef(repoPath, svc.repositoryUrl())));
         }
@@ -543,7 +546,7 @@ public final class ProjectResolver {
                 ));
             }
             Result<String, DomainError> basenameRes = extractRepoBasename(svc.repositoryUrl().get(), svcName);
-            if (basenameRes.isErr()) return castErr(basenameRes);
+            if (basenameRes.isErr()) return basenameRes.castError();
             Path derived = reposRoot.get().resolve(okVal(basenameRes)).normalize();
             return Result.ok(Optional.of(new RepositoryRef(derived, svc.repositoryUrl())));
         }
@@ -597,38 +600,95 @@ public final class ProjectResolver {
         Result<String, DomainError> expanded = TemplateExpander.expandScalar(
             template.get(), effectiveVars, Set.of(), "services." + svcName + ".workingDir"
         );
-        if (expanded.isErr()) return castErr(expanded);
+        if (expanded.isErr()) return expanded.castError();
         return Result.ok(configDir.resolve(okVal(expanded)).normalize());
     }
 
-    private static Result<procomp.core.common.Unit, DomainError> validateHostEnvRefs(
-        Map<String, String> envMap,
-        Map<String, String> hostEnv,
-        String context
-    ) {
-        for (Map.Entry<String, String> entry : envMap.entrySet()) {
-            Result<String, DomainError> res = EnvFileParser.expandHostEnvRefs(
-                entry.getValue(), hostEnv, context + "." + entry.getKey()
-            );
-            if (res.isErr()) return castErr(res);
+    private static Map<String, VarValue> buildTemplateValidationVars(ResolutionPlan plan) {
+        Map<String, VarValue> vars = new LinkedHashMap<>(plan.rawConfig().defaults().vars());
+        for (ServiceDraft draft : plan.serviceDrafts()) {
+            vars.putAll(draft.mergedConfig().vars());
         }
+        vars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
+        plan.repositoriesRoot().ifPresent(p -> vars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        vars.put("service", new VarValue.Scalar("service"));
+        vars.put("port", new VarValue.Scalar("0"));
+        vars.put("repository", new VarValue.Scalar(plan.configDir().toString()));
+        vars.put("artifact", new VarValue.Scalar("artifact"));
+        return vars;
+    }
+
+    private static Result<procomp.core.common.Unit, DomainError> validateDefaultsTemplates(
+        RawProjectConfig.RawDefaultsConfig defaults,
+        Map<String, VarValue> validationVars,
+        Map<String, String> hostEnv
+    ) {
+        Result<Optional<String>, DomainError> proxyCheck = expandOptionalScalar(
+            defaults.proxyPathTemplate(), validationVars, Set.of(), "defaults.proxyPathTemplate"
+        );
+        if (proxyCheck.isErr()) return proxyCheck.castError();
+        Result<Optional<String>, DomainError> remoteCheck = expandOptionalScalar(
+            defaults.remoteUrlTemplate(), validationVars, Set.of(), "defaults.remoteUrlTemplate"
+        );
+        if (remoteCheck.isErr()) return remoteCheck.castError();
+        Result<Optional<String>, DomainError> wdCheck = expandOptionalScalar(
+            defaults.workingDir(), validationVars, Set.of(), "defaults.workingDir"
+        );
+        if (wdCheck.isErr()) return wdCheck.castError();
+        Result<Map<String, String>, DomainError> envCheck = expandAndValidateEnvMap(
+            defaults.env(), validationVars, hostEnv, "defaults.env"
+        );
+        if (envCheck.isErr()) return envCheck.castError();
         return Result.ok(procomp.core.common.Unit.VALUE);
     }
 
-    private static Result<Map<String, String>, DomainError> expandHostEnvMap(
+    private static Result<Map<String, String>, DomainError> validateRuntimeTemplates(
+        String rtName,
+        RawProjectConfig.RawRuntimeConfig rt,
+        Map<String, VarValue> validationVars,
+        Map<String, String> hostEnv
+    ) {
+        String prefix = "runtimes." + rtName;
+        Result<List<String>, DomainError> cmdCheck = TemplateExpander.expandArgv(
+            rt.command(), validationVars, Set.of(), prefix + ".command"
+        );
+        if (cmdCheck.isErr()) return cmdCheck.castError();
+        Result<Optional<String>, DomainError> healthCheck = expandOptionalScalar(
+            rt.healthPath(), validationVars, Set.of(), prefix + ".healthPath"
+        );
+        if (healthCheck.isErr()) return healthCheck.castError();
+        Result<Optional<String>, DomainError> globCheck = expandOptionalScalar(
+            rt.artifactGlob(), validationVars, Set.of(), prefix + ".artifactGlob"
+        );
+        if (globCheck.isErr()) return globCheck.castError();
+        Result<Optional<String>, DomainError> wdCheck = expandOptionalScalar(
+            rt.workingDir(), validationVars, Set.of(), prefix + ".workingDir"
+        );
+        if (wdCheck.isErr()) return wdCheck.castError();
+        return expandAndValidateEnvMap(rt.env(), validationVars, hostEnv, prefix + ".env");
+    }
+
+    private static Result<Map<String, String>, DomainError> expandAndValidateEnvMap(
         Map<String, String> envMap,
+        Map<String, VarValue> validationVars,
         Map<String, String> hostEnv,
         String context
     ) {
         Map<String, String> out = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : envMap.entrySet()) {
-            Result<String, DomainError> res = EnvFileParser.expandHostEnvRefs(
-                entry.getValue(), hostEnv, context + "." + entry.getKey()
-            );
-            if (res.isErr()) return castErr(res);
-            out.put(entry.getKey(), okVal(res));
+            String fieldCtx = context + "." + entry.getKey();
+            Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(entry.getValue(), hostEnv, fieldCtx);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
+            String val = okVal(hostExpanded);
+            Result<String, DomainError> tplCheck = TemplateExpander.expandScalar(val, validationVars, Set.of(), fieldCtx);
+            if (tplCheck.isErr()) return tplCheck.castError();
+            out.put(entry.getKey(), val);
         }
         return Result.ok(out);
+    }
+
+    private static Optional<String> normalizeHealthPath(Optional<String> raw) {
+        return raw.map(String::trim).filter(s -> !s.isEmpty());
     }
 
     private static Result<Optional<String>, DomainError> expandOptionalScalar(
@@ -641,13 +701,6 @@ public final class ProjectResolver {
             return Result.ok(Optional.empty());
         }
         return TemplateExpander.expandScalar(raw.get(), vars, deferred, context).map(Optional::of);
-    }
-
-    private static <T, U> Result<U, DomainError> castErr(Result<T, DomainError> err) {
-        return err.fold(
-            ignored -> { throw new IllegalStateException("Expected Err result"); },
-            Result::err
-        );
     }
 
     private static <T> T okVal(Result<T, DomainError> res) {

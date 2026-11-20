@@ -31,18 +31,18 @@ public final class ProjectLoader {
     public Result<Project, DomainError> load(Optional<Path> configOverride) {
         Result<Path, DomainError> pathRes = discoverConfigPath(configOverride);
         if (pathRes.isErr()) {
-            return castErr(pathRes);
+            return pathRes.castError();
         }
         Path configPath = okVal(pathRes);
 
         Result<String, DomainError> rawJsonRes = configSource.readFile(configPath);
         if (rawJsonRes.isErr()) {
-            return castErr(rawJsonRes);
+            return rawJsonRes.castError();
         }
 
         Result<RawProjectConfig, DomainError> rawCfgRes = ProjectConfigParser.parse(okVal(rawJsonRes));
         if (rawCfgRes.isErr()) {
-            return castErr(rawCfgRes);
+            return rawCfgRes.castError();
         }
         RawProjectConfig rawConfig = okVal(rawCfgRes);
 
@@ -51,7 +51,7 @@ public final class ProjectLoader {
         if (rawConfig.catalog().isPresent()) {
             Result<Optional<Path>, DomainError> catPathRes = ProjectResolver.resolveCatalogPath(configDir, rawConfig);
             if (catPathRes.isErr()) {
-                return castErr(catPathRes);
+                return catPathRes.castError();
             }
             Path catalogPath = okVal(catPathRes).orElseThrow();
             if (!configSource.isRegularFile(catalogPath)) {
@@ -63,12 +63,12 @@ public final class ProjectLoader {
             }
             Result<String, DomainError> catJsonRes = configSource.readFile(catalogPath);
             if (catJsonRes.isErr()) {
-                return castErr(catJsonRes);
+                return catJsonRes.castError();
             }
             Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> parsedCatRes =
                 CatalogParser.parse(rawConfig.catalog().get(), okVal(catJsonRes));
             if (parsedCatRes.isErr()) {
-                return castErr(parsedCatRes);
+                return parsedCatRes.castError();
             }
             catalogServices = okVal(parsedCatRes);
         }
@@ -76,7 +76,7 @@ public final class ProjectLoader {
         Result<ProjectResolver.ResolutionPlan, DomainError> planRes =
             ProjectResolver.planResolution(configPath, rawConfig, catalogServices);
         if (planRes.isErr()) {
-            return castErr(planRes);
+            return planRes.castError();
         }
         ProjectResolver.ResolutionPlan plan = okVal(planRes);
 
@@ -97,7 +97,7 @@ public final class ProjectLoader {
             }
             Result<String, DomainError> envContentRes = configSource.readFile(target.path());
             if (envContentRes.isErr()) {
-                return castErr(envContentRes);
+                return envContentRes.castError();
             }
             loadedEnvFiles.put(target.path(), okVal(envContentRes));
         }
@@ -113,7 +113,7 @@ public final class ProjectLoader {
             if (!configSource.isRegularFile(resolved)) {
                 return Result.err(DomainError.of(
                     "CONFIG_NOT_FOUND",
-                    "Config file not found at --config path '" + resolved + "'",
+                    "Config file not found at explicit override path '" + resolved + "'",
                     Map.of("path", resolved.toString())
                 ));
             }
@@ -147,13 +147,6 @@ public final class ProjectLoader {
             "No " + CONFIG_FILENAME + " found in '" + cwd + "' or any parent directory",
             Map.of("startDir", cwd.toString())
         ));
-    }
-
-    private static <T, U> Result<U, DomainError> castErr(Result<T, DomainError> err) {
-        return err.fold(
-            ignored -> { throw new IllegalStateException("Expected Err result"); },
-            Result::err
-        );
     }
 
     private static <T> T okVal(Result<T, DomainError> res) {

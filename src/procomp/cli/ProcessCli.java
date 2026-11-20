@@ -22,8 +22,8 @@ import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
 
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -90,54 +90,28 @@ public final class ProcessCli {
 
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
-            switch (arg) {
-                case "-d", "--detach" -> detach = true;
-                case "--timeout" -> {
-                    if (i + 1 >= args.size()) {
-                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
-                    }
-                    Result<Duration, String> tRes = parsePositiveSeconds(args.get(++i));
-                    if (tRes instanceof Result.Err<Duration, String>(String msg)) {
-                        return Result.err(msg);
-                    }
-                    timeout = ((Result.Ok<Duration, String>) tRes).value();
+            if ("-d".equals(arg) || "--detach".equals(arg)) {
+                detach = true;
+            } else if (CliFormat.isTimeoutOption(arg)) {
+                Result<CliFormat.ParsedOption<Duration>, String> tRes = CliFormat.parseTimeoutOption(args, i);
+                if (tRes instanceof Result.Err<CliFormat.ParsedOption<Duration>, String>(String msg)) {
+                    return Result.err(msg);
                 }
-                default -> {
-                    if (arg.startsWith("--timeout=")) {
-                        Result<Duration, String> tRes = parsePositiveSeconds(arg.substring("--timeout=".length()));
-                        if (tRes instanceof Result.Err<Duration, String>(String msg)) {
-                            return Result.err(msg);
-                        }
-                        timeout = ((Result.Ok<Duration, String>) tRes).value();
-                    } else if (arg.startsWith("-")) {
-                        return Result.err(
-                            "Unknown option '" + arg + "' for 'start'. Usage: procomp start [service...] [-d|--detach] [--timeout <seconds>]"
-                        );
-                    } else {
-                        if (arg.isBlank()) {
-                            return Result.err("Service name must not be blank.");
-                        }
-                        services.add(arg);
-                    }
+                var opt = ((Result.Ok<CliFormat.ParsedOption<Duration>, String>) tRes).value();
+                timeout = opt.value();
+                i = opt.nextIndex();
+            } else if (arg.startsWith("-")) {
+                return Result.err(
+                    "Unknown option '" + arg + "' for 'start'. Usage: procomp start [service...] [-d|--detach] [--timeout <seconds>]"
+                );
+            } else {
+                if (arg.isBlank()) {
+                    return Result.err("Service name must not be blank.");
                 }
+                services.add(arg);
             }
         }
         return Result.ok(new Action.Start(services, detach, timeout));
-    }
-
-    static Result<Duration, String> parsePositiveSeconds(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return Result.err("Invalid --timeout value: must be a positive integer number of seconds.");
-        }
-        try {
-            long seconds = Long.parseLong(raw.trim());
-            if (seconds <= 0) {
-                return Result.err("Invalid --timeout value '" + raw + "': must be greater than 0 seconds.");
-            }
-            return Result.ok(Duration.ofSeconds(seconds));
-        } catch (NumberFormatException e) {
-            return Result.err("Invalid --timeout value '" + raw + "': must be a positive integer number of seconds.");
-        }
     }
 
     private static Result<Action, String> parseInspect(List<String> args) {
@@ -170,18 +144,18 @@ public final class ProcessCli {
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer,
         PrintWriter out,
         PrintWriter err
     ) {
-        if (processRunner == null || portScanner == null || httpClient == null || workspaceFiles == null) {
+        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
             err.println("Error: Process ports are not configured.");
             return 1;
         }
         ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, workspaceFiles, clock, observer
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
         );
         return switch (action) {
             case Action.Start(List<String> services, boolean detach, Duration timeout) -> {
@@ -305,6 +279,7 @@ public final class ProcessCli {
         out.println("Service:         " + report.service());
         out.println("Port:            " + report.port().map(Object::toString).orElse("-"));
         out.println("Desired Route:   " + report.desiredRoute().orElse("-"));
+        out.println("Live Route:      " + report.liveGatewayRoute().orElse("none (no Gateway configured)"));
         out.println("Owner:           " + report.ownership().name()
             + report.provenance().map(p -> " (" + p + ")").orElse(""));
         out.println("Health:          " + report.health().name());
@@ -313,6 +288,9 @@ public final class ProcessCli {
         out.println("Stale:           " + (report.stale() ? "YES" : "no"));
         out.println("RAM:             " + report.rssBytes().map(ProcessCli::formatBytes).orElse("-"));
         out.println("Command Line:    " + report.commandLine().orElse("-"));
+        if (!report.arguments().isEmpty()) {
+            out.println("Arguments:       " + String.join(" ", report.arguments()));
+        }
         if (report.parentChain().isEmpty()) {
             out.println("Parent Chain:    -");
         } else {

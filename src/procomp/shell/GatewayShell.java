@@ -19,11 +19,13 @@ import procomp.core.process.ProcessPlanner.StopAction;
 import procomp.core.project.GatewayDefinition;
 import procomp.core.project.Project;
 import procomp.core.routing.RoutingTable;
-import procomp.shell.TargetDiscoverySupport.DiscoveryContext;
+import procomp.shell.TargetLifecycleSupport.DiscoveryContext;
+import procomp.shell.TargetLifecycleSupport.HealthWaitTarget;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.HttpClient.HttpRequestData;
 import procomp.shell.ports.HttpClient.HttpResponseData;
+import procomp.shell.ports.ManagedProcessRecord;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProcessRunner;
@@ -31,15 +33,14 @@ import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
 import procomp.shell.ports.ProgressObserver;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
+import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
-import procomp.shell.ports.WorkspaceFiles;
 
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -56,18 +57,18 @@ public final class GatewayShell {
     private final StateStore stateStore;
     private final ProcessRunner processRunner;
     private final HttpClient httpClient;
-    private final WorkspaceFiles workspaceFiles;
+    private final ProjectFiles projectFiles;
     private final Clock clock;
     private final ProgressObserver observer;
     private final RoutingShell routingShell;
-    private final TargetDiscoverySupport discoverySupport;
+    private final TargetLifecycleSupport lifecycleSupport;
 
     public GatewayShell(
         StateStore stateStore,
         ProcessRunner processRunner,
         PortScanner portScanner,
         HttpClient httpClient,
-        WorkspaceFiles workspaceFiles,
+        ProjectFiles projectFiles,
         Clock clock,
         ProgressObserver observer
     ) {
@@ -75,11 +76,11 @@ public final class GatewayShell {
         this.processRunner = Objects.requireNonNull(processRunner, "processRunner must not be null");
         Objects.requireNonNull(portScanner, "portScanner must not be null");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient must not be null");
-        this.workspaceFiles = Objects.requireNonNull(workspaceFiles, "workspaceFiles must not be null");
+        this.projectFiles = Objects.requireNonNull(projectFiles, "projectFiles must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.observer = Objects.requireNonNull(observer, "observer must not be null");
         this.routingShell = new RoutingShell(stateStore);
-        this.discoverySupport = new TargetDiscoverySupport(stateStore, processRunner, portScanner, httpClient, workspaceFiles);
+        this.lifecycleSupport = new TargetLifecycleSupport(stateStore, processRunner, portScanner, httpClient, projectFiles);
     }
 
     /**
@@ -96,7 +97,7 @@ public final class GatewayShell {
         }
         GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
 
-        Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverGateway(project.name(), gateway);
+        Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverGateway(project.name(), gateway);
         if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -107,7 +108,7 @@ public final class GatewayShell {
             InspectionReport report = DiscoveryEngine.inspect(
                 preCtx.target(),
                 preCtx.discovery(),
-                preCtx.managedRecord().map(TargetDiscoverySupport::toManagedView),
+                preCtx.managedRecord().map(TargetLifecycleSupport::toManagedView),
                 Optional.empty(),
                 Optional.empty(),
                 clock.now()
@@ -126,7 +127,7 @@ public final class GatewayShell {
                 ));
             }
             Path workingDir = gateway.workingDir().orElse(project.configDir());
-            if (!workspaceFiles.directoryExists(workingDir)) {
+            if (!projectFiles.directoryExists(workingDir)) {
                 return Result.err(DomainError.of(
                     "WORKING_DIR_NOT_FOUND",
                     "Working directory for gateway does not exist: " + workingDir,
@@ -143,7 +144,7 @@ public final class GatewayShell {
                 stderrLog
             );
             Result<SpawnedProcess, DomainError> spawnRes =
-                discoverySupport.spawnAndRecord(project.name(), ProcessKey.gateway(), spawnReq, Optional.empty());
+                lifecycleSupport.spawnAndRecord(project.name(), ProcessKey.gateway(), spawnReq, Optional.empty());
             if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -169,17 +170,28 @@ public final class GatewayShell {
 
         DiscoveryResult finalDiscovery;
         if (request.detach() && action == StartAction.SPAWN) {
-            Result<DiscoveryContext, DomainError> postRes = discoverySupport.discoverGateway(project.name(), gateway);
+            Result<DiscoveryContext, DomainError> postRes = lifecycleSupport.discoverGateway(project.name(), gateway);
             if (postRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
             finalDiscovery = ((Result.Ok<DiscoveryContext, DomainError>) postRes).value().discovery();
         } else if (needWait) {
-            Result<DiscoveryResult, DomainError> waitRes = waitForGatewayHealthy(project.name(), gateway, request.timeout());
-            if (waitRes instanceof Result.Err<DiscoveryResult, DomainError>(DomainError err)) {
+            Result<Map<String, DiscoveryResult>, DomainError> waitRes = lifecycleSupport.waitUntilHealthy(
+                clock,
+                observer,
+                request.timeout(),
+                List.of(new HealthWaitTarget(
+                    "gateway",
+                    "target",
+                    "Gateway",
+                    "Gateway is HEALTHY",
+                    () -> lifecycleSupport.discoverGateway(project.name(), gateway)
+                ))
+            );
+            if (waitRes instanceof Result.Err<Map<String, DiscoveryResult>, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
-            finalDiscovery = ((Result.Ok<DiscoveryResult, DomainError>) waitRes).value();
+            finalDiscovery = ((Result.Ok<Map<String, DiscoveryResult>, DomainError>) waitRes).value().get("gateway");
         } else {
             finalDiscovery = preCtx.discovery();
         }
@@ -201,7 +213,7 @@ public final class GatewayShell {
         }
         GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
 
-        Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverGateway(project.name(), gateway);
+        Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverGateway(project.name(), gateway);
         if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -213,33 +225,17 @@ public final class GatewayShell {
             case ALREADY_STOPPED -> Result.ok(new GatewayStopResult(GatewayStopDisposition.ALREADY_STOPPED, Optional.empty()));
             case KILL_MANAGED -> {
                 long pid = disc.pid().orElseThrow();
-                if (disc.health() != HealthState.CRASHED) {
-                    Result<Unit, DomainError> stopRes = processRunner.stopTree(pid, request.gracefulTimeout());
-                    if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
-                        yield Result.err(err);
-                    }
-                }
-                Result<Unit, DomainError> delRes = stateStore.deleteManagedProcess(project.name(), ProcessKey.gateway());
-                if (delRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
-                    yield Result.err(err);
-                }
-                GatewayStopDisposition disp = disc.health() == HealthState.CRASHED
-                    ? GatewayStopDisposition.CLEANED_CRASHED
-                    : GatewayStopDisposition.STOPPED_MANAGED;
-                observer.onEvent(new ProgressEvent.StatusMessage(
-                    "gateway",
-                    disp == GatewayStopDisposition.CLEANED_CRASHED
-                        ? "Cleaned crashed Managed Gateway record (PID " + pid + ")"
-                        : "Stopped Managed Gateway (PID " + pid + ")"
-                ));
-                yield Result.ok(new GatewayStopResult(disp, Optional.of(pid)));
+                boolean alive = disc.health() != HealthState.CRASHED;
+                Result<GatewayStopDisposition, DomainError> stopRes =
+                    stopRecordedManagedGateway(project.name(), pid, alive, request.gracefulTimeout());
+                yield stopRes.map(disp -> new GatewayStopResult(disp, Optional.of(pid)));
             }
             case SPARE_UNMANAGED -> {
                 String pidText = disc.pid().map(p -> " (PID " + p + ")").orElse("");
                 String provText = disc.provenance().map(p -> " [" + p + "]").orElse("");
                 yield Result.err(DomainError.of(
                     "GATEWAY_UNMANAGED",
-                    "Cannot stop Unmanaged Gateway" + pidText + provText + ": procomp never kills processes it does not own.",
+                    "Cannot stop Unmanaged Gateway" + pidText + provText + ": Unmanaged Processes are never terminated.",
                     Map.of(
                         "port", Integer.toString(gateway.port()),
                         "pid", disc.pid().map(Object::toString).orElse("")
@@ -251,7 +247,7 @@ public final class GatewayShell {
                 yield Result.err(DomainError.of(
                     "GATEWAY_CONFLICT",
                     "Cannot stop Conflict process occupying Gateway port " + gateway.port() + pidText
-                        + ": procomp will not kill an unrecognized process.",
+                        + ": unrecognized Conflict Processes are not terminated.",
                     Map.of(
                         "port", Integer.toString(gateway.port()),
                         "pid", disc.pid().map(Object::toString).orElse("")
@@ -259,6 +255,93 @@ public final class GatewayShell {
                 ));
             }
         };
+    }
+
+    /**
+     * Observes whether any Gateway Process is currently running (used by {@link ProcessShell} when {@code all} is false).
+     */
+    Result<GatewayTeardownResult, DomainError> observeRunningGateway(Project project) {
+        Result<Optional<ManagedProcessRecord>, DomainError> gwRecRes =
+            stateStore.readManagedProcess(project.name(), ProcessKey.gateway());
+        if (gwRecRes instanceof Result.Err<Optional<ManagedProcessRecord>, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        Optional<ManagedProcessRecord> gwRec = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) gwRecRes).value();
+        if (gwRec.isPresent() && processRunner.isAlive(gwRec.get().pid())) {
+            return Result.ok(new GatewayTeardownResult(GatewayTeardownOutcome.LEFT_RUNNING, Optional.of(gwRec.get().pid())));
+        }
+        if (project.gateway().isPresent()) {
+            Result<DiscoveryContext, DomainError> gwDiscRes =
+                lifecycleSupport.discoverGateway(project.name(), project.gateway().get());
+            if (gwDiscRes instanceof Result.Ok<DiscoveryContext, DomainError>(DiscoveryContext ctx)
+                && ctx.discovery().ownership() != Ownership.NONE
+                && ctx.discovery().health() != HealthState.CRASHED) {
+                return Result.ok(new GatewayTeardownResult(GatewayTeardownOutcome.LEFT_RUNNING, ctx.discovery().pid()));
+            }
+        }
+        return Result.ok(new GatewayTeardownResult(GatewayTeardownOutcome.NOT_RUNNING, Optional.empty()));
+    }
+
+    /**
+     * Stops a Managed Gateway Process (or cleans a CRASHED record) if present, while sparing any
+     * non-Managed Gateway without failing (used by {@link ProcessShell} when {@code all} is true).
+     */
+    Result<GatewayTeardownResult, DomainError> stopManagedGateway(Project project, Duration gracefulTimeout) {
+        Result<Optional<ManagedProcessRecord>, DomainError> gwRecRes =
+            stateStore.readManagedProcess(project.name(), ProcessKey.gateway());
+        if (gwRecRes instanceof Result.Err<Optional<ManagedProcessRecord>, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        Optional<ManagedProcessRecord> gwRec = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) gwRecRes).value();
+        if (gwRec.isPresent()) {
+            ManagedProcessRecord rec = gwRec.get();
+            boolean alive = processRunner.isAlive(rec.pid());
+            Result<GatewayStopDisposition, DomainError> stopRes =
+                stopRecordedManagedGateway(project.name(), rec.pid(), alive, gracefulTimeout);
+            return stopRes.map(disp -> new GatewayTeardownResult(
+                disp == GatewayStopDisposition.STOPPED_MANAGED
+                    ? GatewayTeardownOutcome.STOPPED_MANAGED
+                    : GatewayTeardownOutcome.CLEANED_CRASHED,
+                Optional.of(rec.pid())
+            ));
+        }
+
+        if (project.gateway().isPresent()) {
+            Result<DiscoveryContext, DomainError> gwDiscRes =
+                lifecycleSupport.discoverGateway(project.name(), project.gateway().get());
+            if (gwDiscRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            DiscoveryResult disc = ((Result.Ok<DiscoveryContext, DomainError>) gwDiscRes).value().discovery();
+            if (disc.ownership() == Ownership.UNMANAGED || disc.ownership() == Ownership.CONFLICT) {
+                return Result.ok(new GatewayTeardownResult(GatewayTeardownOutcome.SPARED_NON_MANAGED, disc.pid()));
+            }
+        }
+        return Result.ok(new GatewayTeardownResult(GatewayTeardownOutcome.NOT_RUNNING, Optional.empty()));
+    }
+
+    private Result<GatewayStopDisposition, DomainError> stopRecordedManagedGateway(
+        String projectName,
+        long pid,
+        boolean alive,
+        Duration gracefulTimeout
+    ) {
+        Result<Unit, DomainError> stopRes = lifecycleSupport.stopManagedProcess(
+            projectName, ProcessKey.gateway(), pid, alive, gracefulTimeout
+        );
+        if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        GatewayStopDisposition disp = alive
+            ? GatewayStopDisposition.STOPPED_MANAGED
+            : GatewayStopDisposition.CLEANED_CRASHED;
+        observer.onEvent(new ProgressEvent.StatusMessage(
+            "gateway",
+            disp == GatewayStopDisposition.CLEANED_CRASHED
+                ? "Cleaned crashed Managed Gateway record (PID " + pid + ")"
+                : "Stopped Managed Gateway (PID " + pid + ")"
+        ));
+        return Result.ok(disp);
     }
 
     /**
@@ -273,7 +356,7 @@ public final class GatewayShell {
         }
         GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
 
-        Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverGateway(project.name(), gateway);
+        Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverGateway(project.name(), gateway);
         if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -322,7 +405,7 @@ public final class GatewayShell {
         }
         GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
 
-        Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverGateway(project.name(), gateway);
+        Result<DiscoveryContext, DomainError> discRes = lifecycleSupport.discoverGateway(project.name(), gateway);
         if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
             return Result.err(err);
         }
@@ -331,7 +414,7 @@ public final class GatewayShell {
             return Result.err(DomainError.of(
                 "GATEWAY_NOT_HEALTHY",
                 "Gateway is " + discovery.health().name() + " (" + discovery.ownership().name()
-                    + "); start it with 'procomp gateway start' before reconciling.",
+                    + "); Gateway must be HEALTHY before Reconciliation.",
                 Map.of("health", discovery.health().name(), "owner", discovery.ownership().name())
             ));
         }
@@ -522,61 +605,6 @@ public final class GatewayShell {
         return Result.ok(true);
     }
 
-    private Result<DiscoveryResult, DomainError> waitForGatewayHealthy(
-        String projectName,
-        GatewayDefinition gateway,
-        Duration timeout
-    ) {
-        Instant deadline = clock.now().plus(timeout);
-        while (true) {
-            Result<DiscoveryContext, DomainError> discRes = discoverySupport.discoverGateway(projectName, gateway);
-            if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
-            DiscoveryResult disc = ctx.discovery();
-
-            if (disc.health() == HealthState.CRASHED) {
-                return Result.err(DomainError.of(
-                    "PROCESS_CRASHED",
-                    "Gateway exited unexpectedly while starting"
-                        + disc.pid().map(p -> " (PID " + p + ")").orElse("")
-                        + ". Check logs: " + ctx.target().stdoutLog() + " / " + ctx.target().stderrLog(),
-                    Map.of(
-                        "target", "gateway",
-                        "pid", disc.pid().map(Object::toString).orElse(""),
-                        "stdoutLog", ctx.target().stdoutLog().toString(),
-                        "stderrLog", ctx.target().stderrLog().toString()
-                    )
-                ));
-            }
-            if (disc.ownership() == Ownership.NONE && disc.health() == HealthState.STOPPED) {
-                return Result.err(DomainError.of(
-                    "PROCESS_EXITED",
-                    "Reused Gateway process exited before becoming HEALTHY",
-                    Map.of("target", "gateway")
-                ));
-            }
-            if (disc.health() == HealthState.HEALTHY) {
-                observer.onEvent(new ProgressEvent.StatusMessage("gateway", "Gateway is HEALTHY"));
-                return Result.ok(disc);
-            }
-            if (!clock.now().isBefore(deadline)) {
-                return Result.err(DomainError.of(
-                    "START_TIMEOUT",
-                    "Timed out after " + timeout.toSeconds() + "s waiting for Gateway to become HEALTHY",
-                    Map.of("target", "gateway", "timeoutSeconds", Long.toString(timeout.toSeconds()))
-                ));
-            }
-            if (!clock.sleep(TargetDiscoverySupport.DEFAULT_STARTUP_POLL_INTERVAL)) {
-                return Result.err(DomainError.of(
-                    "INTERRUPTED",
-                    "Interrupted while waiting for Gateway to become HEALTHY"
-                ));
-            }
-        }
-    }
-
     private static Result<GatewayDefinition, DomainError> requireGateway(Project project) {
         if (project.gateway().isEmpty()) {
             return Result.err(DomainError.of(
@@ -589,7 +617,7 @@ public final class GatewayShell {
     }
 
     private static DomainError gatewayConflictError(InspectionReport report) {
-        Map<String, String> details = TargetDiscoverySupport.conflictDetails(report, "target");
+        Map<String, String> details = TargetLifecycleSupport.conflictDetails(report, "target");
         StringBuilder msg = new StringBuilder();
         msg.append("Port conflict on gateway");
         report.port().ifPresent(p -> msg.append(" (port ").append(p).append(")"));
@@ -598,6 +626,16 @@ public final class GatewayShell {
         msg.append(". No processes were spawned. Stop the conflicting process or change 'gateway.port' in procomp.json.");
         return DomainError.of("PORT_CONFLICT", msg.toString(), details);
     }
+
+    enum GatewayTeardownOutcome {
+        LEFT_RUNNING,
+        STOPPED_MANAGED,
+        CLEANED_CRASHED,
+        SPARED_NON_MANAGED,
+        NOT_RUNNING
+    }
+
+    record GatewayTeardownResult(GatewayTeardownOutcome outcome, Optional<Long> pid) {}
 
     public record GatewayStartRequest(boolean detach, Duration timeout) {
         public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);

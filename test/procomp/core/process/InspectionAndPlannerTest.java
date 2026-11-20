@@ -51,7 +51,7 @@ public final class InspectionAndPlannerTest {
             Optional.of(rec),
             Optional.empty(),
             Optional.of(proc),
-            new HealthProbe.HttpResult(200, "OK"),
+            new HealthCheck.HttpResult(200, "OK"),
             Optional.of(T1)
         ));
 
@@ -107,27 +107,27 @@ public final class InspectionAndPlannerTest {
         PortBinding binding = new PortBinding(9001, Optional.of(5501L), "127.0.0.1:9001");
 
         DiscoveryResult noneStopped = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.empty(), Optional.empty(), HealthProbe.None.INSTANCE, Optional.empty()
+            target, Optional.empty(), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty()
         ));
         DiscoveryResult managedHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthProbe.HttpResult(200, "OK"), Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
         ));
         DiscoveryResult managedStarting = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthProbe.HttpResult(503, "Unavailable"), Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(503, "Unavailable"), Optional.empty()
         ));
         DiscoveryResult managedCrashed = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthProbe.None.INSTANCE, Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty()
         ));
         DiscoveryResult unmanagedHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthProbe.HttpResult(200, "OK"), Optional.empty()
+            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
         ));
         DiscoveryResult unmanagedStarting = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthProbe.HttpFailure("refused"), Optional.empty()
+            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpFailure("refused"), Optional.empty()
         ));
         DiscoveryResult conflict = DiscoveryEngine.discover(new DiscoveryInput(
             target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(7777L), "127.0.0.1:9001")),
             Optional.of(new ObservedProcess(7777L, true, Optional.of(T0), Optional.of("python"), List.of(), List.of(), Optional.empty(), Optional.of("python"))),
-            new HealthProbe.HttpFailure("refused"), Optional.empty()
+            new HealthCheck.HttpFailure("refused"), Optional.empty()
         ));
 
         Assert.assertEquals(ProcessPlanner.StartAction.SPAWN, ProcessPlanner.planStart(noneStopped), "NONE -> SPAWN");

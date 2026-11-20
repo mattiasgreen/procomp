@@ -2,7 +2,7 @@ package procomp.fakes;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
-import procomp.shell.ports.WorkspaceFiles;
+import procomp.shell.ports.ProjectFiles;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -13,12 +13,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-public final class FakeWorkspaceFiles implements WorkspaceFiles {
+public final class FakeProjectFiles implements ProjectFiles {
 
     private final Set<Path> directories = new LinkedHashSet<>();
     private final Map<Path, Instant> files = new LinkedHashMap<>();
 
-    public FakeWorkspaceFiles withDirectory(Path dir) {
+    public FakeProjectFiles withDirectory(Path dir) {
         Path cur = dir.toAbsolutePath().normalize();
         while (cur != null) {
             directories.add(cur);
@@ -27,12 +27,12 @@ public final class FakeWorkspaceFiles implements WorkspaceFiles {
         return this;
     }
 
-    public FakeWorkspaceFiles removeDirectory(Path dir) {
+    public FakeProjectFiles removeDirectory(Path dir) {
         directories.remove(dir.toAbsolutePath().normalize());
         return this;
     }
 
-    public FakeWorkspaceFiles withFile(Path file, Instant lastModified) {
+    public FakeProjectFiles withFile(Path file, Instant lastModified) {
         Path norm = file.toAbsolutePath().normalize();
         files.put(norm, lastModified);
         if (norm.getParent() != null) {
@@ -57,7 +57,7 @@ public final class FakeWorkspaceFiles implements WorkspaceFiles {
             return Result.ok(Optional.empty());
         }
         Optional<ArtifactInfo> newest = files.entrySet().stream()
-            .filter(e -> WorkspaceFiles.matchesGlob(normBase, e.getKey(), glob, excludeGlob))
+            .filter(e -> ProjectFiles.matchesGlob(normBase, e.getKey(), glob, excludeGlob))
             .map(e -> new ArtifactInfo(e.getKey(), e.getValue()))
             .max(Comparator.comparing(ArtifactInfo::lastModified)
                 .thenComparing(a -> a.path().toString()));

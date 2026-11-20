@@ -86,13 +86,6 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public Result<Map<String, ManagedProcessRecord>, DomainError> listManagedServiceProcesses(String project) {
-        return Result.ok(Collections.unmodifiableMap(new LinkedHashMap<>(
-            serviceProcesses.getOrDefault(project, Map.of())
-        )));
-    }
-
-    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
@@ -117,11 +110,6 @@ public final class InMemoryStateStore implements StateStore {
         Path norm = logPath.toAbsolutePath().normalize();
         logs.put(norm, text.getBytes(StandardCharsets.UTF_8));
         return this;
-    }
-
-    @Override
-    public boolean logExists(Path logPath) {
-        return logs.containsKey(logPath.toAbsolutePath().normalize());
     }
 
     @Override
