@@ -179,6 +179,17 @@ public final class Procomp {
             gatewayAction = ((Result.Ok<GatewayCli.Action, String>) actionRes).value();
         }
 
+        Optional<Result<StatusCli.Action, String>> statusParse = StatusCli.parse(command, subArgs);
+        StatusCli.Action statusAction = null;
+        if (statusParse.isPresent()) {
+            Result<StatusCli.Action, String> actionRes = statusParse.get();
+            if (actionRes instanceof Result.Err<StatusCli.Action, String>(String msg)) {
+                err.println("Error: " + msg);
+                return 2;
+            }
+            statusAction = ((Result.Ok<StatusCli.Action, String>) actionRes).value();
+        }
+
         Result<Project, DomainError> projRes = new ProjectLoader(configSource).load(parsed.configOverride());
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
             err.println("Error: " + error.format());
@@ -212,6 +223,21 @@ public final class Procomp {
         if (gatewayAction != null) {
             return GatewayCli.execute(
                 gatewayAction,
+                project,
+                stateStore,
+                processRunner,
+                portScanner,
+                httpClient,
+                workspaceFiles,
+                effectiveClock,
+                effectiveObserver,
+                out,
+                err
+            );
+        }
+        if (statusAction != null) {
+            return StatusCli.execute(
+                statusAction,
                 project,
                 stateStore,
                 processRunner,
@@ -281,7 +307,7 @@ public final class Procomp {
             Commands:
               start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
-              status                              Show estate Routing Table, Process ownership, Health, and Gateway
+              status [--json]                     Show estate Routing Table, Process ownership, Health, and Gateway
               inspect <service>                   Deep read-only Inspection of a Service's local Process (--json)
               logs <service>                      Read raw stdout/stderr logs (-n, -f, --err, --path)
               route [service... <local|remote>]   Show or update the Project's Routing Table

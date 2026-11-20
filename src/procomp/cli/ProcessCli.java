@@ -309,7 +309,7 @@ public final class ProcessCli {
             + report.provenance().map(p -> " (" + p + ")").orElse(""));
         out.println("Health:          " + report.health().name());
         out.println("PID:             " + report.pid().map(Object::toString).orElse("-"));
-        out.println("Uptime:          " + report.uptime().map(ProcessCli::formatDuration).orElse("-"));
+        out.println("Uptime:          " + report.uptime().map(CliFormat::formatDuration).orElse("-"));
         out.println("Stale:           " + (report.stale() ? "YES" : "no"));
         out.println("RAM:             " + report.rssBytes().map(ProcessCli::formatBytes).orElse("-"));
         out.println("Command Line:    " + report.commandLine().orElse("-"));
@@ -334,15 +334,15 @@ public final class ProcessCli {
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("project", Json.str(project.name()));
         root.put("service", Json.str(report.service()));
-        root.put("port", report.port().<JsonValue>map(Json::num).orElse(Json.nil()));
-        root.put("desiredRoute", report.desiredRoute().<JsonValue>map(Json::str).orElse(Json.nil()));
-        root.put("liveGatewayRoute", report.liveGatewayRoute().<JsonValue>map(Json::str).orElse(Json.nil()));
+        root.put("port", CliFormat.jsonNumOrNull(report.port()));
+        root.put("desiredRoute", CliFormat.jsonStrOrNull(report.desiredRoute()));
+        root.put("liveGatewayRoute", CliFormat.jsonStrOrNull(report.liveGatewayRoute()));
         root.put("owner", Json.str(report.ownership().name()));
-        root.put("provenance", report.provenance().<JsonValue>map(Json::str).orElse(Json.nil()));
+        root.put("provenance", CliFormat.jsonStrOrNull(report.provenance()));
         root.put("health", Json.str(report.health().name()));
-        root.put("pid", report.pid().<JsonValue>map(Json::num).orElse(Json.nil()));
-        root.put("uptimeSeconds", report.uptime().<JsonValue>map(d -> Json.num(d.toSeconds())).orElse(Json.nil()));
-        root.put("commandLine", report.commandLine().<JsonValue>map(Json::str).orElse(Json.nil()));
+        root.put("pid", CliFormat.jsonNumOrNull(report.pid()));
+        root.put("uptimeSeconds", CliFormat.jsonUptimeOrNull(report.uptime()));
+        root.put("commandLine", CliFormat.jsonStrOrNull(report.commandLine()));
 
         List<JsonValue> argNodes = new ArrayList<>(report.arguments().size());
         for (String arg : report.arguments()) {
@@ -354,34 +354,20 @@ public final class ProcessCli {
         for (ParentProcess parent : report.parentChain()) {
             Map<String, JsonValue> pObj = new LinkedHashMap<>();
             pObj.put("pid", Json.num(parent.pid()));
-            pObj.put("commandLine", parent.commandLine().<JsonValue>map(Json::str).orElse(Json.nil()));
-            pObj.put("executable", parent.executable().<JsonValue>map(Json::str).orElse(Json.nil()));
+            pObj.put("commandLine", CliFormat.jsonStrOrNull(parent.commandLine()));
+            pObj.put("executable", CliFormat.jsonStrOrNull(parent.executable()));
             parentNodes.add(Json.obj(pObj));
         }
         root.put("parentChain", Json.arr(parentNodes));
 
-        root.put("rssBytes", report.rssBytes().<JsonValue>map(Json::num).orElse(Json.nil()));
-        root.put("healthEndpoint", report.healthEndpoint().<JsonValue>map(Json::str).orElse(Json.nil()));
+        root.put("rssBytes", CliFormat.jsonNumOrNull(report.rssBytes()));
+        root.put("healthEndpoint", CliFormat.jsonStrOrNull(report.healthEndpoint()));
         root.put("healthResponse", Json.str(report.healthResponse()));
         root.put("outLogPath", Json.str(report.outLogPath().toString()));
         root.put("errLogPath", Json.str(report.errLogPath().toString()));
         root.put("stale", Json.bool(report.stale()));
 
         out.println(Json.stringify(Json.obj(root)));
-    }
-
-    static String formatDuration(Duration duration) {
-        long totalSeconds = Math.max(0L, duration.toSeconds());
-        long hours = totalSeconds / 3600;
-        long minutes = (totalSeconds % 3600) / 60;
-        long seconds = totalSeconds % 60;
-        if (hours > 0) {
-            return hours + "h" + minutes + "m" + seconds + "s";
-        }
-        if (minutes > 0) {
-            return minutes + "m" + seconds + "s";
-        }
-        return seconds + "s";
     }
 
     private static String formatBytes(long bytes) {
