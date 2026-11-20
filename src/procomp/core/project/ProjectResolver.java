@@ -273,6 +273,40 @@ public final class ProjectResolver {
         ));
     }
 
+    /**
+     * Expands deferred launch-time template variables (such as {@code {{artifact}}}) in a Service's argv.
+     */
+    public static Result<List<String>, DomainError> resolveServiceCommand(
+        ServiceDefinition service,
+        Optional<Path> artifactPath
+    ) {
+        if (service == null) {
+            throw new IllegalArgumentException("service must not be null");
+        }
+        boolean usesArtifact = service.command().stream().anyMatch(arg -> arg.contains("{{artifact}}"));
+        if (!usesArtifact) {
+            return Result.ok(service.command());
+        }
+        if (artifactPath == null || artifactPath.isEmpty()) {
+            return Result.err(DomainError.of(
+                "ARTIFACT_NOT_FOUND",
+                "No runnable artifact found for service '" + service.name() + "' (glob: '"
+                    + service.artifactGlob().orElse("none") + "', workingDir: '" + service.workingDir() + "')",
+                Map.of(
+                    "service", service.name(),
+                    "workingDir", service.workingDir().toString(),
+                    "artifactGlob", service.artifactGlob().orElse("")
+                )
+            ));
+        }
+        return TemplateExpander.expandArgv(
+            service.command(),
+            Map.of("artifact", new VarValue.Scalar(artifactPath.get().toString())),
+            Set.of(),
+            "services." + service.name() + ".command"
+        );
+    }
+
     private static Result<ServiceDefinition, DomainError> resolveService(
         ServiceDraft draft,
         RawProjectConfig rawConfig,
