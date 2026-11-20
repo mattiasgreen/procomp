@@ -11,7 +11,7 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 ## Runtime & Tooling
 
 - **Pure Zero-Dependency Java 25 LTS (JEP 458):** Use the JDK 25 standard library only (`record`, `sealed interface`, `ProcessHandle`, `ProcessBuilder`, `java.net.http.HttpClient`, `java.nio.file`). Keep zero Maven, zero Gradle, zero `npm`, zero third-party JARs, and zero committed binaries.
-- **Direct source launch:** Run the CLI via `java src/procomp/cli/Procomp.java [args...]` (wrapped by thin `./procomp` and `procomp.cmd` shims) and run tests via `java test/TestRunner.java`. See `docs/adr/0001-pure-java-25-jep458.md` for the rationale.
+- **Direct source launch:** Run the CLI via `java src/procomp/cli/Procomp.java [args...]` (wrapped by thin `./procomp` and `procomp.cmd` shims) and run tests via `java test/TestRunner.java` (or `./procomp-test` / `procomp-test.cmd`, with `--fast` for Levels 1–2 during TDD). See `docs/adr/0001-pure-java-25-jep458.md` for the rationale.
 
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 

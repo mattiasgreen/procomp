@@ -26,7 +26,10 @@ public final class TestRunner {
     private TestRunner() {}
 
     public static void main(String[] args) throws Exception {
-        String filter = args.length > 0 ? args[0].trim() : "";
+        RunOptions options = parseOptions(args);
+        if (options == null) {
+            System.exit(2);
+        }
         Path root = Path.of("").toAbsolutePath().normalize();
         Path srcDir = root.resolve("src");
         Path testDir = root.resolve("test");
@@ -58,14 +61,62 @@ public final class TestRunner {
                 System.exit(1);
             }
 
-            Summary summary = runAllTests(classesDir, testClassNames, filter);
-            printSummary(summary, filter);
+            Summary summary = runAllTests(classesDir, testClassNames, options);
+            printSummary(summary, options);
             if (summary.totalRun() == 0 || summary.failed() > 0) {
                 System.exit(1);
             }
         } finally {
             deleteRecursively(classesDir);
         }
+    }
+
+    private static RunOptions parseOptions(String[] args) {
+        boolean fast = false;
+        int onlyLevel = 0;
+        String filter = "";
+
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i].trim();
+            if ("--fast".equals(arg)) {
+                fast = true;
+            } else if ("--level".equals(arg)) {
+                if (i + 1 >= args.length) {
+                    System.err.println("Option '--level' requires 1, 2, or 3.");
+                    return null;
+                }
+                onlyLevel = parseLevelNumber(args[++i]);
+                if (onlyLevel == 0) {
+                    return null;
+                }
+            } else if (arg.startsWith("--level=")) {
+                onlyLevel = parseLevelNumber(arg.substring("--level=".length()));
+                if (onlyLevel == 0) {
+                    return null;
+                }
+            } else if (arg.startsWith("-")) {
+                System.err.println("Unknown option '" + arg + "'. Usage: TestRunner [--fast | --level <1|2|3>] [filter]");
+                return null;
+            } else if (filter.isEmpty()) {
+                filter = arg;
+            } else {
+                System.err.println("Unexpected argument '" + arg + "'. Usage: TestRunner [--fast | --level <1|2|3>] [filter]");
+                return null;
+            }
+        }
+        return new RunOptions(fast, onlyLevel, filter);
+    }
+
+    private static int parseLevelNumber(String raw) {
+        return switch (raw.trim()) {
+            case "1" -> 1;
+            case "2" -> 2;
+            case "3" -> 3;
+            default -> {
+                System.err.println("Invalid --level value '" + raw + "': expected 1, 2, or 3.");
+                yield 0;
+            }
+        };
     }
 
     private static void collectJavaFiles(Path dir, List<Path> out, Path exclude) throws IOException {
@@ -120,14 +171,21 @@ public final class TestRunner {
         return classNames;
     }
 
-    private static Summary runAllTests(Path classesDir, List<String> testClassNames, String filter) throws Exception {
-        String lowerFilter = filter.toLowerCase(Locale.ROOT);
+    private static Summary runAllTests(Path classesDir, List<String> testClassNames, RunOptions options) throws Exception {
+        String lowerFilter = options.filter().toLowerCase(Locale.ROOT);
         Map<String, LevelCounts> levelCounts = new LinkedHashMap<>();
         int totalPassed = 0;
         int totalFailed = 0;
 
         try (URLClassLoader loader = new URLClassLoader(new URL[]{classesDir.toUri().toURL()}, ClassLoader.getSystemClassLoader())) {
             for (String className : testClassNames) {
+                int levelNum = classifyLevelNumber(className);
+                if (options.fast() && levelNum == 3) {
+                    continue;
+                }
+                if (options.onlyLevel() != 0 && levelNum != options.onlyLevel()) {
+                    continue;
+                }
                 Class<?> clazz = Class.forName(className, true, loader);
                 List<Method> testMethods = findTestMethods(clazz);
                 boolean classMatches = lowerFilter.isEmpty() || className.toLowerCase(Locale.ROOT).contains(lowerFilter);
@@ -193,22 +251,32 @@ public final class TestRunner {
         return methods;
     }
 
-    private static String classifyLevel(String className) {
+    private static int classifyLevelNumber(String className) {
         if (className.startsWith("procomp.core.")) {
-            return "Level 1 (core)";
+            return 1;
         }
         if (className.startsWith("procomp.shell.") || className.startsWith("procomp.cli.")) {
-            return "Level 2 (shell/cli)";
+            return 2;
         }
         if (className.startsWith("procomp.platform.") || className.startsWith("procomp.smoke.")) {
-            return "Level 3 (platform/e2e)";
+            return 3;
         }
-        return "Other";
+        return 0;
     }
 
-    private static void printSummary(Summary summary, String filter) {
+    private static String classifyLevel(String className) {
+        return switch (classifyLevelNumber(className)) {
+            case 1 -> "Level 1 (core)";
+            case 2 -> "Level 2 (shell/cli)";
+            case 3 -> "Level 3 (platform/e2e)";
+            default -> "Other";
+        };
+    }
+
+    private static void printSummary(Summary summary, RunOptions options) {
+        String label = options.describe();
         System.out.println();
-        System.out.println("=== Test Summary" + (filter.isEmpty() ? "" : " (filter: " + filter + ")") + " ===");
+        System.out.println("=== Test Summary" + (label.isEmpty() ? "" : " (" + label + ")") + " ===");
         for (Map.Entry<String, LevelCounts> entry : summary.byLevel().entrySet()) {
             LevelCounts c = entry.getValue();
             System.out.println("  " + entry.getKey() + ": " + c.passed + " passed, " + c.failed + " failed");
@@ -237,6 +305,22 @@ public final class TestRunner {
     private static final class LevelCounts {
         int passed;
         int failed;
+    }
+
+    private record RunOptions(boolean fast, int onlyLevel, String filter) {
+        String describe() {
+            List<String> parts = new ArrayList<>();
+            if (fast) {
+                parts.add("fast: Levels 1-2");
+            }
+            if (onlyLevel != 0) {
+                parts.add("level: " + onlyLevel);
+            }
+            if (!filter.isEmpty()) {
+                parts.add("filter: " + filter);
+            }
+            return String.join(", ", parts);
+        }
     }
 
     private record Summary(int passed, int failed, Map<String, LevelCounts> byLevel) {

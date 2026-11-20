@@ -18,3 +18,4 @@ status: accepted
 - `ProcessHandle` provides native cross-platform PID, parent-chain, command-line, and start-time inspection without shelling out to PowerShell/WMI/`ps`.
 - JSON parsing and CLI argument parsing are implemented cleanly in small, strict, zero-dependency `core/` modules.
 - Every CLI invocation compiles referenced `.java` files in memory via JEP 458 (acceptable for v1; an optional AOT/compiled cache fast path can be layered later without changing source structure).
+- Because JEP 458 resolves a single source root per `java` invocation, `test/TestRunner.java` compiles `src/` and `test/` together in-JVM via `javax.tools.ToolProvider.getSystemJavaCompiler()` into a temporary directory (deleted in `finally`) rather than importing `src/` packages directly.
