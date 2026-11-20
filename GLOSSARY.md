@@ -30,6 +30,18 @@ _Avoid_: Build state, compile job
 A runnable file on disk produced for a Service by a Build Run and launched by a Process.
 _Avoid_: Binary, JAR, bundle
 
+**Repository**:
+A local Git repository checkout on disk (optionally linked to a remote Git URL) that may be shared by one or more Services; optional for Services that run without a Git checkout.
+_Avoid_: Repo, checkout, source folder
+
+**Runtime**:
+A reusable execution template defining how a class of Services is launched locally (command `argv`, health check path, optional artifact pattern, and default environment).
+_Avoid_: Type, preset, runner
+
+**Catalog**:
+An external file listing Service definitions imported into a Project via explicit field mapping.
+_Avoid_: AppsFile, service index
+
 ### Hybrid Network & Routing
 
 **Route**:

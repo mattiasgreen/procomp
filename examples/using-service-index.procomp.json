@@ -1,36 +1,59 @@
 {
   "project": "acme",
-  "appsFile": "./service-index.json",
+  "repositoriesRoot": "..",
+  "envFiles": [
+    { "path": ".env.local", "optional": true }
+  ],
   "defaults": {
-    "builder": "gradle",
-    "enabled": false,
-    "logFormat": "json",
-    "proxyPathTemplate": "/{{servicename}}",
-    "remoteUrlTemplate": "https://shared-dev.mycorp/{{servicename}}",
+    "proxyPathTemplate": "/{{service}}",
+    "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
     "vars": {
-      "jvmArgs": "-Xmx384m"
+      "jvmArgs": ["-Xmx384m"]
+    },
+    "env": {
+      "SPRING_PROFILES_ACTIVE": "local"
     }
-  },
-  "builders": {
-    "gradle": { "command": "gradlew.bat {{gradleTaskPrefix}}assemble -q" }
   },
   "runtimes": {
     "java": {
-      "command": "java {{jvmArgs}} -Dserver.port={{localport}} -Dspring.profiles.active=local -jar {{artifact}}",
+      "command": [
+        "java",
+        "{{jvmArgs}}",
+        "-Dserver.port={{port}}",
+        "-jar",
+        "{{artifact}}"
+      ],
       "healthPath": "/actuator/health",
-      "artifactGlob": "{{modulePath}}\\build\\libs\\*.jar",
-      "artifactExclude": "*-plain.jar",
-      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
+      "artifactGlob": "{{subproject}}/build/libs/*.jar",
+      "artifactExclude": "*-plain.jar"
     }
   },
   "gateway": {
     "type": "wiremock",
-    "adminUrl": "http://127.0.0.1:8080"
+    "port": 8080,
+    "healthPath": "/__admin/health"
+  },
+  "catalog": {
+    "path": "./service-index.json",
+    "itemsPath": "apps",
+    "map": {
+      "name": "servicename",
+      "port": "localport",
+      "runtime": "type",
+      "repositoryUrl": "servicerepositoryurl",
+      "vars.subproject": "subproject"
+    }
+  },
+  "services": {
+    "service1": {
+      "vars": {
+        "jvmArgs": ["-Xmx512m"]
+      }
+    }
   },
   "profiles": {
     "one-local": {
-      "local":  ["service1"],
-      "remote": ["*"]
+      "local": ["service1"]
     }
   }
 }

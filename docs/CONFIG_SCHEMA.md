@@ -1,133 +1,171 @@
 # `procomp` Configuration Schema (`procomp.json`)
 
-`procomp` is completely language- and framework-agnostic with **zero built-in presets**. Every build tool (`builders`), runtime (`runtimes`), gateway (`gateway`), routing profile (`profiles`), and application (`apps` / `appsFile`) is declared transparently in **`procomp.json`**.
+`procomp` is language- and framework-agnostic with **zero built-in presets**. Every `Runtime`, `Gateway`, `Profile`, `Catalog`, and `Service` is declared explicitly in **`procomp.json`** using canonical terms from [GLOSSARY.md](../GLOSSARY.md).
+
+**Strict validation:** `procomp.json` fails fast on unrecognized fields, invalid types, undefined `{{var}}` templates, missing required `envFiles`, unset `${env:VAR}` references, and unknown `Service` or `Runtime` names.
 
 ---
 
-## 1. Top-Level Structure
+## 1. Config Discovery
+
+`procomp` discovers `procomp.json` by walking upward from the current working directory. Override with `--config <path>` or `PROCOMP_CONFIG`.
+
+---
+
+## 2. Top-Level Structure
 
 ```json
 {
-  "project": "my-project",
-  "reposRoot": "..",
-  "appsFile": "{{reposRoot}}\\my-gitops\\service-index.json",
+  "project": "acme",
+  "repositoriesRoot": "..",
+  "envFiles": [
+    ".env",
+    { "path": ".env.local", "optional": true }
+  ],
   "defaults": {
-    "builder": "gradle",
-    "enabled": false,
-    "logFormat": "json",
-    "proxyPathTemplate": "/{{servicename}}",
-    "remoteUrlTemplate": "https://shared-dev.mycorp/{{servicename}}",
-    "workingDir": "",
-    "vars": { "jvmArgs": "-Xmx384m" },
-    "env":  { "SPRING_PROFILES_ACTIVE": "local" }
-  },
-  "builders": {
-    "gradle": { "command": "gradlew.bat {{gradleTaskPrefix}}assemble -q" }
+    "proxyPathTemplate": "/{{service}}",
+    "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
+    "vars": {
+      "jvmArgs": ["-Xmx384m"]
+    },
+    "env": {
+      "SPRING_PROFILES_ACTIVE": "local",
+      "DB_PASSWORD": "${env:ACME_DB_PASSWORD}"
+    }
   },
   "runtimes": {
     "java": {
-      "command": "java {{jvmArgs}} -Dserver.port={{localport}} -jar {{artifact}}",
+      "command": ["java", "{{jvmArgs}}", "-Dserver.port={{port}}", "-jar", "{{artifact}}"],
       "healthPath": "/actuator/health",
-      "artifactGlob": "{{modulePath}}\\build\\libs\\*.jar",
-      "artifactExclude": "*-plain.jar",
-      "memoryArgPattern": "-Xmx(\\d+[kmgKMG]?)"
-    },
-    "autotest": {
-      "command": "java -jar {{artifact}}",
-      "healthPath": "",
-      "env": { "local_port": "{{localport}}" }
+      "artifactGlob": "{{subproject}}/build/libs/*.jar",
+      "artifactExclude": "*-plain.jar"
     }
   },
   "gateway": {
     "type": "wiremock",
     "port": 8080,
-    "adminUrl": "http://127.0.0.1:8080",
-    "command": "java -Xmx128m -jar {{reposRoot}}\\wiremock\\wiremock-standalone.jar --port {{port}}",
-    "workingDir": "{{reposRoot}}\\wiremock",
-    "healthPath": "/__admin/health"
+    "healthPath": "/__admin/health",
+    "command": ["java", "-Xmx128m", "-jar", "{{repositoriesRoot}}/wiremock/wiremock-standalone.jar", "--port", "8080"],
+    "workingDir": "{{repositoriesRoot}}/wiremock"
+  },
+  "catalog": {
+    "path": "../my-gitops/service-index.json",
+    "itemsPath": "apps",
+    "map": {
+      "name": "servicename",
+      "port": "localport",
+      "runtime": "type",
+      "repositoryUrl": "servicerepositoryurl",
+      "vars.subproject": "subproject"
+    }
+  },
+  "services": {
+    "service1": {
+      "vars": {
+        "jvmArgs": ["-Xmx512m"]
+      }
+    }
   },
   "profiles": {
-    "one-local": { "local": ["service1"], "remote": ["*"] }
-  },
-  "apps": []
+    "one-local": {
+      "local": ["service1"]
+    }
+  }
 }
 ```
 
-* **`project`** *(optional)*: Scopes runtime state (`.stack_state/<project>/`) and service logs (`logs/<project>/`). Overridable via `-Project`. Defaults to config filename stem or `"default"`.
-* **`reposRoot`** *(optional)*: Base folder for cloned repositories; overridable via `-ReposRoot`. Exposed as `{{reposRoot}}`.
-* **`appsFile`** *(optional)*: Path (relative to `procomp.json`, absolute, or using `{{reposRoot}}`) to an external service index JSON (`{"apps": [...]}` or a bare array), merged with inline `apps`. Read as UTF-8 (BOM-safe).
-* **`defaults`** *(optional)*: Default `builder`, `enabled`, `logFormat`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all apps unless overridden.
-* **`gateway`** *(optional)*:
-  * `port` / `adminUrl`: Either may be omitted (the other is derived as `http://127.0.0.1:<port>` or from `adminUrl`'s port).
-  * `command` / `workingDir` / `healthPath` / `serviceName`: When `command` is set, `procomp` automatically synthesizes a managed gateway service (`wiremock-gateway` by default, kept `LOCAL` even under `"remote": ["*"]` profiles). If WireMock is already reachable on `port`, `procomp` reuses the running instance (`IDE-UP`) instead of launching a second copy.
-* **`profiles.<name>.remote`**: Supports `"*"` wildcard to route all non-gateway apps not listed in `local` as `REMOTE`.
+### Top-Level Fields
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `project` | `string` | Yes | Explicit `Project` identifier used to scope local state and logs (`~/.local/state/procomp/<project>/` or `%LOCALAPPDATA%\procomp\<project>\`). |
+| `repositoriesRoot` | `string` | No | Base folder for local `Repository` checkouts (resolved relative to `configDir` if relative). Exposed as `{{repositoriesRoot}}`. |
+| `envFiles` | `(string \| { path, optional? })[]` | No | Explicit `.env` files loaded into `Process` environments. Missing files fail fast unless `optional: true`. |
+| `defaults` | `object` | No | Default `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all `Service`s unless overridden. |
+| `runtimes` | `map<string, Runtime>` | Yes | Named `Runtime` execution templates referenced by `Service`s. |
+| `gateway` | `object` | No | Local `Gateway` definition (`type`, `port`, optional `healthPath`, `command`, `workingDir`, `env`). |
+| `catalog` | `object` | No | External `Catalog` JSON importer with explicit field mapping. |
+| `services` | `map<string, Service>` | No | Inline `Service` definitions (or overrides for `Service`s imported via `catalog`). Map key is the unique `Service` name. |
+| `profiles` | `map<string, Profile>` | No | Named routing `Profile`s. Each declares `{ "local": ["<service>", ...] }`; all other `Service`s route `REMOTE`. Fails fast on unknown `Service` names. |
 
 ---
 
-## 2. Template Variables (`{{var}}`)
+## 3. Commands (`argv` Arrays) & Template Variables
 
-Supported across `builders.<name>.command`, `runtimes.<name>.command`, `artifactGlob`, `workingDir`, `gateway.command`/`workingDir`, and `env` values:
+All launch commands (`runtimes.<name>.command` and `gateway.command`) are **structured `argv` arrays** executed directly without a shell wrapper.
+
+### Built-In Template Variables (`{{var}}`)
+
+Supported in `command` elements, `workingDir`, `artifactGlob`, `proxyPathTemplate`, `remoteUrlTemplate`, and `env` values. Undefined `{{var}}` references fail fast at validation time.
 
 | Variable | Description |
 | :--- | :--- |
-| `{{root}}` | Directory containing `procomp.ps1` (or config dir in `workingDir`/`gateway.workingDir`) |
-| `{{reposRoot}}` | Value of `-ReposRoot` CLI parameter (or `reposRoot` in config) |
-| `{{java}}` | Resolved `%JAVA_HOME%\bin\java.exe` (or `java` on `PATH`) |
-| `{{servicename}}` (or `{{name}}`) | App `servicename` |
-| `{{localport}}` (or `{{port}}`) | App `localport` |
-| `{{type}}` | App `type` (runtime alias) |
-| `{{subproject}}` (or `{{module}}`) | Raw `subproject` string (e.g., `service1` or `:services:order-service`) |
-| `{{modulePath}}` | Filesystem path derived from `subproject` (`:` converted to `\`) |
-| `{{gradleTaskPrefix}}` | `:<subproject>:` when `subproject` is set, or `""` for single-project repos |
-| `{{repo}}` | Resolved local repository path (explicit `repo`, or `<reposRoot>/<basename>` from `servicerepositoryurl`) |
-| `{{servicerepositoryurl}}` | Git remote URL from `servicerepositoryurl` |
-| `{{swaggeruri}}` | Swagger/OpenAPI relative URI from `swaggeruri` |
-| `{{artifact}}` | Newest file matching `runtimes.<type>.artifactGlob` (excluding `artifactExclude`) |
-| `{{<custom>}}` | Any key defined in `defaults.vars` or `app.vars` (e.g., `{{jvmArgs}}`) |
+| `{{configDir}}` | Directory containing `procomp.json`. |
+| `{{repositoriesRoot}}` | Resolved `repositoriesRoot` directory (requires `repositoriesRoot` to be configured). |
+| `{{service}}` | `Service` name (map key). |
+| `{{port}}` | `Service` local port (integer). |
+| `{{repository}}` | Resolved local `Repository` Git root (explicit `repository` or `<repositoriesRoot>/<basename>` derived from `repositoryUrl`). Checked lazily when a local action requires the checkout; missing checkouts never block `REMOTE` `Service`s. |
+| `{{artifact}}` | Newest file matching `runtime.artifactGlob` (excluding `artifactExclude`), resolved at `start` time. |
+| `{{<custom>}}` | Any key defined in `defaults.vars` or `service.vars`. |
+
+### Array Splicing in `argv`
+
+Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs": ["-Xmx384m", "-XX:+UseG1GC"]`). When a standalone `argv` element is a `string[]` variable (`"{{jvmArgs}}"`), its elements are **spliced** directly into `argv` (an empty array `[]` splices zero arguments).
 
 ---
 
-## 3. `runtimes` & `apps` Entry Reference
+## 4. Environment Variables & Secrets
+
+1. **Precedence (lowest to highest):** host process environment < `envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
+2. **Host-env pass-through:** Values may reference host variables via `"${env:VAR_NAME}"`. Unset host variables fail fast rather than silently expanding to empty strings.
+3. **Secret hygiene:** `procomp` never persists resolved `env` values in state files and never prints them in `inspect`, `status --json`, or error logs.
+
+---
+
+## 5. `runtimes`, `gateway`, `catalog`, and `services` Reference
 
 ### `runtimes.<name>`
-| Field | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `command` | `string` | Yes | — | Launch command template. Relative executables (e.g., `gradlew.bat`) are resolved against `workingDir`. |
-| `healthPath` | `string` | No | `""` | HTTP health endpoint path. Empty skips HTTP polling (process alive = `HEALTHY`). |
-| `artifactGlob` | `string` | No | `""` | Glob for newest runnable artifact; triggers builder if missing. |
-| `artifactExclude` | `string` | No | `""` | Filename wildcard to exclude (e.g., `*-plain.jar`). |
-| `memoryArgPattern` | `string` | No | `""` | Regex to extract `LIMIT` column (e.g., `-Xmx(\d+[kmgKMG]?)`). |
-| `workingDir` | `string` | No | `""` | Optional working directory override (supports `{{repo}}`, `{{modulePath}}`, `{{reposRoot}}`). |
-| `env` | `object` | No | `{}` | Runtime-level environment variables (supports `{{var}}` templates). |
 
-### `apps[]`
-| Field | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `servicename` | `string` | Yes | — | Unique application identifier. |
-| `localport` | `string\|integer` | Yes | — | Local TCP port the app listens on. |
-| `type` | `string` | Yes | — | Key in top-level `runtimes` (must exist for every app in `apps`/`appsFile`). |
-| `subproject` | `string` | No | `""` | Subproject / module path within the repository. |
-| `swaggeruri` | `string` | No | `""` | Relative Swagger/OpenAPI path (opened via `o`). |
-| `servicerepositoryurl` | `string` | No | `""` | Git remote URL; derives `<reposRoot>/<basename>` when `repo` is omitted. |
-| `repo` | `string` | No | Derived | Explicit local Git repository path override. |
-| `workingDir` | `string` | No | Derived | Explicit working directory override (keeps `repo` intact for Git). |
-| `builder` | `string` | No | From `defaults` | Key in top-level `builders`. |
-| `vars` | `object` | No | From `defaults` | Custom template variables (merged over `defaults.vars`). |
-| `healthPath` | `string` | No | From runtime | Overrides runtime `healthPath`. |
-| `proxyPath` | `string` | No | `"/<servicename>"` | Context prefix on the gateway (or `defaults.proxyPathTemplate`). |
-| `remoteUrl` | `string` | No | `""` | Upstream URL when `REMOTE` (or `defaults.remoteUrlTemplate`). |
-| `logFormat` | `string` | No | `"text"` | Display hint (`"text"` or `"json"`). |
-| `logMapping` | `object` | No | `{}` | Custom JSON log field overrides. |
-| `env` | `object` | No | `{}` | Environment variables (precedence: `.env` < `defaults.env` < `runtime.env` < `app.env` < `.env.<servicename>`). |
-| `enabled` | `boolean` | No | `true` | Whether `up` / TUI startup launches this app automatically. |
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `command` | `string[]` | Yes | Launch `argv` array. Relative executable paths resolve against `workingDir`. |
+| `healthPath` | `string` | No | HTTP health path (e.g., `/actuator/health`). Empty/omitted falls back to TCP listen (if `port` set) or process-alive. |
+| `artifactGlob` | `string` | No | Glob (relative to `workingDir`/`repository`) for newest runnable `Artifact`. |
+| `artifactExclude` | `string` | No | Filename glob to exclude (e.g., `*-plain.jar`). |
+| `workingDir` | `string` | No | Working directory template override. |
+| `env` | `map<string, string>` | No | Runtime-level environment variables. |
 
----
+### `gateway`
 
-## 4. Runtime State & Logs
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `type` | `"wiremock"` | Yes | Gateway adapter type (v1 supports `"wiremock"`). |
+| `port` | `integer` | Yes | Local TCP port (`adminUrl` is derived as `http://127.0.0.1:<port>`). |
+| `healthPath` | `string` | No | HTTP health check path (e.g., `/__admin/health`). |
+| `command` | `string[]` | No | Launch `argv` array (required only if `procomp gateway start` launches a `Managed` `Gateway`). |
+| `workingDir` | `string` | No | Working directory for a `Managed` `Gateway`. |
+| `env` | `map<string, string>` | No | Environment variables for a `Managed` `Gateway`. |
 
-* **`.stack_state/<project>/<servicename>.pid`**: PID of `procomp`-managed processes.
-* **`.stack_state/<project>/routing.json`**: Persisted `LOCAL` / `REMOTE` routing choices.
-* **`logs/<project>/<servicename>.log` & `.err.log`**: Raw subprocess `stdout` and `stderr`.
-* **`logs/procomp-error.log`**: Unhandled crashes (including resolved `Config` and `AppsFile`).
-* **`logs/procomp-debug.log`**: All external commands executed by `procomp`.
-* **`logs/procomp-trace.log`**: Full trace log (default ON; disable with `-NoTrace` or `PROCOMP_TRACE=0`), viewable live inside the TUI via **`4` / `L`**.
+### `catalog`
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `path` | `string` | Yes | Path to external JSON catalog (relative to `configDir`, absolute, or using `{{repositoriesRoot}}`). |
+| `itemsPath` | `string` | No | Dot-path to the array of entries inside the catalog JSON (omit if the root JSON is an array). |
+| `map` | `map<string, string>` | Yes | Explicit mapping from `procomp` `Service` fields (`name`, `port`, `runtime`, `repository`, `repositoryUrl`, `workingDir`, `healthPath`, `proxyPath`, `remoteUrl`, `vars.<key>`) to source field names in each catalog item. Unmapped source fields are ignored; numeric string ports (e.g., `"9001"`) are strictly parsed as integers. |
+
+### `services.<name>`
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `port` | `integer` | No* | Local TCP port the `Service` listens on (*required if `proxyPath` is routed `LOCAL`). |
+| `runtime` | `string` | Yes | Key in top-level `runtimes` (validated strictly). |
+| `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). |
+| `repositoryUrl` | `string` | No | Remote Git URL used to derive `<repositoriesRoot>/<basename>` when `repository` is omitted. |
+| `workingDir` | `string` | No* | Working directory for the `Service`'s `Process`. Defaults to `{{repository}}` when a `Repository` is configured (*required if the `Service` has no `Repository`). |
+| `healthPath` | `string` | No | Overrides `runtime.healthPath`. |
+| `proxyPath` | `string` | No | Gateway path prefix (defaults to `defaults.proxyPathTemplate` or `"/{{service}}"`). |
+| `remoteUrl` | `string` | No | Upstream URL when routed `REMOTE` (defaults to `defaults.remoteUrlTemplate`). |
+| `vars` | `map<string, string \| string[]>` | No | Custom template variables (merged over `defaults.vars`). |
+| `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env`). |
+| `envFiles` | `(string \| { path, optional? })[]` | No | Additional service-specific `.env` files. |
