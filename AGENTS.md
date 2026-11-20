@@ -35,3 +35,17 @@ Organize code into four strict layers with dependencies flowing strictly inward 
 1. **Level 1 (`core/`):** Fast, deterministic unit tests of pure functions—data in, data out, zero mocks or fakes, zero I/O.
 2. **Level 2 (`shell/` + `core/`):** Full use-case orchestration E2E tests wired to reusable in-memory fakes implementing `shell/ports/`—deterministic, zero real OS I/O, no spy/mock frameworks.
 3. **Level 3 (`platform/` + smoke E2E):** Focused integration tests against real OS processes, real TCP ports, temporary state directories, and real HTTP endpoints (tested first-class on Windows as well as POSIX).
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context (`GLOSSARY.md` and `docs/adr/` at the repo root). See `docs/agents/domain.md`.
