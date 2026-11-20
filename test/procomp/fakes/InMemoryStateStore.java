@@ -113,6 +113,12 @@ public final class InMemoryStateStore implements StateStore {
         return this;
     }
 
+    public InMemoryStateStore replaceLog(Path logPath, String text) {
+        Path norm = logPath.toAbsolutePath().normalize();
+        logs.put(norm, text.getBytes(StandardCharsets.UTF_8));
+        return this;
+    }
+
     @Override
     public boolean logExists(Path logPath) {
         return logs.containsKey(logPath.toAbsolutePath().normalize());
