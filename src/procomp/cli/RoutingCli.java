@@ -121,14 +121,14 @@ public final class RoutingCli {
     ) {
         RoutingShell shell = new RoutingShell(stateStore);
         return switch (action) {
-            case Action.ShowRoutes(boolean json) -> handleResult(shell.showRoutes(project), err, table -> {
+            case Action.ShowRoutes(boolean json) -> CliFormat.handleResult(shell.showRoutes(project), err, table -> {
                 if (json) {
                     renderRoutesJson(project, table, out);
                 } else {
                     renderRoutesTable(project, table, out);
                 }
             });
-            case Action.UpdateRoutes(List<String> services, Route route) -> handleResult(
+            case Action.UpdateRoutes(List<String> services, Route route) -> CliFormat.handleResult(
                 shell.updateRoutes(project, services, route),
                 err,
                 _ -> {
@@ -137,14 +137,14 @@ public final class RoutingCli {
                     }
                 }
             );
-            case Action.ListProfiles(boolean json) -> handleResult(shell.listProfiles(project), err, profiles -> {
+            case Action.ListProfiles(boolean json) -> CliFormat.handleResult(shell.listProfiles(project), err, profiles -> {
                 if (json) {
                     renderProfilesJson(project, profiles, out);
                 } else {
                     renderProfilesTable(project, profiles, out);
                 }
             });
-            case Action.UseProfile(String profileName) -> handleResult(
+            case Action.UseProfile(String profileName) -> CliFormat.handleResult(
                 shell.useProfile(project, profileName),
                 err,
                 table -> {
@@ -153,23 +153,6 @@ public final class RoutingCli {
                     out.println("Applied profile '" + profileName + "' (" + localCount + " LOCAL, " + remoteCount + " REMOTE)");
                 }
             );
-        };
-    }
-
-    private static <T> int handleResult(
-        Result<T, DomainError> res,
-        PrintWriter err,
-        java.util.function.Consumer<T> onSuccess
-    ) {
-        return switch (res) {
-            case Result.Ok<T, DomainError>(T value) -> {
-                onSuccess.accept(value);
-                yield 0;
-            }
-            case Result.Err<T, DomainError>(DomainError error) -> {
-                err.println("Error: " + error.format());
-                yield 1;
-            }
         };
     }
 
@@ -189,7 +172,7 @@ public final class RoutingCli {
             };
             rows.add(List.of(svcName, route.name(), svc.proxyPath(), target));
         }
-        renderTable(out, List.of("SERVICE", "ROUTE", "PROXY_PATH", "TARGET"), rows);
+        CliFormat.renderTable(out, List.of("SERVICE", "ROUTE", "PROXY_PATH", "TARGET"), rows);
     }
 
     private static void renderRoutesJson(Project project, RoutingTable table, PrintWriter out) {
@@ -225,7 +208,7 @@ public final class RoutingCli {
                 : String.join(", ", profile.localServices());
             rows.add(List.of(profile.name(), localCell));
         }
-        renderTable(out, List.of("PROFILE", "LOCAL"), rows);
+        CliFormat.renderTable(out, List.of("PROFILE", "LOCAL"), rows);
     }
 
     private static void renderProfilesJson(Project project, List<ProfileDefinition> profiles, PrintWriter out) {
@@ -244,35 +227,5 @@ public final class RoutingCli {
         root.put("project", Json.str(project.name()));
         root.put("profiles", Json.arr(items));
         out.println(Json.stringify(Json.obj(root)));
-    }
-
-    static void renderTable(PrintWriter out, List<String> headers, List<List<String>> rows) {
-        int cols = headers.size();
-        int[] widths = new int[cols];
-        for (int c = 0; c < cols; c++) {
-            widths[c] = headers.get(c).length();
-        }
-        for (List<String> row : rows) {
-            for (int c = 0; c < cols; c++) {
-                widths[c] = Math.max(widths[c], row.get(c).length());
-            }
-        }
-        printRow(out, headers, widths);
-        for (List<String> row : rows) {
-            printRow(out, row, widths);
-        }
-    }
-
-    private static void printRow(PrintWriter out, List<String> cells, int[] widths) {
-        StringBuilder sb = new StringBuilder();
-        for (int c = 0; c < cells.size(); c++) {
-            String cell = cells.get(c);
-            sb.append(cell);
-            if (c < cells.size() - 1) {
-                int padding = widths[c] - cell.length() + 2;
-                sb.append(" ".repeat(padding));
-            }
-        }
-        out.println(sb);
     }
 }

@@ -1,6 +1,5 @@
 package procomp.cli;
 
-import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
@@ -146,11 +145,11 @@ public final class GatewayCli {
         );
         return switch (action) {
             case Action.Start(boolean detach, Duration timeout) ->
-                handleResult(shell.start(project, new GatewayStartRequest(detach, timeout)), err, res -> renderStart(res, out));
+                CliFormat.handleResult(shell.start(project, new GatewayStartRequest(detach, timeout)), err, res -> renderStart(res, out));
             case Action.Stop _ ->
-                handleResult(shell.stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT)), err, res -> renderStop(res, out));
+                CliFormat.handleResult(shell.stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT)), err, res -> renderStop(res, out));
             case Action.Status(boolean json) ->
-                handleResult(shell.status(project), err, report -> {
+                CliFormat.handleResult(shell.status(project), err, report -> {
                     if (json) {
                         renderStatusJson(report, out);
                     } else {
@@ -158,24 +157,7 @@ public final class GatewayCli {
                     }
                 });
             case Action.Reconcile _ ->
-                handleResult(shell.reconcile(project), err, res -> renderReconcile(res, out));
-        };
-    }
-
-    private static <T> int handleResult(
-        Result<T, DomainError> res,
-        PrintWriter err,
-        java.util.function.Consumer<T> onSuccess
-    ) {
-        return switch (res) {
-            case Result.Ok<T, DomainError>(T value) -> {
-                onSuccess.accept(value);
-                yield 0;
-            }
-            case Result.Err<T, DomainError>(DomainError error) -> {
-                err.println("Error: " + error.format());
-                yield 1;
-            }
+                CliFormat.handleResult(shell.reconcile(project), err, res -> renderReconcile(res, out));
         };
     }
 
@@ -219,7 +201,7 @@ public final class GatewayCli {
             + report.discovery().provenance().map(p -> " (" + p + ")").orElse(""));
         out.println("Health:          " + report.discovery().health().name());
         out.println("PID:             " + report.discovery().pid().map(Object::toString).orElse("-"));
-        out.println("Uptime:          " + report.uptime().map(ProcessCli::formatDuration).orElse("-"));
+        out.println("Uptime:          " + report.uptime().map(CliFormat::formatDuration).orElse("-"));
         out.println("Sync Status:     " + report.drift().syncStatus().name());
 
         GatewayDriftReport drift = report.drift();
@@ -229,7 +211,7 @@ public final class GatewayCli {
             for (RouteDrift item : drift.drifted()) {
                 rows.add(List.of(item.service(), item.desired().name(), item.live()));
             }
-            RoutingCli.renderTable(out, List.of("SERVICE", "DESIRED", "LIVE"), rows);
+            CliFormat.renderTable(out, List.of("SERVICE", "DESIRED", "LIVE"), rows);
         }
         if (!drift.staleMappings().isEmpty()) {
             out.println("Stale Mappings:");
@@ -244,17 +226,22 @@ public final class GatewayCli {
     private static void renderStatusJson(GatewayStatusReport report, PrintWriter out) {
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("project", Json.str(report.projectName()));
-        root.put("type", Json.str(report.gateway().type()));
-        root.put("port", Json.num(report.gateway().port()));
-        root.put("adminUrl", Json.str(report.gateway().adminUrl()));
-        root.put("owner", Json.str(report.discovery().ownership().name()));
-        root.put("provenance", report.discovery().provenance().<JsonValue>map(Json::str).orElse(Json.nil()));
-        root.put("health", Json.str(report.discovery().health().name()));
-        root.put("pid", report.discovery().pid().<JsonValue>map(Json::num).orElse(Json.nil()));
-        root.put("uptimeSeconds", report.uptime().<JsonValue>map(d -> Json.num(d.toSeconds())).orElse(Json.nil()));
-        root.put("healthEndpoint", report.discovery().healthEndpoint().<JsonValue>map(Json::str).orElse(Json.nil()));
-        root.put("healthResponse", Json.str(report.discovery().healthResponse()));
-        root.put("syncStatus", Json.str(report.drift().syncStatus().name()));
+        appendGatewayStatusFields(root, report);
+        out.println(Json.stringify(Json.obj(root)));
+    }
+
+    static void appendGatewayStatusFields(Map<String, JsonValue> target, GatewayStatusReport report) {
+        target.put("type", Json.str(report.gateway().type()));
+        target.put("port", Json.num(report.gateway().port()));
+        target.put("adminUrl", Json.str(report.gateway().adminUrl()));
+        target.put("owner", Json.str(report.discovery().ownership().name()));
+        target.put("provenance", CliFormat.jsonStrOrNull(report.discovery().provenance()));
+        target.put("health", Json.str(report.discovery().health().name()));
+        target.put("pid", CliFormat.jsonNumOrNull(report.discovery().pid()));
+        target.put("uptimeSeconds", CliFormat.jsonUptimeOrNull(report.uptime()));
+        target.put("healthEndpoint", CliFormat.jsonStrOrNull(report.discovery().healthEndpoint()));
+        target.put("healthResponse", Json.str(report.discovery().healthResponse()));
+        target.put("syncStatus", Json.str(report.drift().syncStatus().name()));
 
         List<JsonValue> driftedNodes = new ArrayList<>(report.drift().drifted().size());
         for (RouteDrift item : report.drift().drifted()) {
@@ -264,18 +251,16 @@ public final class GatewayCli {
             dObj.put("live", Json.str(item.live()));
             driftedNodes.add(Json.obj(dObj));
         }
-        root.put("drifted", Json.arr(driftedNodes));
+        target.put("drifted", Json.arr(driftedNodes));
 
         List<JsonValue> staleNodes = new ArrayList<>(report.drift().staleMappings().size());
         for (StaleManagedMapping stale : report.drift().staleMappings()) {
             Map<String, JsonValue> sObj = new LinkedHashMap<>();
-            sObj.put("id", stale.id().<JsonValue>map(Json::str).orElse(Json.nil()));
-            sObj.put("service", stale.service().<JsonValue>map(Json::str).orElse(Json.nil()));
-            sObj.put("targetUrl", stale.targetUrl().<JsonValue>map(Json::str).orElse(Json.nil()));
+            sObj.put("id", CliFormat.jsonStrOrNull(stale.id()));
+            sObj.put("service", CliFormat.jsonStrOrNull(stale.service()));
+            sObj.put("targetUrl", CliFormat.jsonStrOrNull(stale.targetUrl()));
             staleNodes.add(Json.obj(sObj));
         }
-        root.put("staleMappings", Json.arr(staleNodes));
-
-        out.println(Json.stringify(Json.obj(root)));
+        target.put("staleMappings", Json.arr(staleNodes));
     }
 }
