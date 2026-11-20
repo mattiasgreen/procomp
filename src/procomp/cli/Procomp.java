@@ -80,16 +80,32 @@ public final class Procomp {
             return 2;
         }
 
+        List<String> subArgs = parsed.commandArgs().subList(1, parsed.commandArgs().size());
+        Optional<Result<RoutingCli.Action, String>> routingParse = RoutingCli.parse(command, subArgs);
+        RoutingCli.Action routingAction = null;
+        if (routingParse.isPresent()) {
+            Result<RoutingCli.Action, String> actionRes = routingParse.get();
+            if (actionRes instanceof Result.Err<RoutingCli.Action, String>(String msg)) {
+                err.println("Error: " + msg);
+                return 2;
+            }
+            routingAction = ((Result.Ok<RoutingCli.Action, String>) actionRes).value();
+        }
+
         Result<Project, DomainError> projRes = new ProjectLoader(configSource).load(parsed.configOverride());
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
             err.println("Error: " + error.format());
             return 1;
         }
+        Project project = ((Result.Ok<Project, DomainError>) projRes).value();
 
         // StateStore is wired cleanly here for downstream commands in Tickets 02-06.
         if (stateStore == null) {
             err.println("Error: StateStore is not configured.");
             return 1;
+        }
+        if (routingAction != null) {
+            return RoutingCli.execute(routingAction, project, stateStore, out, err);
         }
         err.println("Error: Command '" + command + "' is not yet implemented.");
         return 2;
