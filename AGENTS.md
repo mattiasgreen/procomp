@@ -8,6 +8,11 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 - **v1 behavior & CLI contract:** Read `docs/DESIGN.md` before designing or implementing any command, Discovery flow, Health State rule, Gateway Reconciliation, or state layout.
 - **Config format:** Read `docs/CONFIG_SCHEMA.md` when touching `procomp.json` or `service-index.json` loading; validate strictly and fail fast on unrecognized fields.
 
+## Runtime & Tooling
+
+- **Pure Zero-Dependency Java 25 LTS (JEP 458):** Use the JDK 25 standard library only (`record`, `sealed interface`, `ProcessHandle`, `ProcessBuilder`, `java.net.http.HttpClient`, `java.nio.file`). Keep zero Maven, zero Gradle, zero `npm`, zero third-party JARs, and zero committed binaries.
+- **Direct source launch:** Run the CLI via `java src/procomp/cli/Procomp.java [args...]` (wrapped by thin `./procomp` and `procomp.cmd` shims) and run tests via `java test/TestRunner.java`. See `docs/adr/0001-pure-java-25-jep458.md` for the rationale.
+
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 
 Organize code into four strict layers with dependencies flowing strictly inward (`cli`/`tui` → `shell` → `core`; `platform` → `shell/ports` + `core`):
