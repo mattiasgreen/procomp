@@ -168,6 +168,17 @@ public final class Procomp {
             processAction = ((Result.Ok<ProcessCli.Action, String>) actionRes).value();
         }
 
+        Optional<Result<GatewayCli.Action, String>> gatewayParse = GatewayCli.parse(command, subArgs);
+        GatewayCli.Action gatewayAction = null;
+        if (gatewayParse.isPresent()) {
+            Result<GatewayCli.Action, String> actionRes = gatewayParse.get();
+            if (actionRes instanceof Result.Err<GatewayCli.Action, String>(String msg)) {
+                err.println("Error: " + msg);
+                return 2;
+            }
+            gatewayAction = ((Result.Ok<GatewayCli.Action, String>) actionRes).value();
+        }
+
         Result<Project, DomainError> projRes = new ProjectLoader(configSource).load(parsed.configOverride());
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
             err.println("Error: " + error.format());
@@ -186,6 +197,21 @@ public final class Procomp {
         if (processAction != null) {
             return ProcessCli.execute(
                 processAction,
+                project,
+                stateStore,
+                processRunner,
+                portScanner,
+                httpClient,
+                workspaceFiles,
+                effectiveClock,
+                effectiveObserver,
+                out,
+                err
+            );
+        }
+        if (gatewayAction != null) {
+            return GatewayCli.execute(
+                gatewayAction,
                 project,
                 stateStore,
                 processRunner,

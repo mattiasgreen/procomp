@@ -125,7 +125,7 @@ public final class ProcessCli {
         return Result.ok(new Action.Start(services, detach, timeout));
     }
 
-    private static Result<Duration, String> parsePositiveSeconds(String raw) {
+    static Result<Duration, String> parsePositiveSeconds(String raw) {
         if (raw == null || raw.isBlank()) {
             return Result.err("Invalid --timeout value: must be a positive integer number of seconds.");
         }
