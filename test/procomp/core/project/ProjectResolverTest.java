@@ -1,0 +1,340 @@
+package procomp.core.project;
+
+import procomp.Assert;
+import procomp.core.common.DomainError;
+
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+public final class ProjectResolverTest {
+
+    public static void testMergesCatalogAndOverridesSplicesArgvAndDerivesSharedRepos() {
+        String configJson = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "..",
+              "envFiles": [
+                ".env",
+                { "path": ".env.local", "optional": true }
+              ],
+              "defaults": {
+                "proxyPathTemplate": "/{{service}}",
+                "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
+                "vars": {
+                  "jvmArgs": ["-Xmx384m", "-XX:+UseG1GC"]
+                },
+                "env": {
+                  "SPRING_PROFILES_ACTIVE": "local",
+                  "DB_PASSWORD": "${env:ACME_DB_PASSWORD}",
+                  "SERVICE_URL": "http://localhost:{{port}}"
+                }
+              },
+              "runtimes": {
+                "java": {
+                  "command": ["java", "{{jvmArgs}}", "-Dserver.port={{port}}", "-jar", "{{artifact}}"],
+                  "healthPath": "/actuator/health",
+                  "artifactGlob": "{{subproject}}/build/libs/*.jar",
+                  "artifactExclude": "*-plain.jar",
+                  "env": {
+                    "RUNTIME_VAR": "from-runtime"
+                  }
+                }
+              },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "healthPath": "/__admin/health",
+                "command": ["java", "-jar", "{{repositoriesRoot}}/wiremock/wiremock.jar", "--port", "{{port}}"],
+                "workingDir": "{{repositoriesRoot}}/wiremock"
+              },
+              "catalog": {
+                "path": "./service-index.json",
+                "itemsPath": "apps",
+                "map": {
+                  "name": "servicename",
+                  "port": "localport",
+                  "runtime": "type",
+                  "repositoryUrl": "servicerepositoryurl",
+                  "vars.subproject": "subproject"
+                }
+              },
+              "services": {
+                "service1": {
+                  "vars": {
+                    "jvmArgs": ["-Xmx512m"]
+                  },
+                  "env": {
+                    "SPRING_PROFILES_ACTIVE": "svc1-override"
+                  }
+                },
+                "service2": {
+                  "vars": {
+                    "jvmArgs": []
+                  }
+                },
+                "standalone-mock": {
+                  "port": 9099,
+                  "runtime": "java",
+                  "workingDir": "{{configDir}}/mocks/{{service}}",
+                  "vars": {
+                    "subproject": "mock"
+                  }
+                }
+              },
+              "profiles": {
+                "one-local": {
+                  "local": ["service1"]
+                }
+              }
+            }
+            """;
+
+        String catalogJson = """
+            {
+              "apps": [
+                {
+                  "servicename": "service1",
+                  "localport": "9001",
+                  "subproject": "svc1-mod",
+                  "type": "java",
+                  "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/monorepo.git"
+                },
+                {
+                  "servicename": "service2",
+                  "localport": "9002",
+                  "subproject": "svc2-mod",
+                  "type": "java",
+                  "servicerepositoryurl": "ssh://git@scm.corp:7999/acme/monorepo.git"
+                }
+              ]
+            }
+            """;
+
+        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parse");
+        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
+            CatalogParser.parse(raw.catalog().orElseThrow(), catalogJson),
+            "catalog parse"
+        );
+
+        Path configDir = Path.of("C:/dev/acme/config").toAbsolutePath().normalize();
+        Path configPath = configDir.resolve("procomp.json");
+        Path envPath = configDir.resolve(".env");
+
+        Map<Path, String> envFiles = Map.of(
+            envPath,
+            "DB_PASSWORD=from-dotenv\nEXTRA_DOTENV=hello\n"
+        );
+        Map<String, String> hostEnv = Map.of("ACME_DB_PASSWORD", "secret-from-host");
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, raw, catalog, envFiles, hostEnv),
+            "project resolution should succeed without checking repo dirs on disk"
+        );
+
+        Assert.assertEquals("acme", project.name(), "project name");
+        Path expectedReposRoot = Path.of("C:/dev/acme").toAbsolutePath().normalize();
+        Assert.assertEquals(Optional.of(expectedReposRoot), project.repositoriesRoot(), "repositoriesRoot");
+        Assert.assertEquals(1, project.repositories().size(), "shared monorepo deduplicated to 1 RepositoryRef");
+        Assert.assertEquals(expectedReposRoot.resolve("monorepo"), project.repositories().get(0).root(), "derived repo root");
+
+        ServiceDefinition s1 = project.service("service1").orElseThrow();
+        Assert.assertEquals(
+            List.of("java", "-Xmx512m", "-Dserver.port=9001", "-jar", "{{artifact}}"),
+            s1.command(),
+            "service1 splices overridden jvmArgs and preserves {{artifact}}"
+        );
+        Assert.assertEquals("svc1-mod/build/libs/*.jar", s1.artifactGlob().orElseThrow(), "artifactGlob expanded");
+        Assert.assertEquals(expectedReposRoot.resolve("monorepo"), s1.workingDir(), "workingDir defaults to {{repository}}");
+        Assert.assertEquals("/service1", s1.proxyPath(), "proxyPath");
+        Assert.assertEquals("https://shared-dev.mycorp/service1", s1.remoteUrl().orElseThrow(), "remoteUrl");
+        Assert.assertEquals("svc1-override", s1.env().asMap().get("SPRING_PROFILES_ACTIVE"), "service env overrides default");
+        Assert.assertEquals("secret-from-host", s1.env().asMap().get("DB_PASSWORD"), "defaults.env overrides .env");
+        Assert.assertEquals("hello", s1.env().asMap().get("EXTRA_DOTENV"), ".env value preserved");
+        Assert.assertEquals("from-runtime", s1.env().asMap().get("RUNTIME_VAR"), "runtime env applied");
+        Assert.assertEquals("http://localhost:9001", s1.env().asMap().get("SERVICE_URL"), "template expanded in env");
+
+        ServiceDefinition s2 = project.service("service2").orElseThrow();
+        Assert.assertEquals(
+            List.of("java", "-Dserver.port=9002", "-jar", "{{artifact}}"),
+            s2.command(),
+            "empty string[] splices zero arguments"
+        );
+
+        ServiceDefinition standalone = project.service("standalone-mock").orElseThrow();
+        Assert.assertTrue(standalone.repository().isEmpty(), "non-git service has empty repository");
+        Assert.assertEquals(configDir.resolve("mocks/standalone-mock"), standalone.workingDir(), "standalone workingDir");
+
+        GatewayDefinition gw = project.gateway().orElseThrow();
+        Assert.assertEquals("http://127.0.0.1:8080", gw.adminUrl(), "gateway adminUrl");
+        Assert.assertEquals(
+            List.of("java", "-jar", expectedReposRoot + "/wiremock/wiremock.jar", "--port", "8080"),
+            gw.command(),
+            "gateway command templates expanded"
+        );
+        Assert.assertEquals(Optional.of(expectedReposRoot.resolve("wiremock")), gw.workingDir(), "gateway workingDir");
+
+        Assert.assertNotContains(project.toString(), "secret-from-host", "Project.toString must not leak secret env");
+        Assert.assertNotContains(s1.toString(), "secret-from-host", "ServiceDefinition.toString must not leak secret env");
+    }
+
+    public static void testResolvesCatalogPathUsingRepositoriesRootAndServiceEnvFilesPrecedence() {
+        String configJson = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "../repos",
+              "envFiles": [".env"],
+              "defaults": {
+                "env": {
+                  "FROM_DEFAULT": "default-val"
+                }
+              },
+              "runtimes": {
+                "node": {
+                  "command": ["node", "index.js"],
+                  "env": {
+                    "FROM_DEFAULT": "runtime-val"
+                  }
+                }
+              },
+              "catalog": {
+                "path": "{{repositoriesRoot}}/gitops/service-index.json",
+                "map": {
+                  "name": "name",
+                  "runtime": "runtime",
+                  "repositoryUrl": "repo"
+                }
+              },
+              "services": {
+                "web": {
+                  "envFiles": [".env.web"],
+                  "env": {
+                    "SVC_ONLY": "svc-val"
+                  }
+                }
+              }
+            }
+            """;
+
+        Path configDir = Path.of("C:/dev/acme/cfg").toAbsolutePath().normalize();
+        Path configPath = configDir.resolve("procomp.json");
+        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parses");
+
+        Path catalogPath = Assert.assertOk(
+            ProjectResolver.resolveCatalogPath(configDir, raw),
+            "catalog path resolves"
+        ).orElseThrow();
+        Assert.assertEquals(
+            Path.of("C:/dev/acme/repos/gitops/service-index.json").toAbsolutePath().normalize(),
+            catalogPath,
+            "catalog path expands {{repositoriesRoot}}"
+        );
+
+        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
+            CatalogParser.parse(raw.catalog().orElseThrow(), "[{\"name\":\"web\",\"runtime\":\"node\",\"repo\":\"git@git.corp:acme/web.git\"}]"),
+            "root-array catalog parses"
+        );
+
+        Path webRepo = Path.of("C:/dev/acme/repos/web").toAbsolutePath().normalize();
+        Map<Path, String> envFiles = Map.of(
+            configDir.resolve(".env"), "SHARED_KEY=from-top\nSVC_KEY=from-top\n",
+            webRepo.resolve(".env.web"), "SVC_KEY=from-service-envfile\n"
+        );
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, raw, catalog, envFiles, Map.of()),
+            "project resolves"
+        );
+        ServiceDefinition web = project.service("web").orElseThrow();
+        Assert.assertEquals("from-top", web.env().asMap().get("SHARED_KEY"), "top .env applied");
+        Assert.assertEquals("from-service-envfile", web.env().asMap().get("SVC_KEY"), "service envFile overrides top envFile");
+        Assert.assertEquals("runtime-val", web.env().asMap().get("FROM_DEFAULT"), "runtime env overrides default env");
+        Assert.assertEquals("svc-val", web.env().asMap().get("SVC_ONLY"), "service env applied");
+    }
+
+    public static void testFailsFastOnUndefinedTemplateUnknownRuntimeUnknownProfileServiceOrMissingWorkingDir() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+
+        // 1. Undefined {{var}}
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo","{{missingVar}}"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            "CONFIG_UNDEFINED_TEMPLATE_VAR"
+        );
+
+        // 2. Unknown runtime
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{},"services":{"s1":{"runtime":"ghost","workingDir":"."}}}
+            """,
+            "CONFIG_UNKNOWN_RUNTIME"
+        );
+
+        // 3. Unknown service in profile
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"services":{},"profiles":{"p":{"local":["ghost"]}}}
+            """,
+            "CONFIG_UNKNOWN_SERVICE"
+        );
+
+        // 4. Missing workingDir when no repository
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt"}}}
+            """,
+            "CONFIG_MISSING_WORKING_DIR"
+        );
+
+        // 5. Embedded string[] var inside scalar string
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","defaults":{"vars":{"args":["-a"]}},"runtimes":{"rt":{"command":["echo","--flag={{args}}"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            "CONFIG_INVALID_TEMPLATE_TYPE"
+        );
+
+        // 6. Unset ${env:VAR}
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","defaults":{"env":{"TOK":"${env:MISSING_HOST_ENV}"}},"runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            "CONFIG_UNSET_ENV_VAR"
+        );
+
+        // 7. Missing required .env file
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","envFiles":[".env.required"],"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_MISSING_ENV_FILE"
+        );
+
+        // 8. {{artifact}} used without artifactGlob
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["java","-jar","{{artifact}}"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            "CONFIG_UNDEFINED_TEMPLATE_VAR"
+        );
+    }
+
+    private static void assertResolveErr(Path configPath, String json, String expectedCode) {
+        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(json), "config parses cleanly: " + json);
+        DomainError err = Assert.assertErr(
+            ProjectResolver.resolve(configPath, raw, Map.of(), Map.of(), Map.of()),
+            "expected resolve error " + expectedCode + " for: " + json
+        );
+        Assert.assertEquals(expectedCode, err.code(), "error code for: " + json);
+    }
+}
