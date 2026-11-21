@@ -4,10 +4,9 @@ import procomp.Assert;
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
+import procomp.core.common.Result;
 import procomp.core.project.Project;
-import procomp.core.project.ProjectConfigParser;
 import procomp.core.project.ProjectResolver;
-import procomp.core.project.RawProjectConfig;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingEngine;
 import procomp.core.routing.RoutingTable;
@@ -255,7 +254,9 @@ public final class GatewayEngineTest {
 
     private static Project loadProject(String json) {
         Path configPath = Path.of("C:/work/acme/procomp.json").toAbsolutePath().normalize();
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(json), "config parses");
-        return Assert.assertOk(ProjectResolver.resolve(configPath, raw, Map.of(), Map.of(), Map.of()), "project resolves");
+        return Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, _ -> Result.ok(Optional.empty()), Map.of()),
+            "project resolves"
+        );
     }
 }

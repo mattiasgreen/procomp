@@ -12,13 +12,23 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Pure resolver that validates and transforms RawProjectConfig + Catalog items + env files into a Project.
+ * Pure resolver that parses procomp.json, loads optional Catalog and envFiles via a supplied lookup,
+ * validates templates and references, and produces an immutable Project.
  */
 public final class ProjectResolver {
 
-    public record EnvFileTarget(Path path, boolean optional, String context) {}
+    /**
+     * Pure file-lookup callback supplied by the caller (e.g. ConfigSource in shell/ or an in-memory Map in tests).
+     * Returns {@code Result.ok(Optional.empty())} when the path does not exist as a regular file.
+     */
+    @FunctionalInterface
+    public interface FileLookup {
+        Result<Optional<String>, DomainError> readIfPresent(Path path);
+    }
 
-    public record ServiceDraft(
+    private record EnvFileTarget(Path path, boolean optional, String context) {}
+
+    private record ServiceDraft(
         String name,
         RawProjectConfig.RawServiceConfig mergedConfig,
         Optional<RepositoryRef> repository,
@@ -27,7 +37,7 @@ public final class ProjectResolver {
         List<EnvFileTarget> serviceEnvFiles
     ) {}
 
-    public record ResolutionPlan(
+    private record ResolutionPlan(
         Path configPath,
         Path configDir,
         Optional<Path> repositoriesRoot,
@@ -35,7 +45,7 @@ public final class ProjectResolver {
         List<EnvFileTarget> topEnvFiles,
         List<ServiceDraft> serviceDrafts
     ) {
-        public List<EnvFileTarget> allEnvFileTargets() {
+        List<EnvFileTarget> allEnvFileTargets() {
             List<EnvFileTarget> all = new ArrayList<>(topEnvFiles);
             for (ServiceDraft draft : serviceDrafts) {
                 all.addAll(draft.serviceEnvFiles());
@@ -46,10 +56,75 @@ public final class ProjectResolver {
 
     private ProjectResolver() {}
 
-    public static Result<Optional<Path>, DomainError> resolveCatalogPath(Path configDir, RawProjectConfig rawConfig) {
-        if (rawConfig.catalog().isEmpty()) {
-            return Result.ok(Optional.empty());
+    public static Result<Project, DomainError> resolve(
+        Path configPath,
+        String rawConfigJson,
+        FileLookup fileLookup,
+        Map<String, String> hostEnv
+    ) {
+        Result<RawProjectConfig, DomainError> rawCfgRes = ProjectConfigParser.parse(rawConfigJson);
+        if (rawCfgRes.isErr()) {
+            return rawCfgRes.castError();
         }
+        RawProjectConfig rawConfig = okVal(rawCfgRes);
+
+        Path normalizedConfigPath = configPath.normalize();
+        Path configDir = normalizedConfigPath.getParent();
+        if (configDir == null) {
+            return Result.err(DomainError.of("CONFIG_INVALID_PATH", "Config path must have a parent directory"));
+        }
+
+        Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> catalogRes =
+            loadCatalogServices(configDir, rawConfig, fileLookup);
+        if (catalogRes.isErr()) {
+            return catalogRes.castError();
+        }
+
+        Result<ResolutionPlan, DomainError> planRes =
+            planResolution(normalizedConfigPath, configDir, rawConfig, okVal(catalogRes));
+        if (planRes.isErr()) {
+            return planRes.castError();
+        }
+        ResolutionPlan plan = okVal(planRes);
+
+        Result<Map<Path, Map<String, String>>, DomainError> envFilesRes = loadAndParseEnvFiles(plan, fileLookup);
+        if (envFilesRes.isErr()) {
+            return envFilesRes.castError();
+        }
+
+        return finalizeProject(plan, okVal(envFilesRes), hostEnv);
+    }
+
+    private static Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> loadCatalogServices(
+        Path configDir,
+        RawProjectConfig rawConfig,
+        FileLookup fileLookup
+    ) {
+        if (rawConfig.catalog().isEmpty()) {
+            return Result.ok(Map.of());
+        }
+        Result<Path, DomainError> catPathRes = resolveCatalogPath(configDir, rawConfig);
+        if (catPathRes.isErr()) {
+            return catPathRes.castError();
+        }
+        Path catalogPath = okVal(catPathRes);
+
+        Result<Optional<String>, DomainError> readRes = fileLookup.readIfPresent(catalogPath);
+        if (readRes.isErr()) {
+            return readRes.castError();
+        }
+        Optional<String> catJsonOpt = okVal(readRes);
+        if (catJsonOpt.isEmpty()) {
+            return Result.err(DomainError.of(
+                "CATALOG_NOT_FOUND",
+                "Catalog file not found at '" + catalogPath + "'",
+                Map.of("path", catalogPath.toString())
+            ));
+        }
+        return CatalogParser.parse(rawConfig.catalog().get(), catJsonOpt.get());
+    }
+
+    private static Result<Path, DomainError> resolveCatalogPath(Path configDir, RawProjectConfig rawConfig) {
         Optional<Path> reposRoot = resolveRepositoriesRoot(configDir, rawConfig);
         Map<String, VarValue> pathVars = new LinkedHashMap<>();
         pathVars.put("configDir", new VarValue.Scalar(configDir.toString()));
@@ -64,44 +139,15 @@ public final class ProjectResolver {
         if (expanded.isErr()) {
             return expanded.castError();
         }
-        Path resolved = configDir.resolve(okVal(expanded)).normalize();
-        return Result.ok(Optional.of(resolved));
+        return Result.ok(configDir.resolve(okVal(expanded)).normalize());
     }
 
-    public static Result<Project, DomainError> resolve(
-        Path configPath,
-        RawProjectConfig rawConfig,
-        Map<String, RawProjectConfig.RawServiceConfig> catalogServices,
-        Map<Path, String> loadedEnvFiles,
-        Map<String, String> hostEnv
-    ) {
-        Result<ResolutionPlan, DomainError> planRes = planResolution(configPath, rawConfig, catalogServices);
-        if (planRes.isErr()) {
-            return planRes.castError();
-        }
-        ResolutionPlan plan = okVal(planRes);
-        for (EnvFileTarget target : plan.allEnvFileTargets()) {
-            if (!target.optional() && !loadedEnvFiles.containsKey(target.path())) {
-                return Result.err(DomainError.of(
-                    "CONFIG_MISSING_ENV_FILE",
-                    "Required envFile '" + target.path() + "' not found (" + target.context() + ")",
-                    Map.of("path", target.path().toString(), "context", target.context())
-                ));
-            }
-        }
-        return finalizeProject(plan, loadedEnvFiles, hostEnv);
-    }
-
-    public static Result<ResolutionPlan, DomainError> planResolution(
-        Path configPath,
+    private static Result<ResolutionPlan, DomainError> planResolution(
+        Path normalizedConfigPath,
+        Path configDir,
         RawProjectConfig rawConfig,
         Map<String, RawProjectConfig.RawServiceConfig> catalogServices
     ) {
-        Path normalizedConfigPath = configPath.normalize();
-        Path configDir = normalizedConfigPath.getParent();
-        if (configDir == null) {
-            return Result.err(DomainError.of("CONFIG_INVALID_PATH", "Config path must have a parent directory"));
-        }
         Optional<Path> reposRoot = resolveRepositoriesRoot(configDir, rawConfig);
 
         Map<String, VarValue> baseVars = new LinkedHashMap<>(rawConfig.defaults().vars());
@@ -177,16 +223,12 @@ public final class ProjectResolver {
         ));
     }
 
-    public static Result<Project, DomainError> finalizeProject(
+    private static Result<Project, DomainError> finalizeProject(
         ResolutionPlan plan,
-        Map<Path, String> loadedEnvFiles,
+        Map<Path, Map<String, String>> parsedEnvFiles,
         Map<String, String> hostEnv
     ) {
         RawProjectConfig rawConfig = plan.rawConfig();
-
-        Result<Map<Path, Map<String, String>>, DomainError> parsedEnvFilesRes = parseAllLoadedEnvFiles(plan, loadedEnvFiles);
-        if (parsedEnvFilesRes.isErr()) return parsedEnvFilesRes.castError();
-        Map<Path, Map<String, String>> parsedEnvFiles = okVal(parsedEnvFilesRes);
 
         Map<String, String> topEnvFileOverlay = new LinkedHashMap<>();
         for (EnvFileTarget t : plan.topEnvFiles()) {
@@ -460,22 +502,41 @@ public final class ProjectResolver {
         )));
     }
 
-    private static Result<Map<Path, Map<String, String>>, DomainError> parseAllLoadedEnvFiles(
+    private static Result<Map<Path, Map<String, String>>, DomainError> loadAndParseEnvFiles(
         ResolutionPlan plan,
-        Map<Path, String> loadedEnvFiles
+        FileLookup fileLookup
     ) {
+        Map<Path, Optional<Map<String, String>>> cache = new LinkedHashMap<>();
         Map<Path, Map<String, String>> parsed = new LinkedHashMap<>();
         for (EnvFileTarget target : plan.allEnvFileTargets()) {
-            if (parsed.containsKey(target.path())) {
-                continue;
+            Optional<Map<String, String>> entry = cache.get(target.path());
+            if (entry == null) {
+                Result<Optional<String>, DomainError> readRes = fileLookup.readIfPresent(target.path());
+                if (readRes.isErr()) {
+                    return readRes.castError();
+                }
+                Optional<String> contentOpt = okVal(readRes);
+                if (contentOpt.isPresent()) {
+                    Result<Map<String, String>, DomainError> parseRes =
+                        EnvFileParser.parse(target.path().toString(), contentOpt.get());
+                    if (parseRes.isErr()) {
+                        return parseRes.castError();
+                    }
+                    Map<String, String> envMap = okVal(parseRes);
+                    entry = Optional.of(envMap);
+                    parsed.put(target.path(), envMap);
+                } else {
+                    entry = Optional.empty();
+                }
+                cache.put(target.path(), entry);
             }
-            String content = loadedEnvFiles.get(target.path());
-            if (content == null) {
-                continue;
+            if (entry.isEmpty() && !target.optional()) {
+                return Result.err(DomainError.of(
+                    "CONFIG_MISSING_ENV_FILE",
+                    "Required envFile '" + target.path() + "' not found (" + target.context() + ")",
+                    Map.of("path", target.path().toString(), "context", target.context())
+                ));
             }
-            Result<Map<String, String>, DomainError> res = EnvFileParser.parse(target.path().toString(), content);
-            if (res.isErr()) return res.castError();
-            parsed.put(target.path(), okVal(res));
         }
         return Result.ok(parsed);
     }

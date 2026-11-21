@@ -11,7 +11,7 @@ import java.util.Optional;
  * For {@code healthPath}, {@link Optional#empty()} indicates omitted/inherited whereas {@code Optional.of("")}
  * preserves an explicit empty override that disables HTTP health checks.
  */
-public record RawProjectConfig(
+record RawProjectConfig(
     String project,
     Optional<String> repositoriesRoot,
     List<EnvFileSpec> envFiles,
@@ -22,31 +22,31 @@ public record RawProjectConfig(
     Map<String, RawServiceConfig> services,
     Map<String, ProfileDefinition> profiles
 ) {
-    public RawProjectConfig {
+    RawProjectConfig {
         envFiles = List.copyOf(envFiles);
         runtimes = Collections.unmodifiableMap(new LinkedHashMap<>(runtimes));
         services = Collections.unmodifiableMap(new LinkedHashMap<>(services));
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
     }
 
-    public record RawDefaultsConfig(
+    record RawDefaultsConfig(
         Optional<String> proxyPathTemplate,
         Optional<String> remoteUrlTemplate,
         Optional<String> workingDir,
         Map<String, VarValue> vars,
         Map<String, String> env
     ) {
-        public static final RawDefaultsConfig EMPTY = new RawDefaultsConfig(
+        static final RawDefaultsConfig EMPTY = new RawDefaultsConfig(
             Optional.empty(), Optional.empty(), Optional.empty(), Map.of(), Map.of()
         );
 
-        public RawDefaultsConfig {
+        RawDefaultsConfig {
             vars = Collections.unmodifiableMap(new LinkedHashMap<>(vars));
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
         }
     }
 
-    public record RawRuntimeConfig(
+    record RawRuntimeConfig(
         List<String> command,
         Optional<String> healthPath,
         Optional<String> artifactGlob,
@@ -54,13 +54,13 @@ public record RawProjectConfig(
         Optional<String> workingDir,
         Map<String, String> env
     ) {
-        public RawRuntimeConfig {
+        RawRuntimeConfig {
             command = List.copyOf(command);
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
         }
     }
 
-    public record RawGatewayConfig(
+    record RawGatewayConfig(
         String type,
         int port,
         Optional<String> healthPath,
@@ -68,13 +68,13 @@ public record RawProjectConfig(
         Optional<String> workingDir,
         Map<String, String> env
     ) {
-        public RawGatewayConfig {
+        RawGatewayConfig {
             command = List.copyOf(command);
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
         }
     }
 
-    public record RawServiceConfig(
+    record RawServiceConfig(
         Optional<Integer> port,
         Optional<String> runtime,
         Optional<String> repository,
@@ -87,7 +87,7 @@ public record RawProjectConfig(
         Map<String, String> env,
         List<EnvFileSpec> envFiles
     ) {
-        public RawServiceConfig {
+        RawServiceConfig {
             vars = Collections.unmodifiableMap(new LinkedHashMap<>(vars));
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
             envFiles = List.copyOf(envFiles);

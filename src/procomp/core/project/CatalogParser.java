@@ -15,11 +15,11 @@ import java.util.OptionalInt;
 /**
  * Pure importer that extracts raw Service definitions from an external Catalog JSON using explicit field mapping.
  */
-public final class CatalogParser {
+final class CatalogParser {
 
     private CatalogParser() {}
 
-    public static Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> parse(
+    static Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> parse(
         CatalogMapping mapping,
         String catalogJson
     ) {

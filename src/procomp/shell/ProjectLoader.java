@@ -2,21 +2,17 @@ package procomp.shell;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
-import procomp.core.project.CatalogParser;
 import procomp.core.project.Project;
-import procomp.core.project.ProjectConfigParser;
 import procomp.core.project.ProjectResolver;
-import procomp.core.project.RawProjectConfig;
 import procomp.shell.ports.ConfigSource;
 
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
 /**
- * Use-case orchestrator that discovers procomp.json, loads external Catalog and envFiles via ConfigSource,
- * and delegates validation and resolution to pure core functions.
+ * Use-case orchestrator that discovers procomp.json and delegates parsing, Catalog/envFile loading,
+ * validation, and resolution to {@link ProjectResolver}.
  */
 public final class ProjectLoader {
 
@@ -40,69 +36,19 @@ public final class ProjectLoader {
             return rawJsonRes.castError();
         }
 
-        Result<RawProjectConfig, DomainError> rawCfgRes = ProjectConfigParser.parse(okVal(rawJsonRes));
-        if (rawCfgRes.isErr()) {
-            return rawCfgRes.castError();
-        }
-        RawProjectConfig rawConfig = okVal(rawCfgRes);
+        return ProjectResolver.resolve(
+            configPath,
+            okVal(rawJsonRes),
+            this::readOptionalFile,
+            configSource.allEnvVars()
+        );
+    }
 
-        Path configDir = configPath.getParent();
-        Map<String, RawProjectConfig.RawServiceConfig> catalogServices = Map.of();
-        if (rawConfig.catalog().isPresent()) {
-            Result<Optional<Path>, DomainError> catPathRes = ProjectResolver.resolveCatalogPath(configDir, rawConfig);
-            if (catPathRes.isErr()) {
-                return catPathRes.castError();
-            }
-            Path catalogPath = okVal(catPathRes).orElseThrow();
-            if (!configSource.isRegularFile(catalogPath)) {
-                return Result.err(DomainError.of(
-                    "CATALOG_NOT_FOUND",
-                    "Catalog file not found at '" + catalogPath + "'",
-                    Map.of("path", catalogPath.toString())
-                ));
-            }
-            Result<String, DomainError> catJsonRes = configSource.readFile(catalogPath);
-            if (catJsonRes.isErr()) {
-                return catJsonRes.castError();
-            }
-            Result<Map<String, RawProjectConfig.RawServiceConfig>, DomainError> parsedCatRes =
-                CatalogParser.parse(rawConfig.catalog().get(), okVal(catJsonRes));
-            if (parsedCatRes.isErr()) {
-                return parsedCatRes.castError();
-            }
-            catalogServices = okVal(parsedCatRes);
+    private Result<Optional<String>, DomainError> readOptionalFile(Path path) {
+        if (!configSource.isRegularFile(path)) {
+            return Result.ok(Optional.empty());
         }
-
-        Result<ProjectResolver.ResolutionPlan, DomainError> planRes =
-            ProjectResolver.planResolution(configPath, rawConfig, catalogServices);
-        if (planRes.isErr()) {
-            return planRes.castError();
-        }
-        ProjectResolver.ResolutionPlan plan = okVal(planRes);
-
-        Map<Path, String> loadedEnvFiles = new LinkedHashMap<>();
-        for (ProjectResolver.EnvFileTarget target : plan.allEnvFileTargets()) {
-            if (loadedEnvFiles.containsKey(target.path())) {
-                continue;
-            }
-            if (!configSource.isRegularFile(target.path())) {
-                if (!target.optional()) {
-                    return Result.err(DomainError.of(
-                        "CONFIG_MISSING_ENV_FILE",
-                        "Required envFile '" + target.path() + "' not found (" + target.context() + ")",
-                        Map.of("path", target.path().toString(), "context", target.context())
-                    ));
-                }
-                continue;
-            }
-            Result<String, DomainError> envContentRes = configSource.readFile(target.path());
-            if (envContentRes.isErr()) {
-                return envContentRes.castError();
-            }
-            loadedEnvFiles.put(target.path(), okVal(envContentRes));
-        }
-
-        return ProjectResolver.finalizeProject(plan, loadedEnvFiles, configSource.allEnvVars());
+        return configSource.readFile(path).map(Optional::of);
     }
 
     private Result<Path, DomainError> discoverConfigPath(Optional<Path> configOverride) {

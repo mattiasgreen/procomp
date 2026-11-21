@@ -2,6 +2,7 @@ package procomp.core.project;
 
 import procomp.Assert;
 import procomp.core.common.DomainError;
+import procomp.core.common.Result;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -9,6 +10,14 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class ProjectResolverTest {
+
+    private static ProjectResolver.FileLookup filesOf(Map<Path, String> files) {
+        return path -> Result.ok(Optional.ofNullable(files.get(path)));
+    }
+
+    private static ProjectResolver.FileLookup emptyFiles() {
+        return _ -> Result.ok(Optional.empty());
+    }
 
     public static void testMergesCatalogAndOverridesSplicesArgvAndDerivesSharedRepos() {
         String configJson = """
@@ -112,24 +121,19 @@ public final class ProjectResolverTest {
             }
             """;
 
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parse");
-        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
-            CatalogParser.parse(raw.catalog().orElseThrow(), catalogJson),
-            "catalog parse"
-        );
-
         Path configDir = Path.of("C:/dev/acme/config").toAbsolutePath().normalize();
         Path configPath = configDir.resolve("procomp.json");
+        Path catalogPath = configDir.resolve("service-index.json");
         Path envPath = configDir.resolve(".env");
 
-        Map<Path, String> envFiles = Map.of(
-            envPath,
-            "DB_PASSWORD=from-dotenv\nEXTRA_DOTENV=hello\n"
+        Map<Path, String> files = Map.of(
+            catalogPath, catalogJson,
+            envPath, "DB_PASSWORD=from-dotenv\nEXTRA_DOTENV=hello\n"
         );
         Map<String, String> hostEnv = Map.of("ACME_DB_PASSWORD", "secret-from-host");
 
         Project project = Assert.assertOk(
-            ProjectResolver.resolve(configPath, raw, catalog, envFiles, hostEnv),
+            ProjectResolver.resolve(configPath, configJson, filesOf(files), hostEnv),
             "project resolution should succeed without checking repo dirs on disk"
         );
 
@@ -219,32 +223,18 @@ public final class ProjectResolverTest {
 
         Path configDir = Path.of("C:/dev/acme/cfg").toAbsolutePath().normalize();
         Path configPath = configDir.resolve("procomp.json");
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parses");
-
-        Path catalogPath = Assert.assertOk(
-            ProjectResolver.resolveCatalogPath(configDir, raw),
-            "catalog path resolves"
-        ).orElseThrow();
-        Assert.assertEquals(
-            Path.of("C:/dev/acme/repos/gitops/service-index.json").toAbsolutePath().normalize(),
-            catalogPath,
-            "catalog path expands {{repositoriesRoot}}"
-        );
-
-        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
-            CatalogParser.parse(raw.catalog().orElseThrow(), "[{\"name\":\"web\",\"runtime\":\"node\",\"repo\":\"git@git.corp:acme/web.git\"}]"),
-            "root-array catalog parses"
-        );
-
+        Path catalogPath = Path.of("C:/dev/acme/repos/gitops/service-index.json").toAbsolutePath().normalize();
         Path webRepo = Path.of("C:/dev/acme/repos/web").toAbsolutePath().normalize();
-        Map<Path, String> envFiles = Map.of(
+
+        Map<Path, String> files = Map.of(
+            catalogPath, "[{\"name\":\"web\",\"runtime\":\"node\",\"repo\":\"git@git.corp:acme/web.git\"}]",
             configDir.resolve(".env"), "SHARED_KEY=from-top\nSVC_KEY=from-top\n",
             webRepo.resolve(".env.web"), "SVC_KEY=from-service-envfile\n"
         );
 
         Project project = Assert.assertOk(
-            ProjectResolver.resolve(configPath, raw, catalog, envFiles, Map.of()),
-            "project resolves"
+            ProjectResolver.resolve(configPath, configJson, filesOf(files), Map.of()),
+            "project resolves catalog via {{repositoriesRoot}} and applies envFiles precedence"
         );
         ServiceDefinition web = project.service("web").orElseThrow();
         Assert.assertEquals("from-top", web.env().asMap().get("SHARED_KEY"), "top .env applied");
@@ -327,6 +317,29 @@ public final class ProjectResolverTest {
             """,
             "CONFIG_UNDEFINED_TEMPLATE_VAR"
         );
+
+        // 9. Missing catalog file
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"catalog":{"path":"missing-catalog.json","map":{"name":"n"}}}
+            """,
+            "CATALOG_NOT_FOUND"
+        );
+
+        // 10. FileLookup I/O error propagates cleanly
+        DomainError ioErr = Assert.assertErr(
+            ProjectResolver.resolve(
+                configPath,
+                """
+                {"project":"acme","envFiles":[".env"],"runtimes":{"rt":{"command":["echo"]}}}
+                """,
+                _ -> Result.err(DomainError.of("CONFIG_READ_ERROR", "Permission denied")),
+                Map.of()
+            ),
+            "fileLookup error must propagate"
+        );
+        Assert.assertEquals("CONFIG_READ_ERROR", ioErr.code(), "propagated fileLookup error code");
     }
 
     public static void testExplicitEmptyHealthPathOverridesRuntimeAndCatalogHealthPath() {
@@ -374,13 +387,9 @@ public final class ProjectResolverTest {
             ]
             """;
 
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parses");
-        Map<String, RawProjectConfig.RawServiceConfig> catalog = Assert.assertOk(
-            CatalogParser.parse(raw.catalog().orElseThrow(), catalogJson),
-            "catalog parses"
-        );
+        Path catalogPath = configPath.getParent().resolve("idx.json");
         Project project = Assert.assertOk(
-            ProjectResolver.resolve(configPath, raw, catalog, Map.of(), Map.of()),
+            ProjectResolver.resolve(configPath, configJson, filesOf(Map.of(catalogPath, catalogJson)), Map.of()),
             "project resolves"
         );
 
@@ -496,17 +505,15 @@ public final class ProjectResolverTest {
               }
             }
             """;
-        RawProjectConfig rawValid = Assert.assertOk(ProjectConfigParser.parse(validConfig), "valid config parses");
         Assert.assertOk(
-            ProjectResolver.resolve(configPath, rawValid, Map.of(), Map.of(), Map.of()),
+            ProjectResolver.resolve(configPath, validConfig, emptyFiles(), Map.of()),
             "valid built-in and service.vars references in overridden defaults and unused runtimes pass"
         );
     }
 
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(json), "config parses cleanly: " + json);
         DomainError err = Assert.assertErr(
-            ProjectResolver.resolve(configPath, raw, Map.of(), Map.of(), Map.of()),
+            ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),
             "expected resolve error " + expectedCode + " for: " + json
         );
         Assert.assertEquals(expectedCode, err.code(), "error code for: " + json);
