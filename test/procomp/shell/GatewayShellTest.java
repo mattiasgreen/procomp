@@ -21,10 +21,10 @@ import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
 import procomp.shell.ports.HttpClient.HttpResponseData;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessKey;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 
 import java.net.URI;
 import java.nio.file.Path;
@@ -115,9 +115,9 @@ public final class GatewayShellTest {
 
         // 6. Unmanaged WireMock on port 8080 -> start reuses without duplicating; stop REFUSES without killing!
         portScanner.bind(8080, 6100L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             6100L, true, Optional.of(clock.now()), Optional.of("java -jar ext-wiremock.jar"),
-            List.of("-jar", "ext-wiremock.jar"), List.of(new ParentProcessInfo(10L, Optional.of("bash"), Optional.of("bash"))),
+            List.of("-jar", "ext-wiremock.jar"), List.of(new ParentProcess(10L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
@@ -304,7 +304,7 @@ public final class GatewayShellTest {
         var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner().bind(8080, 6200L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             6200L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));

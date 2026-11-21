@@ -9,7 +9,7 @@ import java.util.Optional;
  */
 public record DiscoveryInput(
     ProcessTarget target,
-    Optional<ManagedRecordView> managedRecord,
+    Optional<ManagedProcessRecord> managedRecord,
     Optional<PortBinding> portListener,
     Optional<ObservedProcess> process,
     HealthCheck healthCheck,

@@ -11,10 +11,10 @@ import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessKey;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -48,13 +48,13 @@ public final class ProcessCliTest {
             outLog,
             errLog
         )), "seed record");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             3001L,
             true,
             Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
             Optional.of("java -jar orders/app.jar"),
             List.of("-jar", "orders/app.jar"),
-            List.of(new ParentProcessInfo(100L, Optional.of("procomp start"), Optional.of("java"))),
+            List.of(new ParentProcess(100L, Optional.of("procomp start"), Optional.of("java"))),
             Optional.of(128L * 1024 * 1024),
             Optional.of("java")
         ));
@@ -112,7 +112,7 @@ public final class ProcessCliTest {
                 }
                 """);
         portScanner.bind(8080, 8100L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8100L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -167,10 +167,10 @@ public final class ProcessCliTest {
 
         // 3. Port conflict on billing exits 1 with inspection details and never leaks secrets
         portScanner.bind(9002, 8888L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8888L, true, Optional.of(Instant.parse("2026-11-20T11:55:00Z")),
             Optional.of("nc -l 9002"), List.of("-l", "9002"),
-            List.of(new ParentProcessInfo(5L, Optional.of("sh"), Optional.of("sh"))),
+            List.of(new ParentProcess(5L, Optional.of("sh"), Optional.of("sh"))),
             Optional.empty(), Optional.of("nc")
         ));
         CliResult conflictRes = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "start", "billing");
@@ -213,7 +213,7 @@ public final class ProcessCliTest {
 
         // Explicit service --kill-conflict kills conflict
         portScanner.bind(9002, 7171L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7171L, true, Optional.of(clock.now()), Optional.of("socat"), List.of(), List.of(), Optional.empty(), Optional.of("socat")
         ));
         CliResult killConflict = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "stop", "billing", "--kill-conflict");

@@ -3,6 +3,7 @@ package procomp.fakes;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.ObservedProcess;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.ProcessRunner;
 
@@ -18,7 +19,7 @@ public final class FakeProcessRunner implements ProcessRunner {
 
     private final Clock clock;
     private long nextPid = 10000;
-    private final Map<Long, ProcessSnapshot> processes = new LinkedHashMap<>();
+    private final Map<Long, ObservedProcess> processes = new LinkedHashMap<>();
     private final List<SpawnRequest> spawnedRequests = new ArrayList<>();
     private final List<Long> stoppedPids = new ArrayList<>();
     private DomainError spawnError;
@@ -27,7 +28,7 @@ public final class FakeProcessRunner implements ProcessRunner {
         this.clock = clock;
     }
 
-    public FakeProcessRunner registerProcess(ProcessSnapshot snapshot) {
+    public FakeProcessRunner registerProcess(ObservedProcess snapshot) {
         processes.put(snapshot.pid(), snapshot);
         return this;
     }
@@ -61,7 +62,7 @@ public final class FakeProcessRunner implements ProcessRunner {
         long pid = nextPid++;
         Instant startedAt = clock.now();
         String cmdLine = String.join(" ", request.command());
-        processes.put(pid, new ProcessSnapshot(
+        processes.put(pid, new ObservedProcess(
             pid,
             true,
             Optional.of(startedAt),
@@ -75,13 +76,13 @@ public final class FakeProcessRunner implements ProcessRunner {
     }
 
     @Override
-    public Result<Optional<ProcessSnapshot>, DomainError> inspect(long pid) {
+    public Result<Optional<ObservedProcess>, DomainError> inspect(long pid) {
         return Result.ok(Optional.ofNullable(processes.get(pid)));
     }
 
     @Override
     public boolean isAlive(long pid) {
-        ProcessSnapshot snap = processes.get(pid);
+        ObservedProcess snap = processes.get(pid);
         return snap != null && snap.alive();
     }
 

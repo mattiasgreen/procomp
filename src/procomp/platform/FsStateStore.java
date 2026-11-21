@@ -5,8 +5,8 @@ import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
-import procomp.shell.ports.ManagedProcessRecord;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.StateStore;
 

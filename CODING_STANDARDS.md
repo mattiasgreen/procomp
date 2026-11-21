@@ -11,7 +11,7 @@ Judgement-call standards enforced during `/code-review` (mechanical import, puri
 - Reuse existing shared helpers rather than copying local variants across modules:
   - `Result.castError()` for propagating typed errors across `Result<T, E>` return types.
   - `CliFormat` for CLI option parsing (`--timeout`, positive integer seconds), table rendering, duration formatting, and JSON null helpers.
-  - `TargetLifecycleSupport` for shared `Service`/`Gateway` discovery, detached launch, health waiting, and managed teardown.
+  - `ProcessLifecycle` for shared `Service`/`Gateway` discovery, inspection, start orchestration, health waiting, and teardown.
 
 ## Domain Clarity & Minimalism
 

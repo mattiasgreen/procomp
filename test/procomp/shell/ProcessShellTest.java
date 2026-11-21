@@ -18,10 +18,10 @@ import procomp.fakes.FakeProjectFiles;
 import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessKey;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 
 import java.net.URI;
 import java.nio.file.Path;
@@ -61,13 +61,13 @@ public final class ProcessShellTest {
             errLog
         );
         Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), rec), "persist managed record");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             4100L,
             true,
             Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
             Optional.of("java -jar orders-1.0.jar"),
             List.of("-jar", "orders-1.0.jar"),
-            List.of(new ParentProcessInfo(10L, Optional.of("procomp start orders"), Optional.of("java.exe"))),
+            List.of(new ParentProcess(10L, Optional.of("procomp start orders"), Optional.of("java.exe"))),
             Optional.of(128L * 1024 * 1024),
             Optional.of("java")
         ));
@@ -101,13 +101,13 @@ public final class ProcessShellTest {
 
         // Unmanaged booting IDE process on billing
         portScanner.bind(9002, 5500L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             5500L,
             true,
             Optional.of(Instant.parse("2026-11-20T11:59:00Z")),
             Optional.of("java -agentlib:jdwp -jar billing.jar"),
             List.of("-agentlib:jdwp", "-jar", "billing.jar"),
-            List.of(new ParentProcessInfo(99L, Optional.of("\"C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe\""), Optional.of("C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe"))),
+            List.of(new ParentProcess(99L, Optional.of("\"C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe\""), Optional.of("C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe"))),
             Optional.empty(),
             Optional.of("java")
         ));
@@ -178,7 +178,7 @@ public final class ProcessShellTest {
 
         // 3. Gateway STARTING (health 503) -> OFFLINE even if /__admin/mappings would error
         portScanner.bind(8080, 8100L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8100L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -345,10 +345,10 @@ public final class ProcessShellTest {
 
         // 1. Conflict on billing + NONE on orders -> fail fast BEFORE spawning orders!
         portScanner.bind(9002, 7777L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7777L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
             Optional.of("python -m http.server 9002"), List.of("-m", "http.server", "9002"),
-            List.of(new ParentProcessInfo(10L, Optional.of("bash"), Optional.of("bash"))),
+            List.of(new ParentProcess(10L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("python")
         ));
         DomainError conflictErr = Assert.assertErr(
@@ -361,10 +361,10 @@ public final class ProcessShellTest {
         Assert.assertEquals(0, processRunner.spawnedRequests().size(), "conflict prevents spawning any process");
 
         // 2. Booting IDE process on billing -> UNMANAGED (IDE) STARTING, start waits until healthy without spawning
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7777L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
             Optional.of("java -jar billing.jar"), List.of("-jar", "billing.jar"),
-            List.of(new ParentProcessInfo(20L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
+            List.of(new ParentProcess(20L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
         clock.onSleep(step -> {
@@ -449,16 +449,16 @@ public final class ProcessShellTest {
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
             stateStore.logPath("acme", ProcessKey.service("orders"), true)
         )), "seed orders managed");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             4100L, true, Optional.of(clock.now()), Optional.of("java -jar orders.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
 
         // 2. billing: UNMANAGED IDE alive (PID 5200)
         portScanner.bind(9002, 5200L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             5200L, true, Optional.of(clock.now()), Optional.of("java -jar billing.jar"),
-            List.of(), List.of(new ParentProcessInfo(10L, Optional.empty(), Optional.of("idea64.exe"))),
+            List.of(), List.of(new ParentProcess(10L, Optional.empty(), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
 
@@ -475,7 +475,7 @@ public final class ProcessShellTest {
             stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
         )), "seed managed gateway");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7400L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -520,9 +520,9 @@ public final class ProcessShellTest {
 
         // Unmanaged Gateway must never be killed by stop --all
         portScanner.bind(8080, 7500L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7500L, true, Optional.of(clock.now()), Optional.of("java -jar ext-wiremock.jar"),
-            List.of(), List.of(new ParentProcessInfo(11L, Optional.empty(), Optional.of("bash"))),
+            List.of(), List.of(new ParentProcess(11L, Optional.empty(), Optional.of("bash"))),
             Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
@@ -535,7 +535,7 @@ public final class ProcessShellTest {
 
         // Conflict on orders (PID 8888): spared without --kill-conflict, rejected if bare --kill-conflict, killed with explicit target + --kill-conflict
         portScanner.bind(9001, 8888L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8888L, true, Optional.of(clock.now()), Optional.of("python -m http.server 9001"),
             List.of(), List.of(), Optional.empty(), Optional.of("python")
         ));

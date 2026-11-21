@@ -13,8 +13,8 @@ import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
 import procomp.shell.ports.HttpClient.HttpResponseData;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -109,9 +109,9 @@ public final class GatewayCliTest {
 
         // 5. Unmanaged Gateway -> gateway start reuses, gateway stop exits 1 without killing
         portScanner.bind(8080, 7700L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             7700L, true, Optional.of(clock.now()), Optional.of("java -jar ext-wiremock.jar"),
-            List.of(), List.of(new ParentProcessInfo(10L, Optional.of("bash"), Optional.of("bash"))),
+            List.of(), List.of(new ParentProcess(10L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("java")
         ));
         CliResult reuseUnmanaged = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "gateway", "start");

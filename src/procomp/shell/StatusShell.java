@@ -58,8 +58,42 @@ public final class StatusShell {
     ) {
         this(
             new RoutingShell(stateStore),
-            new ProcessShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
-            new GatewayShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
+            new ProcessLifecycle(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
+            httpClient,
+            projectFiles,
+            clock,
+            observer
+        );
+    }
+
+    private StatusShell(
+        RoutingShell routingShell,
+        ProcessLifecycle lifecycle,
+        HttpClient httpClient,
+        ProjectFiles projectFiles,
+        Clock clock,
+        ProgressObserver observer
+    ) {
+        this(
+            routingShell,
+            new GatewayShell(httpClient, projectFiles, clock, observer, routingShell, lifecycle),
+            projectFiles,
+            lifecycle,
+            clock
+        );
+    }
+
+    private StatusShell(
+        RoutingShell routingShell,
+        GatewayShell gatewayShell,
+        ProjectFiles projectFiles,
+        ProcessLifecycle lifecycle,
+        Clock clock
+    ) {
+        this(
+            routingShell,
+            new ProcessShell(projectFiles, routingShell, gatewayShell, lifecycle),
+            gatewayShell,
             clock
         );
     }
@@ -120,7 +154,7 @@ public final class StatusShell {
 
         GatewaySummary gatewaySummary = GatewaySummary.notConfigured();
         if (project.gateway().isPresent()) {
-            Result<GatewayStatusReport, DomainError> gwRes = gatewayShell.status(project);
+            Result<GatewayStatusReport, DomainError> gwRes = gatewayShell.status(project, routing);
             if (gwRes instanceof Result.Err<GatewayStatusReport, DomainError>(DomainError err)) {
                 return Result.err(err);
             }

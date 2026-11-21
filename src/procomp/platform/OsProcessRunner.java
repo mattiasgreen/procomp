@@ -3,6 +3,8 @@ package procomp.platform;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessRunner;
 
 import java.io.File;
@@ -78,7 +80,7 @@ public final class OsProcessRunner implements ProcessRunner {
     }
 
     @Override
-    public Result<Optional<ProcessSnapshot>, DomainError> inspect(long pid) {
+    public Result<Optional<ObservedProcess>, DomainError> inspect(long pid) {
         if (pid <= 0) {
             return Result.ok(Optional.empty());
         }
@@ -94,8 +96,8 @@ public final class OsProcessRunner implements ProcessRunner {
             arguments.isEmpty() ? exe : exe + " " + String.join(" ", arguments)
         ));
 
-        List<ParentProcessInfo> parentChain = collectParents(handle);
-        return Result.ok(Optional.of(new ProcessSnapshot(
+        List<ParentProcess> parentChain = collectParents(handle);
+        return Result.ok(Optional.of(new ObservedProcess(
             handle.pid(),
             true,
             info.startInstant(),
@@ -170,8 +172,8 @@ public final class OsProcessRunner implements ProcessRunner {
         return Result.ok(Unit.VALUE);
     }
 
-    private static List<ParentProcessInfo> collectParents(ProcessHandle handle) {
-        List<ParentProcessInfo> chain = new ArrayList<>();
+    private static List<ParentProcess> collectParents(ProcessHandle handle) {
+        List<ParentProcess> chain = new ArrayList<>();
         Set<Long> visited = new HashSet<>();
         visited.add(handle.pid());
         Optional<ProcessHandle> cursor = handle.parent();
@@ -181,7 +183,7 @@ public final class OsProcessRunner implements ProcessRunner {
                 break;
             }
             ProcessHandle.Info pInfo = parent.info();
-            chain.add(new ParentProcessInfo(parent.pid(), pInfo.commandLine(), pInfo.command()));
+            chain.add(new ParentProcess(parent.pid(), pInfo.commandLine(), pInfo.command()));
             cursor = parent.parent();
         }
         return chain;
