@@ -9,8 +9,6 @@ import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
-import procomp.shell.RoutingShell;
-import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -18,7 +16,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * CLI argument parser and table/JSON renderer for {@code procomp route} and {@code procomp profile}.
@@ -35,13 +32,13 @@ public final class RoutingCli {
     private RoutingCli() {}
 
     /**
-     * Parses a routing/profile subcommand if {@code command} is handled by this CLI module.
+     * Parses a routing/profile subcommand.
      */
-    public static Optional<Result<Action, String>> parse(String command, List<String> args) {
+    public static Result<Action, String> parse(String command, List<String> args) {
         return switch (command) {
-            case "route" -> Optional.of(parseRoute(args));
-            case "profile" -> Optional.of(parseProfile(args));
-            default -> Optional.empty();
+            case "route" -> parseRoute(args);
+            case "profile" -> parseProfile(args);
+            default -> Result.err("Unknown routing command '" + command + "'.");
         };
     }
 
@@ -110,47 +107,44 @@ public final class RoutingCli {
     }
 
     /**
-     * Executes a parsed routing/profile action against {@link RoutingShell} and writes rendered output or errors.
+     * Executes a parsed routing/profile action against {@link CliRuntime} and writes rendered output or errors.
      */
-    public static int execute(
-        Action action,
-        Project project,
-        StateStore stateStore,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        RoutingShell shell = new RoutingShell(stateStore);
+    static int execute(Action action, Project project, CliRuntime runtime) {
         return switch (action) {
-            case Action.ShowRoutes(boolean json) -> CliFormat.handleResult(shell.showRoutes(project), err, table -> {
-                if (json) {
-                    renderRoutesJson(project, table, out);
-                } else {
-                    renderRoutesTable(project, table, out);
-                }
-            });
-            case Action.UpdateRoutes(List<String> services, Route route) -> CliFormat.handleResult(
-                shell.updateRoutes(project, services, route),
-                err,
-                _ -> {
-                    for (String svc : new LinkedHashSet<>(services)) {
-                        out.println("Updated route: " + svc + " -> " + route.name());
+            case Action.ShowRoutes(boolean json) -> runtime.handleResult(
+                runtime.routingShell().flatMap(shell -> shell.showRoutes(project)),
+                table -> {
+                    if (json) {
+                        renderRoutesJson(project, table, runtime.out());
+                    } else {
+                        renderRoutesTable(project, table, runtime.out());
                     }
                 }
             );
-            case Action.ListProfiles(boolean json) -> CliFormat.handleResult(shell.listProfiles(project), err, profiles -> {
-                if (json) {
-                    renderProfilesJson(project, profiles, out);
-                } else {
-                    renderProfilesTable(project, profiles, out);
+            case Action.UpdateRoutes(List<String> services, Route route) -> runtime.handleResult(
+                runtime.routingShell().flatMap(shell -> shell.updateRoutes(project, services, route)),
+                _ -> {
+                    for (String svc : new LinkedHashSet<>(services)) {
+                        runtime.out().println("Updated route: " + svc + " -> " + route.name());
+                    }
                 }
-            });
-            case Action.UseProfile(String profileName) -> CliFormat.handleResult(
-                shell.useProfile(project, profileName),
-                err,
+            );
+            case Action.ListProfiles(boolean json) -> runtime.handleResult(
+                runtime.routingShell().flatMap(shell -> shell.listProfiles(project)),
+                profiles -> {
+                    if (json) {
+                        renderProfilesJson(project, profiles, runtime.out());
+                    } else {
+                        renderProfilesTable(project, profiles, runtime.out());
+                    }
+                }
+            );
+            case Action.UseProfile(String profileName) -> runtime.handleResult(
+                runtime.routingShell().flatMap(shell -> shell.useProfile(project, profileName)),
                 table -> {
                     int localCount = table.localServices().size();
                     int remoteCount = table.remoteServices().size();
-                    out.println("Applied profile '" + profileName + "' (" + localCount + " LOCAL, " + remoteCount + " REMOTE)");
+                    runtime.out().println("Applied profile '" + profileName + "' (" + localCount + " LOCAL, " + remoteCount + " REMOTE)");
                 }
             );
         };

@@ -7,7 +7,6 @@ import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.gateway.RouteDrift;
 import procomp.core.gateway.StaleManagedMapping;
 import procomp.core.project.Project;
-import procomp.shell.GatewayShell;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
 import procomp.shell.GatewayShell.GatewayStartDisposition;
 import procomp.shell.GatewayShell.GatewayStartRequest;
@@ -15,13 +14,6 @@ import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStatusReport;
 import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
-import procomp.shell.ports.Clock;
-import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.PortScanner;
-import procomp.shell.ports.ProcessRunner;
-import procomp.shell.ports.ProgressObserver;
-import procomp.shell.ports.ProjectFiles;
-import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -29,7 +21,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * CLI argument parser and text/JSON renderer for {@code procomp gateway <start|stop|status|reconcile>}.
@@ -47,14 +38,7 @@ public final class GatewayCli {
 
     private GatewayCli() {}
 
-    public static Optional<Result<Action, String>> parse(String command, List<String> args) {
-        if (!"gateway".equals(command)) {
-            return Optional.empty();
-        }
-        return Optional.of(parseGateway(args));
-    }
-
-    private static Result<Action, String> parseGateway(List<String> args) {
+    public static Result<Action, String> parse(List<String> args) {
         if (args.isEmpty()) {
             return Result.err("Expected subcommand 'start', 'stop', 'status', or 'reconcile' after 'gateway'. " + USAGE);
         }
@@ -112,41 +96,30 @@ public final class GatewayCli {
         return Result.ok(new Action.Status(json));
     }
 
-    public static int execute(
-        Action action,
-        Project project,
-        StateStore stateStore,
-        ProcessRunner processRunner,
-        PortScanner portScanner,
-        HttpClient httpClient,
-        ProjectFiles projectFiles,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
-            err.println("Error: Gateway ports are not configured.");
-            return 1;
-        }
-        GatewayShell shell = new GatewayShell(
-            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-        );
+    static int execute(Action action, Project project, CliRuntime runtime) {
         return switch (action) {
-            case Action.Start(boolean detach, Duration timeout) ->
-                CliFormat.handleResult(shell.start(project, new GatewayStartRequest(detach, timeout)), err, res -> renderStart(res, out));
-            case Action.Stop _ ->
-                CliFormat.handleResult(shell.stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT)), err, res -> renderStop(res, out));
-            case Action.Status(boolean json) ->
-                CliFormat.handleResult(shell.status(project), err, report -> {
+            case Action.Start(boolean detach, Duration timeout) -> runtime.handleResult(
+                runtime.gatewayShell().flatMap(shell -> shell.start(project, new GatewayStartRequest(detach, timeout))),
+                res -> renderStart(res, runtime.out())
+            );
+            case Action.Stop _ -> runtime.handleResult(
+                runtime.gatewayShell().flatMap(shell -> shell.stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT))),
+                res -> renderStop(res, runtime.out())
+            );
+            case Action.Status(boolean json) -> runtime.handleResult(
+                runtime.gatewayShell().flatMap(shell -> shell.status(project)),
+                report -> {
                     if (json) {
-                        renderStatusJson(report, out);
+                        renderStatusJson(report, runtime.out());
                     } else {
-                        renderStatusText(report, out);
+                        renderStatusText(report, runtime.out());
                     }
-                });
-            case Action.Reconcile _ ->
-                CliFormat.handleResult(shell.reconcile(project), err, res -> renderReconcile(res, out));
+                }
+            );
+            case Action.Reconcile _ -> runtime.handleResult(
+                runtime.gatewayShell().flatMap(shell -> shell.reconcile(project)),
+                res -> renderReconcile(res, runtime.out())
+            );
         };
     }
 

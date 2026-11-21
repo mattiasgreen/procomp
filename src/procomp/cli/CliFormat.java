@@ -1,6 +1,5 @@
 package procomp.cli;
 
-import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
@@ -9,31 +8,13 @@ import java.io.PrintWriter;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Consumer;
 
 /**
- * Shared package-private CLI formatting, table rendering, JSON helper, and Result handling utilities.
+ * Shared package-private CLI formatting, table rendering, JSON helper, and option parsing utilities.
  */
 final class CliFormat {
 
     private CliFormat() {}
-
-    static <T> int handleResult(
-        Result<T, DomainError> res,
-        PrintWriter err,
-        Consumer<T> onSuccess
-    ) {
-        return switch (res) {
-            case Result.Ok<T, DomainError>(T value) -> {
-                onSuccess.accept(value);
-                yield 0;
-            }
-            case Result.Err<T, DomainError>(DomainError error) -> {
-                err.println("Error: " + error.format());
-                yield 1;
-            }
-        };
-    }
 
     static void renderTable(PrintWriter out, List<String> headers, List<List<String>> rows) {
         int cols = headers.size();

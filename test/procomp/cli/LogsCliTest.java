@@ -24,10 +24,10 @@ public final class LogsCliTest {
         StringWriter err1 = new StringWriter();
         int code1 = Procomp.run(
             new String[]{"logs", "orders", "--path"},
-            configSource,
-            stateStore,
-            new PrintWriter(out1, true),
-            new PrintWriter(err1, true)
+            CliRuntime.builder(new PrintWriter(out1, true), new PrintWriter(err1, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(0, code1, "--path should exit 0 without log file");
         Assert.assertEquals("", err1.toString(), "no stderr on --path");
@@ -41,10 +41,10 @@ public final class LogsCliTest {
         StringWriter err2 = new StringWriter();
         int code2 = Procomp.run(
             new String[]{"logs", "--err", "--path", "orders"},
-            configSource,
-            stateStore,
-            new PrintWriter(out2, true),
-            new PrintWriter(err2, true)
+            CliRuntime.builder(new PrintWriter(out2, true), new PrintWriter(err2, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(0, code2, "--err --path should exit 0");
         Assert.assertEquals(
@@ -72,10 +72,10 @@ public final class LogsCliTest {
         StringWriter errDefault = new StringWriter();
         int codeDefault = Procomp.run(
             new String[]{"logs", "orders"},
-            configSource,
-            stateStore,
-            new PrintWriter(outDefault, true),
-            new PrintWriter(errDefault, true)
+            CliRuntime.builder(new PrintWriter(outDefault, true), new PrintWriter(errDefault, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(0, codeDefault, "default logs read should exit 0");
         Assert.assertNotContains(outDefault.toString(), "line-5\n", "default tail omits lines older than 100");
@@ -86,10 +86,10 @@ public final class LogsCliTest {
         StringWriter errN2 = new StringWriter();
         int codeN2 = Procomp.run(
             new String[]{"logs", "orders", "-n", "2"},
-            configSource,
-            stateStore,
-            new PrintWriter(outN2, true),
-            new PrintWriter(errN2, true)
+            CliRuntime.builder(new PrintWriter(outN2, true), new PrintWriter(errN2, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(0, codeN2, "-n 2 exits 0");
         Assert.assertEquals("line-104\nline-105\n", outN2.toString(), "-n 2 prints exact last 2 raw lines");
@@ -98,10 +98,10 @@ public final class LogsCliTest {
         StringWriter errErr = new StringWriter();
         int codeErr = Procomp.run(
             new String[]{"logs", "orders", "--err", "--lines=2"},
-            configSource,
-            stateStore,
-            new PrintWriter(outErr, true),
-            new PrintWriter(errErr, true)
+            CliRuntime.builder(new PrintWriter(outErr, true), new PrintWriter(errErr, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(0, codeErr, "--err --lines=2 exits 0");
         Assert.assertEquals("err-2\r\nerr-3\r\n", outErr.toString(), "--err --lines=2 preserves CRLF");
@@ -131,12 +131,12 @@ public final class LogsCliTest {
         StringWriter errBuf = new StringWriter();
         int code = Procomp.run(
             new String[]{"logs", "orders", "-n", "1", "-f"},
-            configSource,
-            stateStore,
-            clock,
-            observer,
-            new PrintWriter(outBuf, true),
-            new PrintWriter(errBuf, true)
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .clock(clock)
+                .observer(observer)
+                .build()
         );
 
         Assert.assertEquals(0, code, "-f exits 0 on clean stop");
@@ -170,10 +170,10 @@ public final class LogsCliTest {
         StringWriter unknownErr = new StringWriter();
         int unknownCode = Procomp.run(
             new String[]{"logs", "nope"},
-            configSource,
-            stateStore,
-            new PrintWriter(unknownOut, true),
-            new PrintWriter(unknownErr, true)
+            CliRuntime.builder(new PrintWriter(unknownOut, true), new PrintWriter(unknownErr, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(1, unknownCode, "unknown service exits 1");
         Assert.assertContains(unknownErr.toString(), "UNKNOWN_SERVICE", "stderr reports UNKNOWN_SERVICE");
@@ -182,10 +182,10 @@ public final class LogsCliTest {
         StringWriter missingErr = new StringWriter();
         int missingCode = Procomp.run(
             new String[]{"logs", "orders"},
-            configSource,
-            stateStore,
-            new PrintWriter(missingOut, true),
-            new PrintWriter(missingErr, true)
+            CliRuntime.builder(new PrintWriter(missingOut, true), new PrintWriter(missingErr, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(1, missingCode, "missing log file exits 1");
         Assert.assertContains(missingErr.toString(), "LOG_NOT_FOUND", "stderr reports LOG_NOT_FOUND");
@@ -200,7 +200,13 @@ public final class LogsCliTest {
     ) {
         StringWriter out = new StringWriter();
         StringWriter err = new StringWriter();
-        int code = Procomp.run(args, configSource, stateStore, new PrintWriter(out, true), new PrintWriter(err, true));
+        int code = Procomp.run(
+            args,
+            CliRuntime.builder(new PrintWriter(out, true), new PrintWriter(err, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
+        );
         Assert.assertEquals(expectedCode, code, label);
         Assert.assertFalse(err.toString().isBlank(), label + " should write an error message to stderr");
     }

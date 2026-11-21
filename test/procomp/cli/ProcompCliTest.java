@@ -19,10 +19,10 @@ public final class ProcompCliTest {
         StringWriter errBuf = new StringWriter();
         int code = Procomp.run(
             new String[]{"--help"},
-            configSource,
-            stateStore,
-            new PrintWriter(outBuf, true),
-            new PrintWriter(errBuf, true)
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
 
         Assert.assertEquals(0, code, "--help should exit 0");
@@ -40,10 +40,10 @@ public final class ProcompCliTest {
         StringWriter err1 = new StringWriter();
         int badFlagCode = Procomp.run(
             new String[]{"--bogus"},
-            configSource,
-            stateStore,
-            new PrintWriter(out1, true),
-            new PrintWriter(err1, true)
+            CliRuntime.builder(new PrintWriter(out1, true), new PrintWriter(err1, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(2, badFlagCode, "unknown flag exits 2");
         Assert.assertContains(err1.toString(), "--bogus", "stderr mentions unknown flag");
@@ -52,10 +52,10 @@ public final class ProcompCliTest {
         StringWriter err2 = new StringWriter();
         int missingCfgArgCode = Procomp.run(
             new String[]{"--config"},
-            configSource,
-            stateStore,
-            new PrintWriter(out2, true),
-            new PrintWriter(err2, true)
+            CliRuntime.builder(new PrintWriter(out2, true), new PrintWriter(err2, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(2, missingCfgArgCode, "missing --config value exits 2");
 
@@ -63,10 +63,10 @@ public final class ProcompCliTest {
         StringWriter err3 = new StringWriter();
         int unknownCmdCode = Procomp.run(
             new String[]{"nonexistent-cmd"},
-            configSource,
-            stateStore,
-            new PrintWriter(out3, true),
-            new PrintWriter(err3, true)
+            CliRuntime.builder(new PrintWriter(out3, true), new PrintWriter(err3, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
         Assert.assertEquals(2, unknownCmdCode, "unknown command exits 2");
         Assert.assertContains(err3.toString(), "nonexistent-cmd", "stderr mentions unknown command");
@@ -82,10 +82,10 @@ public final class ProcompCliTest {
         StringWriter errBuf = new StringWriter();
         int code = Procomp.run(
             new String[]{"--config", "bad.json", "status"},
-            configSource,
-            stateStore,
-            new PrintWriter(outBuf, true),
-            new PrintWriter(errBuf, true)
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
 
         Assert.assertEquals(1, code, "malformed config should exit 1");
@@ -103,15 +103,53 @@ public final class ProcompCliTest {
         StringWriter errBuf = new StringWriter();
         int code = Procomp.run(
             new String[]{"--config", "valid.json"},
-            configSource,
-            stateStore,
-            new PrintWriter(outBuf, true),
-            new PrintWriter(errBuf, true)
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
         );
 
         Assert.assertEquals(0, code, "bare --config without command should print usage and exit 0");
         Assert.assertContains(outBuf.toString(), "Usage: procomp", "bare --config prints usage");
         Assert.assertNotContains(outBuf.toString(), "Config OK", "bare --config must not emit Config OK");
         Assert.assertEquals("", errBuf.toString(), "bare --config writes nothing to stderr");
+    }
+
+    public static void testOmittedPortsFailCleanlyWithoutFallingBackToRealOsAdapters() {
+        Path cwd = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(cwd)
+            .withFile(cwd.resolve("procomp.json"), """
+                {
+                  "project": "acme",
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+                  "services": { "orders": { "runtime": "java", "port": 9001, "workingDir": "." } }
+                }
+                """);
+        var stateStore = new InMemoryStateStore();
+
+        StringWriter outBuf = new StringWriter();
+        StringWriter errBuf = new StringWriter();
+        int statusCode = Procomp.run(
+            new String[]{"status"},
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(configSource)
+                .stateStore(stateStore)
+                .build()
+        );
+        Assert.assertEquals(1, statusCode, "status without process ports exits 1");
+        Assert.assertContains(errBuf.toString(), "PORT_NOT_CONFIGURED", "stderr reports PORT_NOT_CONFIGURED");
+        Assert.assertContains(errBuf.toString(), "ProcessRunner", "stderr lists missing ProcessRunner");
+
+        StringWriter outNoState = new StringWriter();
+        StringWriter errNoState = new StringWriter();
+        int routeCode = Procomp.run(
+            new String[]{"route"},
+            CliRuntime.builder(new PrintWriter(outNoState, true), new PrintWriter(errNoState, true))
+                .configSource(configSource)
+                .build()
+        );
+        Assert.assertEquals(1, routeCode, "route without stateStore exits 1");
+        Assert.assertContains(errNoState.toString(), "PORT_NOT_CONFIGURED", "stderr reports PORT_NOT_CONFIGURED");
+        Assert.assertContains(errNoState.toString(), "StateStore", "stderr lists missing StateStore");
     }
 }

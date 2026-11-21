@@ -3,23 +3,7 @@ package procomp.cli;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.project.Project;
-import procomp.platform.FsConfigSource;
-import procomp.platform.FsProjectFiles;
-import procomp.platform.FsStateStore;
-import procomp.platform.JdkHttpClient;
-import procomp.platform.OsPortScanner;
-import procomp.platform.OsProcessRunner;
-import procomp.platform.SystemClock;
 import procomp.shell.LogsShell.LogsRequest;
-import procomp.shell.ProjectLoader;
-import procomp.shell.ports.Clock;
-import procomp.shell.ports.ConfigSource;
-import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.PortScanner;
-import procomp.shell.ports.ProcessRunner;
-import procomp.shell.ports.ProgressObserver;
-import procomp.shell.ports.ProjectFiles;
-import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
@@ -47,82 +31,22 @@ public final class Procomp {
     public static void main(String[] args) {
         PrintWriter out = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
         PrintWriter err = new PrintWriter(System.err, true, StandardCharsets.UTF_8);
-        int exitCode = run(
-            args,
-            new FsConfigSource(),
-            new FsStateStore(),
-            new OsProcessRunner(),
-            new OsPortScanner(),
-            new JdkHttpClient(),
-            new FsProjectFiles(),
-            new SystemClock(),
-            ProgressObserver.noop(),
-            out,
-            err
-        );
+        int exitCode = run(args, CliRuntime.system(out, err));
         out.flush();
         err.flush();
         System.exit(exitCode);
     }
 
-    public static int run(
-        String[] args,
-        ConfigSource configSource,
-        StateStore stateStore,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        return run(args, configSource, stateStore, new SystemClock(), ProgressObserver.noop(), out, err);
-    }
-
-    public static int run(
-        String[] args,
-        ConfigSource configSource,
-        StateStore stateStore,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        return run(
-            args,
-            configSource,
-            stateStore,
-            new OsProcessRunner(),
-            new OsPortScanner(),
-            new JdkHttpClient(),
-            new FsProjectFiles(),
-            clock,
-            observer,
-            out,
-            err
-        );
-    }
-
-    public static int run(
-        String[] args,
-        ConfigSource configSource,
-        StateStore stateStore,
-        ProcessRunner processRunner,
-        PortScanner portScanner,
-        HttpClient httpClient,
-        ProjectFiles projectFiles,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        Clock effectiveClock = clock != null ? clock : new SystemClock();
-        ProgressObserver effectiveObserver = observer != null ? observer : ProgressObserver.noop();
+    static int run(String[] args, CliRuntime runtime) {
         Result<ParsedArgs, String> parsedRes = parseArgs(args);
         if (parsedRes instanceof Result.Err<ParsedArgs, String>(String msg)) {
-            err.println("Error: " + msg);
+            runtime.err().println("Error: " + msg);
             return 2;
         }
         ParsedArgs parsed = ((Result.Ok<ParsedArgs, String>) parsedRes).value();
 
         if (parsed.help() || parsed.commandArgs().isEmpty()) {
-            printUsage(out);
+            printUsage(runtime.out());
             return 0;
         }
 
@@ -130,78 +54,40 @@ public final class Procomp {
         List<String> subArgs = parsed.commandArgs().subList(1, parsed.commandArgs().size());
         Result<CliCommand, String> commandRes = parseCommand(command, subArgs);
         if (commandRes instanceof Result.Err<CliCommand, String>(String msg)) {
-            err.println("Error: " + msg);
+            runtime.err().println("Error: " + msg);
             return 2;
         }
         CliCommand cliCommand = ((Result.Ok<CliCommand, String>) commandRes).value();
 
-        Result<Project, DomainError> projRes = new ProjectLoader(configSource).load(parsed.configOverride());
+        Result<Project, DomainError> projRes = runtime.projectLoader()
+            .flatMap(loader -> loader.load(parsed.configOverride()));
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
-            err.println("Error: " + error.format());
+            runtime.err().println("Error: " + error.format());
             return 1;
         }
         Project project = ((Result.Ok<Project, DomainError>) projRes).value();
 
-        if (stateStore == null) {
-            err.println("Error: StateStore is not configured.");
-            return 1;
-        }
-        return executeCommand(
-            cliCommand,
-            project,
-            stateStore,
-            processRunner,
-            portScanner,
-            httpClient,
-            projectFiles,
-            effectiveClock,
-            effectiveObserver,
-            out,
-            err
-        );
+        return executeCommand(cliCommand, project, runtime);
     }
 
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
         return switch (command) {
-            case "route", "profile" -> RoutingCli.parse(command, subArgs).orElseThrow().map(CliCommand.Routing::new);
-            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).orElseThrow().map(CliCommand.Process::new);
-            case "gateway" -> GatewayCli.parse(command, subArgs).orElseThrow().map(CliCommand.Gateway::new);
-            case "status" -> StatusCli.parse(command, subArgs).orElseThrow().map(CliCommand.Status::new);
-            case "logs" -> LogsCli.parse(command, subArgs).orElseThrow().map(CliCommand.Logs::new);
+            case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
+            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.Process::new);
+            case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
+            case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
+            case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
             default -> Result.err("Unknown command '" + command + "'. Run 'procomp --help' for usage.");
         };
     }
 
-    private static int executeCommand(
-        CliCommand cliCommand,
-        Project project,
-        StateStore stateStore,
-        ProcessRunner processRunner,
-        PortScanner portScanner,
-        HttpClient httpClient,
-        ProjectFiles projectFiles,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
+    private static int executeCommand(CliCommand cliCommand, Project project, CliRuntime runtime) {
         return switch (cliCommand) {
-            case CliCommand.Routing(RoutingCli.Action action) ->
-                RoutingCli.execute(action, project, stateStore, out, err);
-            case CliCommand.Process(ProcessCli.Action action) ->
-                ProcessCli.execute(
-                    action, project, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer, out, err
-                );
-            case CliCommand.Gateway(GatewayCli.Action action) ->
-                GatewayCli.execute(
-                    action, project, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer, out, err
-                );
-            case CliCommand.Status(StatusCli.Action action) ->
-                StatusCli.execute(
-                    action, project, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer, out, err
-                );
-            case CliCommand.Logs(LogsRequest request) ->
-                LogsCli.execute(request, project, stateStore, clock, observer, out, err);
+            case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, project, runtime);
+            case CliCommand.Process(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
+            case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
+            case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
+            case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);
         };
     }
 
