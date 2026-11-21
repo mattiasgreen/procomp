@@ -2,10 +2,9 @@ package procomp.core.process;
 
 import procomp.Assert;
 import procomp.core.common.DomainError;
+import procomp.core.common.Result;
 import procomp.core.project.Project;
-import procomp.core.project.ProjectConfigParser;
 import procomp.core.project.ProjectResolver;
-import procomp.core.project.RawProjectConfig;
 import procomp.core.project.ServiceDefinition;
 
 import java.nio.file.Path;
@@ -163,8 +162,10 @@ public final class InspectionAndPlannerTest {
               }
             }
             """;
-        RawProjectConfig raw = Assert.assertOk(ProjectConfigParser.parse(configJson), "config parses");
-        Project project = Assert.assertOk(ProjectResolver.resolve(configPath, raw, Map.of(), Map.of(), Map.of()), "project resolves");
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, configJson, _ -> Result.ok(Optional.empty()), Map.of()),
+            "project resolves"
+        );
         ServiceDefinition orders = project.service("orders").orElseThrow();
 
         Path jar = Path.of("C:/dev/acme/build/libs/orders-1.0.jar").toAbsolutePath().normalize();

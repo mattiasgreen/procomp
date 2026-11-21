@@ -16,7 +16,7 @@ import java.util.Set;
 /**
  * Pure, strict parser and validator for procomp.json.
  */
-public final class ProjectConfigParser {
+final class ProjectConfigParser {
 
     private static final Set<String> TOP_LEVEL_KEYS = Set.of(
         "project", "repositoriesRoot", "envFiles", "defaults",
@@ -45,7 +45,7 @@ public final class ProjectConfigParser {
 
     private ProjectConfigParser() {}
 
-    public static Result<RawProjectConfig, DomainError> parse(String jsonText) {
+    static Result<RawProjectConfig, DomainError> parse(String jsonText) {
         return Json.parse(jsonText).flatMap(ProjectConfigParser::parseRoot);
     }
 

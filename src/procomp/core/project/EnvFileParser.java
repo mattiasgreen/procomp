@@ -9,11 +9,11 @@ import java.util.Map;
 /**
  * Pure parser for .env files and strict ${env:VAR} host-environment references.
  */
-public final class EnvFileParser {
+final class EnvFileParser {
 
     private EnvFileParser() {}
 
-    public static Result<Map<String, String>, DomainError> parse(String sourceLabel, String content) {
+    static Result<Map<String, String>, DomainError> parse(String sourceLabel, String content) {
         if (content == null) {
             return Result.err(DomainError.of("ENV_FILE_PARSE_ERROR", "Env file content must not be null", Map.of("file", sourceLabel)));
         }
@@ -55,7 +55,7 @@ public final class EnvFileParser {
         return Result.ok(result);
     }
 
-    public static Result<String, DomainError> expandHostEnvRefs(
+    static Result<String, DomainError> expandHostEnvRefs(
         String raw,
         Map<String, String> hostEnv,
         String fieldContext
