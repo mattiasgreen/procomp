@@ -28,7 +28,7 @@ public final class InspectionAndPlannerTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedRecordView rec = new ManagedRecordView(
+        ManagedProcessRecord rec = new ManagedProcessRecord(
             4201L,
             T0,
             List.of("java", "-Xmx512m", "-jar", "orders.jar"),
@@ -92,7 +92,7 @@ public final class InspectionAndPlannerTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedRecordView rec = new ManagedRecordView(4201L, T0, List.of("java"), Optional.empty(), target.stdoutLog(), target.stderrLog());
+        ManagedProcessRecord rec = new ManagedProcessRecord(4201L, T0, List.of("java"), Optional.empty(), target.stdoutLog(), target.stderrLog());
         ObservedProcess aliveProc = new ObservedProcess(4201L, true, Optional.of(T0), Optional.of("java"), List.of(), List.of(), Optional.empty(), Optional.of("java"));
         ObservedProcess ideProc = new ObservedProcess(
             5501L,

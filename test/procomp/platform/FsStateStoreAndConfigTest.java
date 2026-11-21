@@ -5,7 +5,7 @@ import procomp.core.common.DomainError;
 import procomp.core.project.Project;
 import procomp.shell.ProjectLoader;
 import procomp.shell.ports.LogChunk;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.ProcessKey;
 
 import java.nio.charset.StandardCharsets;

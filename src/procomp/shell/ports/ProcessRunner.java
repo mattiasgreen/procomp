@@ -3,6 +3,7 @@ package procomp.shell.ports;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.ObservedProcess;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -21,7 +22,7 @@ public interface ProcessRunner {
 
     Result<SpawnedProcess, DomainError> spawnDetached(SpawnRequest request);
 
-    Result<Optional<ProcessSnapshot>, DomainError> inspect(long pid);
+    Result<Optional<ObservedProcess>, DomainError> inspect(long pid);
 
     boolean isAlive(long pid);
 
@@ -59,33 +60,6 @@ public interface ProcessRunner {
             }
             Objects.requireNonNull(startedAt);
             Objects.requireNonNull(commandLine);
-        }
-    }
-
-    record ParentProcessInfo(long pid, Optional<String> commandLine, Optional<String> executable) {
-        public ParentProcessInfo {
-            Objects.requireNonNull(commandLine);
-            Objects.requireNonNull(executable);
-        }
-    }
-
-    record ProcessSnapshot(
-        long pid,
-        boolean alive,
-        Optional<Instant> startTime,
-        Optional<String> commandLine,
-        List<String> arguments,
-        List<ParentProcessInfo> parentChain,
-        Optional<Long> rssBytes,
-        Optional<String> executable
-    ) {
-        public ProcessSnapshot {
-            Objects.requireNonNull(startTime);
-            Objects.requireNonNull(commandLine);
-            arguments = List.copyOf(arguments);
-            parentChain = List.copyOf(parentChain);
-            Objects.requireNonNull(rssBytes);
-            Objects.requireNonNull(executable);
         }
     }
 }

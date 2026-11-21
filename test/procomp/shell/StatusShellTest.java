@@ -19,10 +19,10 @@ import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
 import procomp.shell.ports.HttpClient.HttpResponseData;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessKey;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 
 import java.net.URI;
 import java.nio.file.Path;
@@ -110,7 +110,7 @@ public final class StatusShellTest {
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
             stateStore.logPath("acme", ProcessKey.service("orders"), true)
         )), "seed orders managed");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
             Optional.of("java -jar orders-1.0.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -118,20 +118,20 @@ public final class StatusShellTest {
 
         // 2. billing: REMOTE + UNMANAGED (IDE) + HEALTHY
         portScanner.bind(9002, 5200L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             5200L, true, Optional.of(Instant.parse("2026-11-20T11:58:00Z")),
             Optional.of("java -jar billing.jar"), List.of(),
-            List.of(new ParentProcessInfo(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
+            List.of(new ParentProcess(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
 
         // 3. payments: LOCAL + CONFLICT (non-IDE listener failing health check)
         portScanner.bind(9003, 6300L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             6300L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
             Optional.of("python -m http.server 9003"), List.of(),
-            List.of(new ParentProcessInfo(11L, Optional.of("bash"), Optional.of("bash"))),
+            List.of(new ParentProcess(11L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("python")
         ));
 
@@ -206,7 +206,7 @@ public final class StatusShellTest {
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
         )), "seed gateway managed");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8100L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
             Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -256,7 +256,7 @@ public final class StatusShellTest {
         var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
         var processRunner = new FakeProcessRunner(clock);
         var portScanner = new FakePortScanner().bind(8080, 9900L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             9900L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
             List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));

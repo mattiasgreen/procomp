@@ -1,4 +1,4 @@
-package procomp.shell.ports;
+package procomp.core.process;
 
 import java.nio.file.Path;
 import java.time.Instant;

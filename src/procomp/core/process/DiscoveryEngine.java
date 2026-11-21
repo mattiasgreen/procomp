@@ -40,7 +40,7 @@ public final class DiscoveryEngine {
         Optional<String> healthEndpoint = target.healthEndpoint();
 
         if (input.managedRecord().isPresent()) {
-            ManagedRecordView rec = input.managedRecord().get();
+            ManagedProcessRecord rec = input.managedRecord().get();
             Optional<ObservedProcess> proc = input.process().filter(ObservedProcess::alive);
             if (proc.isPresent()) {
                 ObservedProcess aliveProc = proc.get();
@@ -143,7 +143,7 @@ public final class DiscoveryEngine {
     public static InspectionReport inspect(
         ProcessTarget target,
         DiscoveryResult discovery,
-        Optional<ManagedRecordView> managedRecord,
+        Optional<ManagedProcessRecord> managedRecord,
         Optional<String> desiredRoute,
         Optional<String> liveGatewayRoute,
         Instant now
@@ -265,7 +265,7 @@ public final class DiscoveryEngine {
         return true;
     }
 
-    static boolean isStale(ManagedRecordView record, Optional<Instant> latestArtifactTimestamp) {
+    static boolean isStale(ManagedProcessRecord record, Optional<Instant> latestArtifactTimestamp) {
         if (latestArtifactTimestamp.isEmpty()) {
             return false;
         }

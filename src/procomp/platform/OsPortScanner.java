@@ -2,6 +2,7 @@ package procomp.platform;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
+import procomp.core.process.PortBinding;
 import procomp.shell.ports.PortScanner;
 
 import java.io.IOException;
@@ -59,10 +60,10 @@ public final class OsPortScanner implements PortScanner {
     }
 
     @Override
-    public Result<Optional<PortListener>, DomainError> findListener(int port) {
+    public Result<Optional<PortBinding>, DomainError> findListener(int port) {
         validatePort(port);
         String os = osName.toLowerCase(Locale.ROOT);
-        Optional<PortListener> found = Optional.empty();
+        Optional<PortBinding> found = Optional.empty();
 
         if (os.contains("win")) {
             Optional<String> tcp4 = runCommandQuiet(List.of("netstat", "-ano", "-p", "tcp"));
@@ -103,16 +104,16 @@ public final class OsPortScanner implements PortScanner {
             return Result.ok(found);
         }
         if (isTcpListening(port, Duration.ofMillis(200))) {
-            return Result.ok(Optional.of(new PortListener(port, Optional.empty(), "127.0.0.1:" + port)));
+            return Result.ok(Optional.of(new PortBinding(port, Optional.empty(), "127.0.0.1:" + port)));
         }
         return Result.ok(Optional.empty());
     }
 
-    public static Optional<PortListener> parseWindowsNetstat(String output, int targetPort) {
+    public static Optional<PortBinding> parseWindowsNetstat(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortListener best = null;
+        PortBinding best = null;
         for (String line : output.split("\\R")) {
             String trimmed = line.trim();
             if (!trimmed.startsWith("TCP")) {
@@ -130,16 +131,16 @@ public final class OsPortScanner implements PortScanner {
             if (!isListening || !matchesLoopbackOrWildcardPort(localAddr, targetPort)) {
                 continue;
             }
-            best = pickBetterListener(best, new PortListener(targetPort, parsePositivePid(cols[4]), localAddr));
+            best = pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr));
         }
         return Optional.ofNullable(best);
     }
 
-    public static Optional<PortListener> parseLinuxSs(String output, int targetPort) {
+    public static Optional<PortBinding> parseLinuxSs(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortListener best = null;
+        PortBinding best = null;
         for (String line : output.split("\\R")) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("State") || trimmed.startsWith("Netid")) {
@@ -162,16 +163,16 @@ public final class OsPortScanner implements PortScanner {
             if (m.find()) {
                 pid = parsePositivePid(m.group(1));
             }
-            best = pickBetterListener(best, new PortListener(targetPort, pid, localAddr));
+            best = pickBetterListener(best, new PortBinding(targetPort, pid, localAddr));
         }
         return Optional.ofNullable(best);
     }
 
-    public static Optional<PortListener> parsePosixLsof(String output, int targetPort) {
+    public static Optional<PortBinding> parsePosixLsof(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortListener best = null;
+        PortBinding best = null;
         for (String line : output.split("\\R")) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("COMMAND")) {
@@ -184,14 +185,14 @@ public final class OsPortScanner implements PortScanner {
             Optional<Long> pid = parsePositivePid(cols[1]);
             for (int i = 7; i < cols.length; i++) {
                 if (matchesLoopbackOrWildcardPort(cols[i], targetPort)) {
-                    best = pickBetterListener(best, new PortListener(targetPort, pid, cols[i]));
+                    best = pickBetterListener(best, new PortBinding(targetPort, pid, cols[i]));
                 }
             }
         }
         return Optional.ofNullable(best);
     }
 
-    private static PortListener pickBetterListener(PortListener current, PortListener candidate) {
+    private static PortBinding pickBetterListener(PortBinding current, PortBinding candidate) {
         if (current == null) {
             return candidate;
         }

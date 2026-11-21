@@ -3,6 +3,7 @@ package procomp.shell.ports;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.ManagedProcessRecord;
 
 import java.nio.file.Path;
 import java.util.Map;

@@ -5,8 +5,8 @@ import procomp.Assert;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.PortScanner.PortListener;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.PortBinding;
 import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
 import procomp.shell.ports.ProjectFiles.ArtifactInfo;
@@ -123,7 +123,7 @@ public final class ProcessPlatformIntegrationTest {
         try (ServerSocket ipv4Socket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
             int port = ipv4Socket.getLocalPort();
             Assert.assertTrue(scanner.isTcpListening(port, Duration.ofSeconds(1)), "IPv4 socket is listening");
-            PortListener listener = Assert.assertOk(scanner.findListener(port), "findListener IPv4").orElseThrow();
+            PortBinding listener = Assert.assertOk(scanner.findListener(port), "findListener IPv4").orElseThrow();
             Assert.assertEquals(port, listener.port(), "listener port");
             Assert.assertEquals(Optional.of(currentPid), listener.pid(), "listener pid matches current JVM");
         }
@@ -132,7 +132,7 @@ public final class ProcessPlatformIntegrationTest {
         try (ServerSocket wildcardSocket = new ServerSocket(0)) {
             int port = wildcardSocket.getLocalPort();
             Assert.assertTrue(scanner.isTcpListening(port, Duration.ofSeconds(1)), "wildcard socket is listening");
-            PortListener listener = Assert.assertOk(scanner.findListener(port), "findListener wildcard").orElseThrow();
+            PortBinding listener = Assert.assertOk(scanner.findListener(port), "findListener wildcard").orElseThrow();
             Assert.assertEquals(Optional.of(currentPid), listener.pid(), "wildcard listener pid matches current JVM");
         }
 
@@ -149,8 +149,8 @@ public final class ProcessPlatformIntegrationTest {
               TCP    [::1]:9002             [::]:0                 LISTENING       5432
               TCP    127.0.0.1:9003         127.0.0.1:51000        ESTABLISHED     9999
             """;
-        Assert.assertEquals(Optional.of(4321L), OsPortScanner.parseWindowsNetstat(winNetstatSample, 9001).flatMap(PortListener::pid), "parse Windows IPv4");
-        Assert.assertEquals(Optional.of(5432L), OsPortScanner.parseWindowsNetstat(winNetstatSample, 9002).flatMap(PortListener::pid), "parse Windows IPv6");
+        Assert.assertEquals(Optional.of(4321L), OsPortScanner.parseWindowsNetstat(winNetstatSample, 9001).flatMap(PortBinding::pid), "parse Windows IPv4");
+        Assert.assertEquals(Optional.of(5432L), OsPortScanner.parseWindowsNetstat(winNetstatSample, 9002).flatMap(PortBinding::pid), "parse Windows IPv6");
         Assert.assertEquals(Optional.empty(), OsPortScanner.parseWindowsNetstat(winNetstatSample, 9003), "ignore ESTABLISHED");
 
         String ssSample = """
@@ -158,14 +158,14 @@ public final class ProcessPlatformIntegrationTest {
             LISTEN  0      128    127.0.0.1:9001     0.0.0.0:*         users:(("java",pid=8123,fd=42))
             LISTEN  0      128         [::]:9002        [::]:*         users:(("node",pid=9123,fd=19))
             """;
-        Assert.assertEquals(Optional.of(8123L), OsPortScanner.parseLinuxSs(ssSample, 9001).flatMap(PortListener::pid), "parse Linux ss IPv4");
-        Assert.assertEquals(Optional.of(9123L), OsPortScanner.parseLinuxSs(ssSample, 9002).flatMap(PortListener::pid), "parse Linux ss IPv6");
+        Assert.assertEquals(Optional.of(8123L), OsPortScanner.parseLinuxSs(ssSample, 9001).flatMap(PortBinding::pid), "parse Linux ss IPv4");
+        Assert.assertEquals(Optional.of(9123L), OsPortScanner.parseLinuxSs(ssSample, 9002).flatMap(PortBinding::pid), "parse Linux ss IPv6");
 
         String lsofSample = """
             COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
             java    7771 dev   42u  IPv6 0x1234      0t0  TCP *:9001 (LISTEN)
             """;
-        Assert.assertEquals(Optional.of(7771L), OsPortScanner.parsePosixLsof(lsofSample, 9001).flatMap(PortListener::pid), "parse POSIX lsof");
+        Assert.assertEquals(Optional.of(7771L), OsPortScanner.parsePosixLsof(lsofSample, 9001).flatMap(PortBinding::pid), "parse POSIX lsof");
     }
 
     public static void testOsProcessRunnerSpawnsInspectsParentChainAndStopsTree() throws Exception {
@@ -204,7 +204,7 @@ public final class ProcessPlatformIntegrationTest {
             waitForFileContent(outLog, "CHILD_OUT:injected-value", Duration.ofSeconds(10));
             waitForFileContent(errLog, "CHILD_ERR:ok", Duration.ofSeconds(10));
 
-            ProcessSnapshot snap = Assert.assertOk(runner.inspect(childPid), "inspect child succeeds").orElseThrow();
+            ObservedProcess snap = Assert.assertOk(runner.inspect(childPid), "inspect child succeeds").orElseThrow();
             Assert.assertTrue(snap.alive(), "snapshot alive");
             Assert.assertTrue(snap.commandLine().isPresent() || snap.executable().isPresent(), "snapshot includes cmdline or executable");
             long myPid = ProcessHandle.current().pid();

@@ -13,10 +13,10 @@ import procomp.fakes.InMemoryConfigSource;
 import procomp.fakes.InMemoryStateStore;
 import procomp.fakes.RecordingObserver;
 import procomp.shell.ports.HttpClient.HttpResponseData;
-import procomp.shell.ports.ManagedProcessRecord;
+import procomp.core.process.ManagedProcessRecord;
+import procomp.core.process.ObservedProcess;
+import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessKey;
-import procomp.shell.ports.ProcessRunner.ParentProcessInfo;
-import procomp.shell.ports.ProcessRunner.ProcessSnapshot;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -69,7 +69,7 @@ public final class StatusCliTest {
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
             stateStore.logPath("acme", ProcessKey.service("orders"), true)
         )), "seed orders");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
             Optional.of("java -jar orders-1.0.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -77,20 +77,20 @@ public final class StatusCliTest {
 
         // billing: REMOTE + UNMANAGED (IDE) + HEALTHY
         portScanner.bind(9002, 5200L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             5200L, true, Optional.of(Instant.parse("2026-11-20T11:58:00Z")),
             Optional.of("java -jar billing.jar"), List.of(),
-            List.of(new ParentProcessInfo(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
+            List.of(new ParentProcess(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
 
         // payments: REMOTE + CONFLICT
         portScanner.bind(9003, 6300L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             6300L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
             Optional.of("python -m http.server 9003"), List.of(),
-            List.of(new ParentProcessInfo(11L, Optional.of("bash"), Optional.of("bash"))),
+            List.of(new ParentProcess(11L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("python")
         ));
 
@@ -141,7 +141,7 @@ public final class StatusCliTest {
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
         )), "seed gateway");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8100L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
             Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
@@ -212,26 +212,26 @@ public final class StatusCliTest {
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
             stateStore.logPath("acme", ProcessKey.service("orders"), true)
         )), "seed orders");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
             Optional.of("java -jar orders-1.0.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
 
         portScanner.bind(9002, 5200L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             5200L, true, Optional.of(Instant.parse("2026-11-20T11:58:00Z")),
             Optional.of("java -jar billing.jar"), List.of(),
-            List.of(new ParentProcessInfo(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
+            List.of(new ParentProcess(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
         httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
 
         portScanner.bind(9003, 6300L);
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             6300L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
             Optional.of("python -m http.server 9003"), List.of(),
-            List.of(new ParentProcessInfo(11L, Optional.of("bash"), Optional.of("bash"))),
+            List.of(new ParentProcess(11L, Optional.of("bash"), Optional.of("bash"))),
             Optional.empty(), Optional.of("python")
         ));
 
@@ -254,7 +254,7 @@ public final class StatusCliTest {
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
         )), "seed gateway");
-        processRunner.registerProcess(new ProcessSnapshot(
+        processRunner.registerProcess(new ObservedProcess(
             8100L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
             Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));

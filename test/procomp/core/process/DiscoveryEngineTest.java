@@ -22,7 +22,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedRecordView record = new ManagedRecordView(
+        ManagedProcessRecord record = new ManagedProcessRecord(
             4201L,
             T1,
             List.of("java", "-jar", "orders.jar"),
@@ -80,7 +80,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedRecordView record = new ManagedRecordView(
+        ManagedProcessRecord record = new ManagedProcessRecord(
             4201L,
             T1,
             List.of("java", "-jar", "orders.jar"),
@@ -240,7 +240,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/redis.out.log"),
             Path.of("/state/acme/logs/redis.err.log")
         );
-        ManagedRecordView tcpRec = new ManagedRecordView(6001L, T0, List.of("redis-server"), Optional.empty(), tcpOnly.stdoutLog(), tcpOnly.stderrLog());
+        ManagedProcessRecord tcpRec = new ManagedProcessRecord(6001L, T0, List.of("redis-server"), Optional.empty(), tcpOnly.stdoutLog(), tcpOnly.stderrLog());
         ObservedProcess tcpProc = new ObservedProcess(6001L, true, Optional.of(T0), Optional.of("redis-server"), List.of(), List.of(), Optional.empty(), Optional.of("redis-server"));
 
         DiscoveryResult tcpListening = DiscoveryEngine.discover(new DiscoveryInput(
@@ -261,7 +261,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/worker.out.log"),
             Path.of("/state/acme/logs/worker.err.log")
         );
-        ManagedRecordView workerRec = new ManagedRecordView(7001L, T0, List.of("node", "worker.js"), Optional.empty(), workerOnly.stdoutLog(), workerOnly.stderrLog());
+        ManagedProcessRecord workerRec = new ManagedProcessRecord(7001L, T0, List.of("node", "worker.js"), Optional.empty(), workerOnly.stdoutLog(), workerOnly.stderrLog());
         ObservedProcess workerProc = new ObservedProcess(7001L, true, Optional.of(T0), Optional.of("node worker.js"), List.of("worker.js"), List.of(), Optional.empty(), Optional.of("node"));
 
         DiscoveryResult workerHealthy = DiscoveryEngine.discover(new DiscoveryInput(
