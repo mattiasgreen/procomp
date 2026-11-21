@@ -1,20 +1,12 @@
 package procomp.cli;
 
-import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.project.Project;
-import procomp.shell.LogsShell;
 import procomp.shell.LogsShell.LogsRequest;
 import procomp.shell.LogsShell.LogsResult;
-import procomp.shell.ports.Clock;
-import procomp.shell.ports.ProgressObserver;
-import procomp.shell.ports.ProgressObserver.ProgressEvent;
-import procomp.shell.ports.StateStore;
 
-import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * CLI argument parser and output renderer for {@code procomp logs}.
@@ -23,50 +15,24 @@ final class LogsCli {
 
     private LogsCli() {}
 
-    static Optional<Result<LogsRequest, String>> parse(String command, List<String> args) {
-        if (!"logs".equals(command)) {
-            return Optional.empty();
-        }
-        return Optional.of(parseArgs(args));
+    static Result<LogsRequest, String> parse(List<String> args) {
+        return parseArgs(args);
     }
 
-    static int execute(
-        LogsRequest request,
-        Project project,
-        StateStore stateStore,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        ProgressObserver cliObserver = event -> {
-            if (event instanceof ProgressEvent.LogLine logLine) {
-                out.print(logLine.line());
-                out.flush();
+    static int execute(LogsRequest request, Project project, CliRuntime runtime) {
+        return runtime.handleResult(
+            runtime.logsShell().flatMap(shell -> shell.run(project, request)),
+            result -> {
+                switch (result) {
+                    case LogsResult.ResolvedPath(Path path) -> runtime.out().println(path);
+                    case LogsResult.RawTail(_, String text) -> {
+                        runtime.out().print(text);
+                        runtime.out().flush();
+                    }
+                    case LogsResult.Followed _ -> runtime.out().flush();
+                }
             }
-            observer.onEvent(event);
-        };
-
-        Result<LogsResult, DomainError> res = new LogsShell(stateStore, clock, cliObserver).run(project, request);
-        return switch (res) {
-            case Result.Ok<LogsResult, DomainError>(LogsResult.ResolvedPath(Path path)) -> {
-                out.println(path);
-                yield 0;
-            }
-            case Result.Ok<LogsResult, DomainError>(LogsResult.RawTail(_, String text)) -> {
-                out.print(text);
-                out.flush();
-                yield 0;
-            }
-            case Result.Ok<LogsResult, DomainError>(LogsResult.Followed _) -> {
-                out.flush();
-                yield 0;
-            }
-            case Result.Err<LogsResult, DomainError>(DomainError error) -> {
-                err.println("Error: " + error.format());
-                yield 1;
-            }
-        };
+        );
     }
 
     private static Result<LogsRequest, String> parseArgs(List<String> args) {

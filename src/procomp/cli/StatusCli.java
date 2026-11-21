@@ -7,17 +7,9 @@ import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.process.Ownership;
 import procomp.core.project.Project;
 import procomp.shell.GatewayShell.GatewayStatusReport;
-import procomp.shell.StatusShell;
 import procomp.shell.StatusShell.EstateStatus;
 import procomp.shell.StatusShell.GatewaySummary;
 import procomp.shell.StatusShell.ServiceStatusRow;
-import procomp.shell.ports.Clock;
-import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.PortScanner;
-import procomp.shell.ports.ProcessRunner;
-import procomp.shell.ports.ProgressObserver;
-import procomp.shell.ports.ProjectFiles;
-import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
 import java.time.Instant;
@@ -40,50 +32,31 @@ public final class StatusCli {
 
     private StatusCli() {}
 
-    public static Optional<Result<Action, String>> parse(String command, List<String> args) {
-        if (!"status".equals(command)) {
-            return Optional.empty();
-        }
+    public static Result<Action, String> parse(List<String> args) {
         boolean json = false;
         for (String arg : args) {
             if ("--json".equals(arg)) {
                 json = true;
             } else if (arg.startsWith("-")) {
-                return Optional.of(Result.err("Unknown option '" + arg + "' for 'status'. " + USAGE));
+                return Result.err("Unknown option '" + arg + "' for 'status'. " + USAGE);
             } else {
-                return Optional.of(Result.err("Unexpected argument '" + arg + "' for 'status'. " + USAGE));
+                return Result.err("Unexpected argument '" + arg + "' for 'status'. " + USAGE);
             }
         }
-        return Optional.of(Result.ok(new Action.Show(json)));
+        return Result.ok(new Action.Show(json));
     }
 
-    public static int execute(
-        Action action,
-        Project project,
-        StateStore stateStore,
-        ProcessRunner processRunner,
-        PortScanner portScanner,
-        HttpClient httpClient,
-        ProjectFiles projectFiles,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
-            err.println("Error: Status ports are not configured.");
-            return 1;
-        }
-        StatusShell shell = new StatusShell(
-            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-        );
-        return CliFormat.handleResult(shell.status(project), err, status -> {
-            if (action instanceof Action.Show(boolean json) && json) {
-                renderJson(status, out);
-            } else {
-                renderText(status, out);
+    static int execute(Action action, Project project, CliRuntime runtime) {
+        return runtime.handleResult(
+            runtime.statusShell().flatMap(shell -> shell.status(project)),
+            status -> {
+                if (action instanceof Action.Show(boolean json) && json) {
+                    renderJson(status, runtime.out());
+                } else {
+                    renderText(status, runtime.out());
+                }
             }
-        });
+        );
     }
 
     private static void renderText(EstateStatus status, PrintWriter out) {

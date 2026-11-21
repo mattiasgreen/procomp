@@ -1,6 +1,5 @@
 package procomp.cli;
 
-import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
@@ -8,22 +7,13 @@ import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
-import procomp.shell.ProcessShell;
 import procomp.shell.ProcessShell.StartDisposition;
 import procomp.shell.ProcessShell.StartRequest;
 import procomp.shell.ProcessShell.StartResult;
 import procomp.shell.ProcessShell.StartServiceOutcome;
-import procomp.shell.ProcessShell.StopDisposition;
 import procomp.shell.ProcessShell.StopRequest;
 import procomp.shell.ProcessShell.StopResult;
 import procomp.shell.ProcessShell.StopServiceOutcome;
-import procomp.shell.ports.Clock;
-import procomp.shell.ports.HttpClient;
-import procomp.shell.ports.PortScanner;
-import procomp.shell.ports.ProcessRunner;
-import procomp.shell.ports.ProgressObserver;
-import procomp.shell.ports.ProjectFiles;
-import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -31,7 +21,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * CLI argument parser and output renderer for {@code procomp inspect}, {@code start}, and {@code stop}.
@@ -46,12 +35,12 @@ public final class ProcessCli {
 
     private ProcessCli() {}
 
-    public static Optional<Result<Action, String>> parse(String command, List<String> args) {
+    public static Result<Action, String> parse(String command, List<String> args) {
         return switch (command) {
-            case "inspect" -> Optional.of(parseInspect(args));
-            case "start" -> Optional.of(parseStart(args));
-            case "stop" -> Optional.of(parseStop(args));
-            default -> Optional.empty();
+            case "inspect" -> parseInspect(args);
+            case "start" -> parseStart(args);
+            case "stop" -> parseStop(args);
+            default -> Result.err("Unknown process command '" + command + "'.");
         };
     }
 
@@ -137,74 +126,29 @@ public final class ProcessCli {
         return Result.ok(new Action.Inspect(serviceName, json));
     }
 
-    public static int execute(
-        Action action,
-        Project project,
-        StateStore stateStore,
-        ProcessRunner processRunner,
-        PortScanner portScanner,
-        HttpClient httpClient,
-        ProjectFiles projectFiles,
-        Clock clock,
-        ProgressObserver observer,
-        PrintWriter out,
-        PrintWriter err
-    ) {
-        if (processRunner == null || portScanner == null || httpClient == null || projectFiles == null) {
-            err.println("Error: Process ports are not configured.");
-            return 1;
-        }
-        ProcessShell shell = new ProcessShell(
-            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-        );
+    static int execute(Action action, Project project, CliRuntime runtime) {
         return switch (action) {
-            case Action.Start(List<String> services, boolean detach, Duration timeout) -> {
-                Result<StartResult, DomainError> res =
-                    shell.start(project, new StartRequest(services, detach, timeout));
-                yield switch (res) {
-                    case Result.Ok<StartResult, DomainError>(StartResult result) -> {
-                        renderStartResult(result, out);
-                        yield 0;
-                    }
-                    case Result.Err<StartResult, DomainError>(DomainError error) -> {
-                        err.println("Error: " + error.format());
-                        yield 1;
-                    }
-                };
-            }
-            case Action.Stop(List<String> services, boolean all, boolean killConflict) -> {
-                Result<StopResult, DomainError> res = shell.stop(
+            case Action.Start(List<String> services, boolean detach, Duration timeout) -> runtime.handleResult(
+                runtime.processShell().flatMap(shell -> shell.start(project, new StartRequest(services, detach, timeout))),
+                result -> renderStartResult(result, runtime.out())
+            );
+            case Action.Stop(List<String> services, boolean all, boolean killConflict) -> runtime.handleResult(
+                runtime.processShell().flatMap(shell -> shell.stop(
                     project,
                     new StopRequest(services, all, killConflict, StopRequest.DEFAULT_GRACEFUL_TIMEOUT)
-                );
-                yield switch (res) {
-                    case Result.Ok<StopResult, DomainError>(StopResult result) -> {
-                        renderStopResult(result, out);
-                        yield 0;
+                )),
+                result -> renderStopResult(result, runtime.out())
+            );
+            case Action.Inspect(String serviceName, boolean json) -> runtime.handleResult(
+                runtime.processShell().flatMap(shell -> shell.inspect(project, serviceName)),
+                report -> {
+                    if (json) {
+                        renderInspectJson(project, report, runtime.out());
+                    } else {
+                        renderInspectText(report, runtime.out());
                     }
-                    case Result.Err<StopResult, DomainError>(DomainError error) -> {
-                        err.println("Error: " + error.format());
-                        yield 1;
-                    }
-                };
-            }
-            case Action.Inspect(String serviceName, boolean json) -> {
-                Result<InspectionReport, DomainError> res = shell.inspect(project, serviceName);
-                yield switch (res) {
-                    case Result.Ok<InspectionReport, DomainError>(InspectionReport report) -> {
-                        if (json) {
-                            renderInspectJson(project, report, out);
-                        } else {
-                            renderInspectText(report, out);
-                        }
-                        yield 0;
-                    }
-                    case Result.Err<InspectionReport, DomainError>(DomainError error) -> {
-                        err.println("Error: " + error.format());
-                        yield 1;
-                    }
-                };
-            }
+                }
+            );
         };
     }
 

@@ -239,16 +239,16 @@ public final class ProcessCliTest {
         StringWriter errBuf = new StringWriter();
         int code = Procomp.run(
             args,
-            cfg,
-            state,
-            runner,
-            ports,
-            http,
-            files,
-            clock,
-            new RecordingObserver(),
-            new PrintWriter(outBuf, true),
-            new PrintWriter(errBuf, true)
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(cfg)
+                .stateStore(state)
+                .processRunner(runner)
+                .portScanner(ports)
+                .httpClient(http)
+                .projectFiles(files)
+                .clock(clock)
+                .observer(new RecordingObserver())
+                .build()
         );
         return new CliResult(code, outBuf.toString(), errBuf.toString());
     }

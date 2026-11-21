@@ -209,7 +209,13 @@ public final class RoutingCliTest {
     private static CliResult runCli(InMemoryConfigSource cfg, InMemoryStateStore state, String... args) {
         StringWriter outBuf = new StringWriter();
         StringWriter errBuf = new StringWriter();
-        int code = Procomp.run(args, cfg, state, new PrintWriter(outBuf, true), new PrintWriter(errBuf, true));
+        int code = Procomp.run(
+            args,
+            CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                .configSource(cfg)
+                .stateStore(state)
+                .build()
+        );
         return new CliResult(code, outBuf.toString(), errBuf.toString());
     }
 
