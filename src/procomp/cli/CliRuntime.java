@@ -38,23 +38,23 @@ import java.util.function.Consumer;
  */
 final class CliRuntime {
 
-    private final ConfigSource configSource;
-    private final StateStore stateStore;
-    private final ProcessRunner processRunner;
-    private final PortScanner portScanner;
-    private final HttpClient httpClient;
-    private final ProjectFiles projectFiles;
+    private final Optional<ConfigSource> configSource;
+    private final Optional<StateStore> stateStore;
+    private final Optional<ProcessRunner> processRunner;
+    private final Optional<PortScanner> portScanner;
+    private final Optional<HttpClient> httpClient;
+    private final Optional<ProjectFiles> projectFiles;
     private final Clock clock;
     private final ProgressObserver observer;
     private final PrintWriter out;
     private final PrintWriter err;
 
-    private ProjectLoader projectLoader;
-    private RoutingShell routingShell;
-    private LogsShell logsShell;
-    private ProcessShell processShell;
-    private GatewayShell gatewayShell;
-    private StatusShell statusShell;
+    private Optional<ProjectLoader> projectLoader = Optional.empty();
+    private Optional<RoutingShell> routingShell = Optional.empty();
+    private Optional<LogsShell> logsShell = Optional.empty();
+    private Optional<ProcessShell> processShell = Optional.empty();
+    private Optional<GatewayShell> gatewayShell = Optional.empty();
+    private Optional<StatusShell> statusShell = Optional.empty();
 
     private CliRuntime(Builder builder) {
         this.configSource = builder.configSource;
@@ -63,8 +63,8 @@ final class CliRuntime {
         this.portScanner = builder.portScanner;
         this.httpClient = builder.httpClient;
         this.projectFiles = builder.projectFiles;
-        this.clock = builder.clock != null ? builder.clock : new SystemClock();
-        this.observer = builder.observer != null ? builder.observer : ProgressObserver.noop();
+        this.clock = builder.clock;
+        this.observer = builder.observer;
         this.out = builder.out;
         this.err = builder.err;
     }
@@ -108,30 +108,30 @@ final class CliRuntime {
     }
 
     Result<ProjectLoader, DomainError> projectLoader() {
-        if (configSource == null) {
+        if (configSource.isEmpty()) {
             return Result.err(missingPorts("ProjectLoader", List.of("ConfigSource")));
         }
-        if (projectLoader == null) {
-            projectLoader = new ProjectLoader(configSource);
+        if (projectLoader.isEmpty()) {
+            projectLoader = Optional.of(new ProjectLoader(configSource.get()));
         }
-        return Result.ok(projectLoader);
+        return Result.ok(projectLoader.get());
     }
 
     Result<RoutingShell, DomainError> routingShell() {
-        if (stateStore == null) {
+        if (stateStore.isEmpty()) {
             return Result.err(missingPorts("RoutingShell", List.of("StateStore")));
         }
-        if (routingShell == null) {
-            routingShell = new RoutingShell(stateStore);
+        if (routingShell.isEmpty()) {
+            routingShell = Optional.of(new RoutingShell(stateStore.get()));
         }
-        return Result.ok(routingShell);
+        return Result.ok(routingShell.get());
     }
 
     Result<LogsShell, DomainError> logsShell() {
-        if (stateStore == null) {
+        if (stateStore.isEmpty()) {
             return Result.err(missingPorts("LogsShell", List.of("StateStore")));
         }
-        if (logsShell == null) {
+        if (logsShell.isEmpty()) {
             ProgressObserver cliObserver = event -> {
                 if (event instanceof ProgressEvent.LogLine logLine) {
                     out.print(logLine.line());
@@ -139,9 +139,9 @@ final class CliRuntime {
                 }
                 observer.onEvent(event);
             };
-            logsShell = new LogsShell(stateStore, clock, cliObserver);
+            logsShell = Optional.of(new LogsShell(stateStore.get(), clock, cliObserver));
         }
-        return Result.ok(logsShell);
+        return Result.ok(logsShell.get());
     }
 
     Result<ProcessShell, DomainError> processShell() {
@@ -149,12 +149,12 @@ final class CliRuntime {
         if (missing.isPresent()) {
             return Result.err(missing.get());
         }
-        if (processShell == null) {
-            processShell = new ProcessShell(
-                stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-            );
+        if (processShell.isEmpty()) {
+            processShell = Optional.of(new ProcessShell(
+                stateStore.get(), processRunner.get(), portScanner.get(), httpClient.get(), projectFiles.get(), clock, observer
+            ));
         }
-        return Result.ok(processShell);
+        return Result.ok(processShell.get());
     }
 
     Result<GatewayShell, DomainError> gatewayShell() {
@@ -162,12 +162,12 @@ final class CliRuntime {
         if (missing.isPresent()) {
             return Result.err(missing.get());
         }
-        if (gatewayShell == null) {
-            gatewayShell = new GatewayShell(
-                stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-            );
+        if (gatewayShell.isEmpty()) {
+            gatewayShell = Optional.of(new GatewayShell(
+                stateStore.get(), processRunner.get(), portScanner.get(), httpClient.get(), projectFiles.get(), clock, observer
+            ));
         }
-        return Result.ok(gatewayShell);
+        return Result.ok(gatewayShell.get());
     }
 
     Result<StatusShell, DomainError> statusShell() {
@@ -175,29 +175,29 @@ final class CliRuntime {
         if (missing.isPresent()) {
             return Result.err(missing.get());
         }
-        if (statusShell == null) {
-            statusShell = new StatusShell(
-                stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer
-            );
+        if (statusShell.isEmpty()) {
+            statusShell = Optional.of(new StatusShell(
+                stateStore.get(), processRunner.get(), portScanner.get(), httpClient.get(), projectFiles.get(), clock, observer
+            ));
         }
-        return Result.ok(statusShell);
+        return Result.ok(statusShell.get());
     }
 
     private Optional<DomainError> checkLifecyclePorts(String shellName) {
         List<String> missing = new ArrayList<>();
-        if (stateStore == null) {
+        if (stateStore.isEmpty()) {
             missing.add("StateStore");
         }
-        if (processRunner == null) {
+        if (processRunner.isEmpty()) {
             missing.add("ProcessRunner");
         }
-        if (portScanner == null) {
+        if (portScanner.isEmpty()) {
             missing.add("PortScanner");
         }
-        if (httpClient == null) {
+        if (httpClient.isEmpty()) {
             missing.add("HttpClient");
         }
-        if (projectFiles == null) {
+        if (projectFiles.isEmpty()) {
             missing.add("ProjectFiles");
         }
         return missing.isEmpty() ? Optional.empty() : Optional.of(missingPorts(shellName, missing));
@@ -214,14 +214,14 @@ final class CliRuntime {
 
         private final PrintWriter out;
         private final PrintWriter err;
-        private ConfigSource configSource;
-        private StateStore stateStore;
-        private ProcessRunner processRunner;
-        private PortScanner portScanner;
-        private HttpClient httpClient;
-        private ProjectFiles projectFiles;
-        private Clock clock;
-        private ProgressObserver observer;
+        private Optional<ConfigSource> configSource = Optional.empty();
+        private Optional<StateStore> stateStore = Optional.empty();
+        private Optional<ProcessRunner> processRunner = Optional.empty();
+        private Optional<PortScanner> portScanner = Optional.empty();
+        private Optional<HttpClient> httpClient = Optional.empty();
+        private Optional<ProjectFiles> projectFiles = Optional.empty();
+        private Clock clock = new SystemClock();
+        private ProgressObserver observer = ProgressObserver.noop();
 
         private Builder(PrintWriter out, PrintWriter err) {
             this.out = Objects.requireNonNull(out, "out");
@@ -229,42 +229,42 @@ final class CliRuntime {
         }
 
         Builder configSource(ConfigSource configSource) {
-            this.configSource = configSource;
+            this.configSource = Optional.ofNullable(configSource);
             return this;
         }
 
         Builder stateStore(StateStore stateStore) {
-            this.stateStore = stateStore;
+            this.stateStore = Optional.ofNullable(stateStore);
             return this;
         }
 
         Builder processRunner(ProcessRunner processRunner) {
-            this.processRunner = processRunner;
+            this.processRunner = Optional.ofNullable(processRunner);
             return this;
         }
 
         Builder portScanner(PortScanner portScanner) {
-            this.portScanner = portScanner;
+            this.portScanner = Optional.ofNullable(portScanner);
             return this;
         }
 
         Builder httpClient(HttpClient httpClient) {
-            this.httpClient = httpClient;
+            this.httpClient = Optional.ofNullable(httpClient);
             return this;
         }
 
         Builder projectFiles(ProjectFiles projectFiles) {
-            this.projectFiles = projectFiles;
+            this.projectFiles = Optional.ofNullable(projectFiles);
             return this;
         }
 
         Builder clock(Clock clock) {
-            this.clock = clock;
+            this.clock = Objects.requireNonNull(clock, "clock");
             return this;
         }
 
         Builder observer(ProgressObserver observer) {
-            this.observer = observer;
+            this.observer = Objects.requireNonNull(observer, "observer");
             return this;
         }
 

@@ -10,8 +10,8 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 
 ## Runtime & Tooling
 
-- **Pure Zero-Dependency Java 25 LTS (JEP 458):** Use the JDK 25 standard library only (`record`, `sealed interface`, `ProcessHandle`, `ProcessBuilder`, `java.net.http.HttpClient`, `java.nio.file`). Keep zero Maven, zero Gradle, zero `npm`, zero third-party JARs, and zero committed binaries.
-- **Direct source launch:** Run the CLI via `java src/procomp/cli/Procomp.java [args...]` (wrapped by thin `./procomp` and `procomp.cmd` shims) and run tests via `java test/TestRunner.java` (or `./procomp-test` / `procomp-test.cmd`, with `--fast` for Levels 1–2 during TDD). See `docs/adr/0001-pure-java-25-jep458.md` for the rationale.
+- **Pure Zero-Dependency Java 25 LTS Runtime (JEP 458):** Keep `src/` 100% JDK 25 standard library only (`record`, `sealed interface`, `ProcessHandle`, `ProcessBuilder`, `java.net.http.HttpClient`, `java.nio.file`) with zero `implementation`/`compileOnly` dependencies and zero committed binaries. End users run the CLI directly from source via `java src/procomp/cli/Procomp.java [args...]` (wrapped by `./procomp` and `procomp.cmd`).
+- **Gradle Dev & Verification Toolchain:** Use `gradle check` for incremental compilation, Spotless formatting, Error Prone + NullAway static analysis, JUnit 5 test execution, and `:verifyJep458` (empty-classpath JEP 458 smoke check). Offline fast testing remains available via `java test/TestRunner.java` (`./procomp-test` / `procomp-test.cmd`, `--fast` for Levels 1–2). See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
 
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 
@@ -28,6 +28,7 @@ Organize code into four strict layers with dependencies flowing strictly inward 
 - **Narrow role ports:** Define small, role-specific port interfaces (`ProcessRunner`, `PortScanner`, `HttpClient`, `StateStore`, `Clock`) and inject only the ports each use case needs (e.g., `route` takes `StateStore` only).
 - **Modality isolation:** Keep `argv`, `stdout`/`stderr`, ANSI formatting, and exit codes strictly inside `cli/` (or `tui/`). Return typed domain results from `shell/`; emit progress and streaming events through a modality-supplied typed observer/stream.
 - **Explicit errors:** Return typed Result / Domain Error values from `core/` and `shell/` for all expected domain and I/O failures; reserve exceptions/panics for programmer bugs.
+- **Make illegal states unrepresentable (zero `null`, minimal `Optional`):** Model `core/` domain states with `sealed interface` + `record` sum types so each variant carries only the required, non-null fields valid in that state. Never pass or return `null` in `core/`; avoid `Optional` on domain fields or method parameters to represent states (reserve `Optional` for genuine key lookups or independent optional config attributes). See `docs/adr/0002-non-null-illegal-states-unrepresentable.md`.
 - **UNIX separation:** Keep every command focused on one responsibility—starting/stopping a `Process` never mutates the `Routing Table`, and editing the `Routing Table` never starts/stops a `Process` or touches the `Gateway`.
 
 ## Testing Pyramid

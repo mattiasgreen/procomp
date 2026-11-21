@@ -59,21 +59,19 @@ public final class FsStateStore implements StateStore {
         if (project == null || project.isBlank()) {
             throw new IllegalArgumentException("project must be non-blank");
         }
-        String override = nonBlankEnv("PROCOMP_STATE_DIR");
-        if (override != null) {
-            return Path.of(override).resolve(project).normalize();
+        Optional<String> override = nonBlankEnv("PROCOMP_STATE_DIR");
+        if (override.isPresent()) {
+            return Path.of(override.get()).resolve(project).normalize();
         }
         if (isWindows()) {
-            String localAppData = nonBlankEnv("LOCALAPPDATA");
-            Path base = localAppData != null
-                ? Path.of(localAppData)
-                : userHome.resolve("AppData").resolve("Local");
+            Path base = nonBlankEnv("LOCALAPPDATA")
+                .map(Path::of)
+                .orElseGet(() -> userHome.resolve("AppData").resolve("Local"));
             return base.resolve("procomp").resolve(project).normalize();
         }
-        String xdgState = nonBlankEnv("XDG_STATE_HOME");
-        Path base = xdgState != null
-            ? Path.of(xdgState)
-            : userHome.resolve(".local").resolve("state");
+        Path base = nonBlankEnv("XDG_STATE_HOME")
+            .map(Path::of)
+            .orElseGet(() -> userHome.resolve(".local").resolve("state"));
         return base.resolve("procomp").resolve(project).normalize();
     }
 
@@ -285,11 +283,15 @@ public final class FsStateStore implements StateStore {
 
     private Result<Unit, DomainError> writeAtomically(Path target, String content) {
         try {
-            Path parent = target.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
+            Path normalized = target.toAbsolutePath().normalize();
+            Path parent = normalized.getParent();
+            if (parent == null) {
+                throw new IOException("Target path has no parent directory: " + normalized);
             }
-            Path tmp = Files.createTempFile(parent, target.getFileName().toString(), ".tmp");
+            Files.createDirectories(parent);
+            Path fileName = normalized.getFileName();
+            String prefix = fileName != null ? fileName.toString() : "procomp-state";
+            Path tmp = Files.createTempFile(parent, prefix, ".tmp");
             try {
                 Files.writeString(tmp, content, StandardCharsets.UTF_8);
                 try {
@@ -332,9 +334,9 @@ public final class FsStateStore implements StateStore {
         return DomainError.of("STATE_CORRUPT", "Corrupt state file '" + file + "': " + detail, Map.of("path", file.toString()));
     }
 
-    private String nonBlankEnv(String key) {
+    private Optional<String> nonBlankEnv(String key) {
         String val = env.get(key);
-        return (val != null && !val.isBlank()) ? val : null;
+        return (val != null && !val.isBlank()) ? Optional.of(val) : Optional.empty();
     }
 
     private boolean isWindows() {

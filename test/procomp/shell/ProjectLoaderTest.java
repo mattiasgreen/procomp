@@ -6,7 +6,6 @@ import procomp.core.project.Project;
 import procomp.fakes.InMemoryConfigSource;
 
 import java.nio.file.Path;
-import java.util.Map;
 import java.util.Optional;
 
 public final class ProjectLoaderTest {

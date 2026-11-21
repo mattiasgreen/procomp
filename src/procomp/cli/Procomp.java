@@ -20,9 +20,9 @@ public final class Procomp {
     private Procomp() {}
 
     private sealed interface CliCommand permits
-        CliCommand.Routing, CliCommand.Process, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs {
+        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs {
         record Routing(RoutingCli.Action action) implements CliCommand {}
-        record Process(ProcessCli.Action action) implements CliCommand {}
+        record ProcessCommand(ProcessCli.Action action) implements CliCommand {}
         record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
@@ -73,7 +73,7 @@ public final class Procomp {
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
         return switch (command) {
             case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
-            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.Process::new);
+            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
             case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
@@ -84,7 +84,7 @@ public final class Procomp {
     private static int executeCommand(CliCommand cliCommand, Project project, CliRuntime runtime) {
         return switch (cliCommand) {
             case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, project, runtime);
-            case CliCommand.Process(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
+            case CliCommand.ProcessCommand(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
             case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
             case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
             case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);

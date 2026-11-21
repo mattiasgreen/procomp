@@ -336,8 +336,9 @@ final class ProjectConfigParser {
             if (unknown.isErr()) return unknown.castError();
 
             Optional<Integer> port = Optional.empty();
-            if (svcObj.containsKey("port")) {
-                Result<Integer, DomainError> portRes = parsePort(svcObj.fields().get("port"), path + ".port");
+            Optional<JsonValue> rawPort = svcObj.get("port");
+            if (rawPort.isPresent()) {
+                Result<Integer, DomainError> portRes = parsePort(rawPort.get(), path + ".port");
                 if (portRes.isErr()) return portRes.castError();
                 port = Optional.of(okVal(portRes));
             }

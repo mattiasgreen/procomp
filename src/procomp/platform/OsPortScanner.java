@@ -113,13 +113,13 @@ public final class OsPortScanner implements PortScanner {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (!trimmed.startsWith("TCP")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 5) {
                 continue;
             }
@@ -131,22 +131,22 @@ public final class OsPortScanner implements PortScanner {
             if (!isListening || !matchesLoopbackOrWildcardPort(localAddr, targetPort)) {
                 continue;
             }
-            best = pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr));
+            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr)));
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
     public static Optional<PortBinding> parseLinuxSs(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("State") || trimmed.startsWith("Netid")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 5) {
                 continue;
             }
@@ -163,39 +163,40 @@ public final class OsPortScanner implements PortScanner {
             if (m.find()) {
                 pid = parsePositivePid(m.group(1));
             }
-            best = pickBetterListener(best, new PortBinding(targetPort, pid, localAddr));
+            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, localAddr)));
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
     public static Optional<PortBinding> parsePosixLsof(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("COMMAND")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 9) {
                 continue;
             }
             Optional<Long> pid = parsePositivePid(cols[1]);
             for (int i = 7; i < cols.length; i++) {
                 if (matchesLoopbackOrWildcardPort(cols[i], targetPort)) {
-                    best = pickBetterListener(best, new PortBinding(targetPort, pid, cols[i]));
+                    best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, cols[i])));
                 }
             }
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
-    private static PortBinding pickBetterListener(PortBinding current, PortBinding candidate) {
-        if (current == null) {
+    private static PortBinding pickBetterListener(Optional<PortBinding> currentOpt, PortBinding candidate) {
+        if (currentOpt.isEmpty()) {
             return candidate;
         }
+        PortBinding current = currentOpt.get();
         if (current.pid().isEmpty() && candidate.pid().isPresent()) {
             return candidate;
         }

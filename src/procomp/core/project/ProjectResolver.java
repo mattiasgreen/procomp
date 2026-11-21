@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -362,7 +363,10 @@ public final class ProjectResolver {
         String name = draft.name();
         RawProjectConfig.RawServiceConfig svc = draft.mergedConfig();
         String rtName = svc.runtime().orElseThrow();
-        RawProjectConfig.RawRuntimeConfig rt = rawConfig.runtimes().get(rtName);
+        RawProjectConfig.RawRuntimeConfig rt = Objects.requireNonNull(
+            rawConfig.runtimes().get(rtName),
+            "Validated runtime missing: " + rtName
+        );
         Map<String, VarValue> vars = draft.effectiveVars();
 
         Result<Optional<String>, DomainError> artifactGlobRes = expandOptionalScalar(
