@@ -25,6 +25,7 @@ public final class ArchitectureRulesTest {
         "procomp.shell.",
         "procomp.platform.",
         "procomp.cli.",
+        "procomp.web.",
         "java.io.",
         "java.net.",
         "java.nio.file.Files",
