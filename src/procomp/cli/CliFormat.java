@@ -1,16 +1,13 @@
 package procomp.cli;
 
-import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 
 import java.io.PrintWriter;
 import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
 
 /**
- * Shared package-private CLI formatting, table rendering, JSON helper, and option parsing utilities.
+ * Shared package-private CLI formatting, table rendering, and option parsing utilities.
  */
 final class CliFormat {
 
@@ -58,18 +55,6 @@ final class CliFormat {
             return minutes + "m" + seconds + "s";
         }
         return seconds + "s";
-    }
-
-    static JsonValue jsonStrOrNull(Optional<String> value) {
-        return value.<JsonValue>map(Json::str).orElse(Json.nil());
-    }
-
-    static JsonValue jsonNumOrNull(Optional<? extends Number> value) {
-        return value.<JsonValue>map(n -> Json.num(n.longValue())).orElse(Json.nil());
-    }
-
-    static JsonValue jsonUptimeOrNull(Optional<Duration> uptime) {
-        return uptime.<JsonValue>map(d -> Json.num(d.toSeconds())).orElse(Json.nil());
     }
 
     record ParsedOption<T>(T value, int nextIndex) {}

@@ -8,6 +8,7 @@ import procomp.shell.ports.ConfigSource;
 
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -18,6 +19,13 @@ public final class ProjectLoader {
 
     private static final String CONFIG_FILENAME = "procomp.json";
 
+    public record LoadedProject(Path configPath, Project project) {
+        public LoadedProject {
+            Objects.requireNonNull(configPath, "configPath must not be null");
+            Objects.requireNonNull(project, "project must not be null");
+        }
+    }
+
     private final ConfigSource configSource;
 
     public ProjectLoader(ConfigSource configSource) {
@@ -25,6 +33,10 @@ public final class ProjectLoader {
     }
 
     public Result<Project, DomainError> load(Optional<Path> configOverride) {
+        return loadWithPath(configOverride).map(LoadedProject::project);
+    }
+
+    public Result<LoadedProject, DomainError> loadWithPath(Optional<Path> configOverride) {
         Result<Path, DomainError> pathRes = discoverConfigPath(configOverride);
         if (pathRes.isErr()) {
             return pathRes.castError();
@@ -41,7 +53,7 @@ public final class ProjectLoader {
             okVal(rawJsonRes),
             this::readOptionalFile,
             configSource.allEnvVars()
-        );
+        ).map(project -> new LoadedProject(configPath, project));
     }
 
     private Result<Optional<String>, DomainError> readOptionalFile(Path path) {

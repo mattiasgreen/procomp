@@ -1,12 +1,12 @@
 package procomp.cli;
 
 import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
+import procomp.shell.DomainJson;
 import procomp.shell.ProcessShell.StartDisposition;
 import procomp.shell.ProcessShell.StartRequest;
 import procomp.shell.ProcessShell.StartResult;
@@ -18,9 +18,7 @@ import procomp.shell.ProcessShell.StopServiceOutcome;
 import java.io.PrintWriter;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * CLI argument parser and output renderer for {@code procomp inspect}, {@code start}, and {@code stop}.
@@ -253,43 +251,7 @@ public final class ProcessCli {
     }
 
     private static void renderInspectJson(Project project, InspectionReport report, PrintWriter out) {
-        Map<String, JsonValue> root = new LinkedHashMap<>();
-        root.put("project", Json.str(project.name()));
-        root.put("service", Json.str(report.service()));
-        root.put("port", CliFormat.jsonNumOrNull(report.port()));
-        root.put("desiredRoute", CliFormat.jsonStrOrNull(report.desiredRoute()));
-        root.put("liveGatewayRoute", CliFormat.jsonStrOrNull(report.liveGatewayRoute()));
-        root.put("owner", Json.str(report.ownership().name()));
-        root.put("provenance", CliFormat.jsonStrOrNull(report.provenance()));
-        root.put("health", Json.str(report.health().name()));
-        root.put("pid", CliFormat.jsonNumOrNull(report.pid()));
-        root.put("uptimeSeconds", CliFormat.jsonUptimeOrNull(report.uptime()));
-        root.put("commandLine", CliFormat.jsonStrOrNull(report.commandLine()));
-
-        List<JsonValue> argNodes = new ArrayList<>(report.arguments().size());
-        for (String arg : report.arguments()) {
-            argNodes.add(Json.str(arg));
-        }
-        root.put("arguments", Json.arr(argNodes));
-
-        List<JsonValue> parentNodes = new ArrayList<>(report.parentChain().size());
-        for (ParentProcess parent : report.parentChain()) {
-            Map<String, JsonValue> pObj = new LinkedHashMap<>();
-            pObj.put("pid", Json.num(parent.pid()));
-            pObj.put("commandLine", CliFormat.jsonStrOrNull(parent.commandLine()));
-            pObj.put("executable", CliFormat.jsonStrOrNull(parent.executable()));
-            parentNodes.add(Json.obj(pObj));
-        }
-        root.put("parentChain", Json.arr(parentNodes));
-
-        root.put("rssBytes", CliFormat.jsonNumOrNull(report.rssBytes()));
-        root.put("healthEndpoint", CliFormat.jsonStrOrNull(report.healthEndpoint()));
-        root.put("healthResponse", Json.str(report.healthResponse()));
-        root.put("outLogPath", Json.str(report.outLogPath().toString()));
-        root.put("errLogPath", Json.str(report.errLogPath().toString()));
-        root.put("stale", Json.bool(report.stale()));
-
-        out.println(Json.stringify(Json.obj(root)));
+        out.println(Json.stringify(DomainJson.inspectionReport(project, report)));
     }
 
     private static String formatBytes(long bytes) {
