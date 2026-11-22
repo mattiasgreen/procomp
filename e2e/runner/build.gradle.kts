@@ -15,11 +15,16 @@ java {
 val wiremockDist by configurations.creating
 
 dependencies {
+    implementation(project(":e2e:scenarios"))
     wiremockDist("org.wiremock:wiremock-standalone:3.13.2")
 
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
 }
 
 val wiremockJarFile = layout.buildDirectory.file("wiremock/wiremock-standalone.jar")
@@ -30,9 +35,15 @@ val prepareWireMock by tasks.registering(Copy::class) {
     rename { "wiremock-standalone.jar" }
 }
 
-// Keep default `gradle test` / `gradle check` fast; run E2E explicitly via `:e2e:runner:e2eTest`.
+// Keep default `gradle test` / `gradle check` fast (unit tests only); run real-OS E2E via `:e2e:runner:e2eTest`.
 tasks.test {
-    enabled = false
+    useJUnitPlatform {
+        excludeTags("e2e")
+    }
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = false
+    }
 }
 
 val e2eTest by tasks.registering(Test::class) {
@@ -66,5 +77,39 @@ val e2eTest by tasks.registering(Test::class) {
     testLogging {
         events("passed", "skipped", "failed")
         showStandardStreams = true
+    }
+}
+
+val sandbox by tasks.registering(JavaExec::class) {
+    group = "application"
+    description = "Fast-forwards RealTopologyWorld to a Scenario/Step with a local p.cmd / ./p wrapper shim and pauses."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "e2e.runner.RealSandboxMain"
+    standardInput = System.`in`
+
+    dependsOn(
+        prepareWireMock,
+        ":e2e:broker:bootJar",
+        ":e2e:pricing:bootJar",
+        ":e2e:orders:bootJar",
+        ":e2e:notifications:bootJar",
+    )
+
+    val launcher = javaToolchains.launcherFor(java.toolchain)
+    doFirst {
+        systemProperty("e2e.repoRoot", rootProject.projectDir.absolutePath)
+        systemProperty("e2e.wiremockJar", wiremockJarFile.get().asFile.absolutePath)
+        systemProperty("e2e.javaHome", launcher.get().metadata.installationPath.asFile.absolutePath)
+
+        val cliArgs = mutableListOf<String>()
+        if (project.hasProperty("scenario")) {
+            cliArgs.add("--scenario")
+            cliArgs.add(project.property("scenario").toString())
+        }
+        if (project.hasProperty("step")) {
+            cliArgs.add("--step")
+            cliArgs.add(project.property("step").toString())
+        }
+        args = cliArgs
     }
 }
