@@ -245,9 +245,9 @@ public final class RealTopologyWorld implements ScenarioWorld {
                 this.dirty = true;
                 spawnUnmanagedService(service);
             }
-            case ExternalActorEvent.SpawnPortConflict(String service) -> {
+            case ExternalActorEvent.SpawnConflict(String service) -> {
                 this.dirty = true;
-                spawnPortConflict(service);
+                spawnConflict(service);
             }
             case ExternalActorEvent.SpawnUnmanagedGateway _ -> {
                 this.dirty = true;
@@ -627,7 +627,7 @@ public final class RealTopologyWorld implements ScenarioWorld {
         }
     }
 
-    private void spawnPortConflict(String service) {
+    private void spawnConflict(String service) {
         int port = requireServicePort(service);
         try {
             Path listenerSource = sandboxDir.resolve("ConflictListener.java");

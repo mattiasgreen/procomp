@@ -146,9 +146,9 @@ public final class InMemoryWorld implements ScenarioWorld {
                 ServiceSpec spec = requireService(layout, service);
                 os.spawnUnmanagedService(service, spec.port(), ideAncestor);
             }
-            case ExternalActorEvent.SpawnPortConflict(String service) -> {
+            case ExternalActorEvent.SpawnConflict(String service) -> {
                 ServiceSpec spec = requireService(layout, service);
-                os.spawnPortConflict(service, spec.port());
+                os.spawnConflict(service, spec.port());
             }
             case ExternalActorEvent.SpawnUnmanagedGateway _ -> os.spawnUnmanagedGateway(layout.gatewayPort());
             case ExternalActorEvent.KillManagedService(String service) -> {

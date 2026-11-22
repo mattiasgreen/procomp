@@ -78,17 +78,17 @@ public final class ScenarioReplMain {
             }
         }
 
-        Optional<String> initialTarget;
+        String initialTarget;
         if (scenario != null && !scenario.isBlank()) {
             if (step != null && !step.isBlank() && !scenario.contains("/")) {
-                initialTarget = Optional.of(scenario.trim() + "/" + step.trim());
+                initialTarget = scenario.trim() + "/" + step.trim();
             } else {
-                initialTarget = Optional.of(scenario.trim());
+                initialTarget = scenario.trim();
             }
         } else if (step != null && !step.isBlank()) {
-            initialTarget = Optional.of("/" + step.trim());
+            initialTarget = "/" + step.trim();
         } else {
-            initialTarget = Optional.empty();
+            initialTarget = "";
         }
 
         ScenarioRepl repl = new ScenarioRepl(
@@ -96,6 +96,10 @@ public final class ScenarioReplMain {
             new PrintWriter(System.out, true, StandardCharsets.UTF_8),
             InMemoryWorld::new
         );
-        repl.run(initialTarget, lag);
+        if (initialTarget.isEmpty()) {
+            repl.run(lag);
+        } else {
+            repl.run(initialTarget, lag);
+        }
     }
 }

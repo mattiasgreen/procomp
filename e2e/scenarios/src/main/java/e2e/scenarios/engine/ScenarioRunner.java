@@ -102,7 +102,7 @@ public final class ScenarioRunner {
 
     private static StepExecutionResult executeStep(ScenarioStep step, ScenarioWorld world) {
         List<CliResult> cliResults = new ArrayList<>();
-        executeAction(step, step.action(), world, cliResults);
+        executeAction(step, step.action(), world, cliResults, step.expectedExitCode().orElse(0));
         world.advanceClockSeconds(CLOCK_ADVANCE_PER_STEP_SECONDS);
         return new StepExecutionResult(step, cliResults);
     }
@@ -111,29 +111,35 @@ public final class ScenarioRunner {
         ScenarioStep step,
         StepAction action,
         ScenarioWorld world,
-        List<CliResult> cliResults
+        List<CliResult> cliResults,
+        int expectedFinalExitCode
     ) {
         switch (action) {
             case StepAction.ProcompCommand(List<String> args) -> {
                 CliResult res = world.runProcomp(args);
                 cliResults.add(res);
-                verifyExitCode(step, args, res);
+                verifyExitCode(step, args, expectedFinalExitCode, res);
             }
             case StepAction.ProcompBatch(List<List<String>> commands) -> {
                 for (int i = 0; i < commands.size(); i++) {
                     List<String> cmd = commands.get(i);
                     CliResult res = world.runProcomp(cmd);
                     cliResults.add(res);
-                    int expected = (i == commands.size() - 1) ? step.expectedExitCode().orElse(0) : 0;
-                    if (res.exitCode() != expected) {
-                        throw new AssertionError(formatExitMismatch(step, cmd, expected, res));
-                    }
+                    int expected = (i == commands.size() - 1) ? expectedFinalExitCode : 0;
+                    verifyExitCode(step, cmd, expected, res);
                 }
             }
             case StepAction.ExternalActor(ExternalActorEvent event) -> world.triggerActor(event);
             case StepAction.Mixed(List<StepAction> actions) -> {
-                for (StepAction sub : actions) {
-                    executeAction(step, sub, world, cliResults);
+                int lastCommandActionIndex = -1;
+                for (int i = 0; i < actions.size(); i++) {
+                    if (containsProcompCommand(actions.get(i))) {
+                        lastCommandActionIndex = i;
+                    }
+                }
+                for (int i = 0; i < actions.size(); i++) {
+                    int subExpected = (i == lastCommandActionIndex) ? expectedFinalExitCode : 0;
+                    executeAction(step, actions.get(i), world, cliResults, subExpected);
                 }
             }
             case StepAction.Assert(String description, java.util.function.Consumer<ScenarioWorld> assertion) -> {
@@ -149,8 +155,17 @@ public final class ScenarioRunner {
         }
     }
 
-    private static void verifyExitCode(ScenarioStep step, List<String> args, CliResult res) {
-        int expected = step.expectedExitCode().orElse(0);
+    private static boolean containsProcompCommand(StepAction action) {
+        return switch (action) {
+            case StepAction.ProcompCommand _ -> true;
+            case StepAction.ProcompBatch _ -> true;
+            case StepAction.Mixed(List<StepAction> subActions) ->
+                subActions.stream().anyMatch(ScenarioRunner::containsProcompCommand);
+            case StepAction.ExternalActor _, StepAction.Assert _ -> false;
+        };
+    }
+
+    private static void verifyExitCode(ScenarioStep step, List<String> args, int expected, CliResult res) {
         if (res.exitCode() != expected) {
             throw new AssertionError(formatExitMismatch(step, args, expected, res));
         }

@@ -61,10 +61,14 @@ tasks.register<JavaExec>("generateDemos") {
     args("--generate", demosOutputDir.absolutePath)
 }
 
-tasks.register<JavaExec>("checkDemos") {
+val checkDemos = tasks.register<JavaExec>("checkDemos") {
     group = "verification"
     description = "Verify that committed docs/demos/*.md files match deterministic DemoCapture output."
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("e2e.scenarios.demo.DemoCaptureMain")
     args("--check", demosOutputDir.absolutePath)
+}
+
+tasks.named("check") {
+    dependsOn(checkDemos)
 }

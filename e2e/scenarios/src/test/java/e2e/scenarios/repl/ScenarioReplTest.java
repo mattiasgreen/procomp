@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.io.PrintWriter;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -15,7 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ScenarioReplTest {
 
-    private String runRepl(String input, InMemoryWorld world, Optional<String> initialTarget, LagProfile initialLag) {
+    private String runRepl(String input, InMemoryWorld world, LagProfile initialLag) {
+        StringWriter outBuf = new StringWriter();
+        ScenarioRepl repl = new ScenarioRepl(new StringReader(input), new PrintWriter(outBuf, true), world);
+        repl.run(initialLag);
+        return outBuf.toString().replace("\r\n", "\n");
+    }
+
+    private String runRepl(String input, InMemoryWorld world, String initialTarget, LagProfile initialLag) {
         StringWriter outBuf = new StringWriter();
         ScenarioRepl repl = new ScenarioRepl(new StringReader(input), new PrintWriter(outBuf, true), world);
         repl.run(initialTarget, initialLag);
@@ -33,7 +39,7 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.of("hybrid-routing/bootstrap"),
+                "hybrid-routing/bootstrap",
                 LagProfile.NONE
             );
 
@@ -54,7 +60,7 @@ final class ScenarioReplTest {
                 :exit
                 """,
                 world,
-                Optional.of("hybrid-routing/bootstrap"),
+                "hybrid-routing/bootstrap",
                 LagProfile.NONE
             );
 
@@ -76,7 +82,6 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.empty(),
                 LagProfile.NONE
             );
 
@@ -103,7 +108,7 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.of("hybrid-routing/bootstrap"),
+                "hybrid-routing/bootstrap",
                 LagProfile.NONE
             );
 
@@ -127,7 +132,6 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.empty(),
                 LagProfile.NONE
             );
 
@@ -150,7 +154,6 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.empty(),
                 LagProfile.NONE
             );
 
@@ -173,7 +176,7 @@ final class ScenarioReplTest {
                 :quit
                 """,
                 world,
-                Optional.of("hybrid-routing/bootstrap"),
+                "hybrid-routing/bootstrap",
                 LagProfile.NONE
             );
 

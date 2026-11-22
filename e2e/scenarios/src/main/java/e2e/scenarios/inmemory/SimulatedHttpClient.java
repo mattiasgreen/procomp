@@ -115,18 +115,23 @@ public final class SimulatedHttpClient implements HttpClient {
         }
 
         if ("/__admin/health".equals(path) && "GET".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             return Result.ok(jsonResponse(200, "{\"status\":\"healthy\"}"));
         }
         if ("/__admin/mappings".equals(path) && "GET".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             return Result.ok(jsonResponse(200, buildMappingsListJson()));
         }
         if ("/__admin/mappings/import".equals(path) && "POST".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             return Result.ok(handleImportMappings(body));
         }
         if ("/__admin/mappings".equals(path) && "POST".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             return Result.ok(handleCreateSingleMapping(body));
         }
         if (path.startsWith("/__admin/mappings/") && "DELETE".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             String rawId = path.substring("/__admin/mappings/".length());
             String decodedId = URLDecoder.decode(rawId, StandardCharsets.UTF_8);
             boolean removed = wireMockMappings.remove(decodedId) != null;
@@ -260,6 +265,7 @@ public final class SimulatedHttpClient implements HttpClient {
             return Result.ok(jsonResponse(404, "{\"error\":\"Not Found\"}"));
         }
         if ("/actuator/health".equals(path) && "GET".equalsIgnoreCase(method)) {
+            os.applyProbeLagIfEnabled();
             return Result.ok(jsonResponse(200, "{\"status\":\"UP\"}"));
         }
 

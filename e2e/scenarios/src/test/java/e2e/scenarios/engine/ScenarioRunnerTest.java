@@ -137,6 +137,74 @@ final class ScenarioRunnerTest {
         );
     }
 
+    @Test
+    void mixedStepAppliesExpectedExitCodeOnlyToFinalProcompCommand() {
+        Scenario happyMixedNonZero = new Scenario(
+            "mixed-nonzero",
+            "Mixed Non-Zero Exit",
+            "Verifies earlier ProcompCommands in Mixed expect 0 while final ProcompCommand uses expectedExitCode.",
+            true,
+            EstateSpec.StandardTopology.INSTANCE,
+            List.of(
+                ScenarioStep.of(
+                    "bootstrap",
+                    "Clean estate bootstrap",
+                    new StepAction.ExternalActor(new ExternalActorEvent.BootstrapClean())
+                ),
+                ScenarioStep.of(
+                    "mixed-route-then-fail",
+                    "Route orders local (exit 0) then fail on unknown service (exit 1)",
+                    StepAction.Mixed.of(
+                        StepAction.ProcompCommand.of("route", "orders", "local"),
+                        StepAction.ProcompCommand.of("route", "nonexistent-service", "local"),
+                        new StepAction.Assert("orders route was persisted", world -> {
+                            CliResult status = world.runProcomp("status", "--json");
+                            assertEquals(0, status.exitCode(), status.stderr());
+                            assertTrue(status.stdout().contains("\"service\":\"orders\""), status.stdout());
+                        })
+                    ),
+                    1
+                )
+            )
+        );
+
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            ScenarioRunner.ScenarioRunResult res = runner.runAll(happyMixedNonZero, world);
+            assertEquals(2, res.stepResults().size());
+            List<CliResult> mixedResults = res.stepResults().get(1).cliResults();
+            assertEquals(2, mixedResults.size());
+            assertEquals(0, mixedResults.get(0).exitCode());
+            assertEquals(1, mixedResults.get(1).exitCode());
+        }
+
+        Scenario earlyFailureMixed = new Scenario(
+            "mixed-early-fail",
+            "Mixed Early Failure",
+            "Verifies earlier ProcompCommand failing with non-zero exit fails the step even when expectedExitCode is non-zero.",
+            true,
+            EstateSpec.StandardTopology.INSTANCE,
+            List.of(
+                ScenarioStep.of(
+                    "mixed-early-fail-step",
+                    "Earlier command fails instead of succeeding",
+                    StepAction.Mixed.of(
+                        StepAction.ProcompCommand.of("route", "nonexistent-service", "local"),
+                        StepAction.ProcompCommand.of("route", "still-nonexistent", "local")
+                    ),
+                    1
+                )
+            )
+        );
+
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            AssertionError err = assertThrows(
+                AssertionError.class,
+                () -> runner.runAll(earlyFailureMixed, world)
+            );
+            assertTrue(err.getMessage().contains("expected 0"), err.getMessage());
+        }
+    }
+
     private static final class RealTopologyWorldStub implements ScenarioWorld {
         @Override public WorldKind worldKind() { return WorldKind.REAL_TOPOLOGY; }
         @Override public void reset(EstateSpec estateSpec) {}

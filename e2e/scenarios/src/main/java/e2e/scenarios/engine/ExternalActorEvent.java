@@ -8,7 +8,7 @@ import java.util.Objects;
 public sealed interface ExternalActorEvent permits
     ExternalActorEvent.BootstrapClean,
     ExternalActorEvent.SpawnUnmanagedService,
-    ExternalActorEvent.SpawnPortConflict,
+    ExternalActorEvent.SpawnConflict,
     ExternalActorEvent.SpawnUnmanagedGateway,
     ExternalActorEvent.KillManagedService,
     ExternalActorEvent.RebuildArtifact,
@@ -27,8 +27,8 @@ public sealed interface ExternalActorEvent permits
         }
     }
 
-    record SpawnPortConflict(String service) implements ExternalActorEvent {
-        public SpawnPortConflict {
+    record SpawnConflict(String service) implements ExternalActorEvent {
+        public SpawnConflict {
             if (service == null || service.isBlank()) {
                 throw new IllegalArgumentException("service must be non-blank");
             }

@@ -127,7 +127,17 @@ final class VirtualOsState {
     }
 
     void applyLagIfEnabled() {
-        long delayMs = lag.delayMillis();
+        applyDelayMillis(lag.delayMillis());
+    }
+
+    void applyProbeLagIfEnabled() {
+        long baseMs = lag.delayMillis();
+        if (baseMs > 0) {
+            applyDelayMillis(Math.max(1L, baseMs / 4));
+        }
+    }
+
+    private void applyDelayMillis(long delayMs) {
         if (delayMs > 0) {
             try {
                 Thread.sleep(delayMs);
@@ -219,7 +229,7 @@ final class VirtualOsState {
         return proc;
     }
 
-    VirtualProcess spawnPortConflict(String serviceName, int port) {
+    VirtualProcess spawnConflict(String serviceName, int port) {
         if (listenerPidByPort.containsKey(port)) {
             throw new IllegalStateException("Port " + port + " is already bound by PID " + listenerPidByPort.get(port));
         }

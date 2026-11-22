@@ -91,7 +91,7 @@ final class OwnershipAndConflictsScenario {
                     "port-conflict",
                     "Bind foreign Conflict Process on orders port and fail fast on start",
                     StepAction.Mixed.of(
-                        new StepAction.ExternalActor(new ExternalActorEvent.SpawnPortConflict("orders")),
+                        new StepAction.ExternalActor(new ExternalActorEvent.SpawnConflict("orders")),
                         StepAction.ProcompCommand.of("start", "orders"),
                         new StepAction.Assert("inspect orders exposes Conflict process diagnostics", world -> {
                             CliResult inspect = assertCliOk(world.runProcomp("inspect", "orders", "--json"), "inspect orders");

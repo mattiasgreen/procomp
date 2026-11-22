@@ -66,37 +66,51 @@ public final class ScenarioRepl {
     }
 
     public void run() {
-        run(Optional.empty(), LagProfile.NONE);
+        run(LagProfile.NONE);
     }
 
-    public void run(Optional<String> initialTarget, LagProfile initialLag) {
+    public void run(LagProfile initialLag) {
+        Objects.requireNonNull(initialLag, "initialLag must not be null");
+        executeWithWorld(world -> runLoop(world, initialLag, () -> initDefaultScenario(world)));
+    }
+
+    public void run(String initialTarget, LagProfile initialLag) {
         Objects.requireNonNull(initialTarget, "initialTarget must not be null");
         Objects.requireNonNull(initialLag, "initialLag must not be null");
+        String trimmedTarget = initialTarget.trim();
+        executeWithWorld(world -> runLoop(world, initialLag, () -> {
+            if (trimmedTarget.isEmpty()) {
+                initDefaultScenario(world);
+            } else {
+                handleJump(world, trimmedTarget);
+            }
+        }));
+    }
 
+    private void executeWithWorld(java.util.function.Consumer<ScenarioWorld> action) {
         if (providedWorld != null) {
-            runWithWorld(providedWorld, initialTarget, initialLag);
+            action.accept(providedWorld);
         } else {
             try (ScenarioWorld world = worldFactory.get()) {
-                runWithWorld(world, initialTarget, initialLag);
+                action.accept(world);
             }
         }
     }
 
-    private void runWithWorld(ScenarioWorld world, Optional<String> initialTarget, LagProfile initialLag) {
+    private void initDefaultScenario(ScenarioWorld world) {
+        Scenario initial = ScenarioCatalog.hybridRouting();
+        String firstStep = initial.steps().get(0).id();
+        runner.jumpToStep(initial, world, firstStep);
+        this.currentScenario = initial;
+        this.currentStepIndex = 0;
+        out.println("Ready at " + currentScenario.id() + "/" + firstStep
+            + " (lag=" + world.lag().name().toLowerCase(Locale.ROOT) + ")");
+    }
+
+    private void runLoop(ScenarioWorld world, LagProfile initialLag, Runnable initializer) {
         world.setLag(initialLag);
         out.println("procomp Scenario REPL (type :help for meta-commands, :quit to exit)");
-
-        if (initialTarget.isPresent() && !initialTarget.get().isBlank()) {
-            handleJump(world, initialTarget.get().trim());
-        } else {
-            Scenario initial = ScenarioCatalog.hybridRouting();
-            String firstStep = initial.steps().get(0).id();
-            runner.jumpToStep(initial, world, firstStep);
-            this.currentScenario = initial;
-            this.currentStepIndex = 0;
-            out.println("Ready at " + currentScenario.id() + "/" + firstStep
-                + " (lag=" + world.lag().name().toLowerCase(Locale.ROOT) + ")");
-        }
+        initializer.run();
 
         try {
             while (true) {
@@ -392,7 +406,7 @@ public final class ScenarioRepl {
                 trimmed.substring("unmanaged-".length()), true));
         }
         if (lower.startsWith("conflict-") && trimmed.length() > "conflict-".length()) {
-            return Optional.of(new ExternalActorEvent.SpawnPortConflict(
+            return Optional.of(new ExternalActorEvent.SpawnConflict(
                 trimmed.substring("conflict-".length())));
         }
         if (lower.startsWith("kill-") && trimmed.length() > "kill-".length()) {
@@ -411,7 +425,7 @@ public final class ScenarioRepl {
             String target = tokens[1];
             return switch (kind) {
                 case "unmanaged" -> Optional.of(new ExternalActorEvent.SpawnUnmanagedService(target, true));
-                case "conflict" -> Optional.of(new ExternalActorEvent.SpawnPortConflict(target));
+                case "conflict" -> Optional.of(new ExternalActorEvent.SpawnConflict(target));
                 case "kill" -> Optional.of(new ExternalActorEvent.KillManagedService(target));
                 case "rebuild" -> Optional.of(new ExternalActorEvent.RebuildArtifact(target));
                 case "log" -> tokens.length == 3

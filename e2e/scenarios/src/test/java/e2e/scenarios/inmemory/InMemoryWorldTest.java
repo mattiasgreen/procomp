@@ -107,8 +107,8 @@ final class InMemoryWorldTest {
     }
 
     @Test
-    void portConflictFailsFastOnStartAndReportsInspectionDetails() {
-        world.triggerActor(new ExternalActorEvent.SpawnPortConflict("orders"));
+    void conflictFailsFastOnStartAndReportsInspectionDetails() {
+        world.triggerActor(new ExternalActorEvent.SpawnConflict("orders"));
 
         CliResult startRes = world.runProcomp("start", "orders");
         assertNotEquals(0, startRes.exitCode(), "start must fail fast on port Conflict");
@@ -212,6 +212,24 @@ final class InMemoryWorldTest {
         assertOk(world.runProcomp("start", "orders"), "start orders with FAST lag");
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
         assertTrue(elapsedMs >= 100L, "Expected FAST lag (~150ms), elapsed=" + elapsedMs + "ms");
+    }
+
+    @Test
+    void lagProfileAppliesSimulatedDelayToHealthChecksAndGatewayReconciliation() {
+        assertOk(world.runProcomp("gateway", "start"), "gateway start");
+        assertOk(world.runProcomp("start", "orders"), "start orders");
+
+        world.setLag(LagProfile.FAST);
+
+        long healthStartNanos = System.nanoTime();
+        assertOk(world.runProcomp("status", "--json"), "status with FAST lag");
+        long healthElapsedMs = (System.nanoTime() - healthStartNanos) / 1_000_000L;
+        assertTrue(healthElapsedMs >= 25L, "Expected FAST lag on health checks, elapsed=" + healthElapsedMs + "ms");
+
+        long reconcileStartNanos = System.nanoTime();
+        assertOk(world.runProcomp("gateway", "reconcile"), "gateway reconcile with FAST lag");
+        long reconcileElapsedMs = (System.nanoTime() - reconcileStartNanos) / 1_000_000L;
+        assertTrue(reconcileElapsedMs >= 50L, "Expected FAST lag on gateway reconciliation, elapsed=" + reconcileElapsedMs + "ms");
     }
 
     @Test
