@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -38,7 +39,9 @@ public final class Procomp {
         System.exit(exitCode);
     }
 
-    static int run(String[] args, CliRuntime runtime) {
+    public static int run(String[] args, CliRuntime runtime) {
+        Objects.requireNonNull(args, "args");
+        Objects.requireNonNull(runtime, "runtime");
         Result<ParsedArgs, String> parsedRes = parseArgs(args);
         if (parsedRes instanceof Result.Err<ParsedArgs, String>(String msg)) {
             runtime.err().println("Error: " + msg);

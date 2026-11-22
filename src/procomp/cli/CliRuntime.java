@@ -31,10 +31,10 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Package-private CLI runtime context wrapping {@link ProcompRuntime} with CLI output streams,
+ * CLI runtime context wrapping {@link ProcompRuntime} with CLI output streams,
  * exit-code handling, and CLI stdout log streaming.
  */
-final class CliRuntime {
+public final class CliRuntime {
 
     private final ProcompRuntime runtime;
     private final ProcompRuntime logsRuntime;
@@ -69,11 +69,15 @@ final class CliRuntime {
             .build();
     }
 
+    public static CliRuntime of(ProcompRuntime runtime, PrintWriter out, PrintWriter err) {
+        return new CliRuntime(runtime, out, err);
+    }
+
     static Builder builder(PrintWriter out, PrintWriter err) {
         return new Builder(out, err);
     }
 
-    ProcompRuntime runtime() {
+    public ProcompRuntime runtime() {
         return runtime;
     }
 

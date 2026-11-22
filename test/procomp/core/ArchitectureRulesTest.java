@@ -65,6 +65,12 @@ public final class ArchitectureRulesTest {
         Assert.assertTrue(violations.isEmpty(), "Core domain decoupling violations:\n" + String.join("\n", violations));
     }
 
+    public static void testShellLayerDoesNotImportPlatformOrCli() throws IOException {
+        List<String> violations = new ArrayList<>();
+        checkForbiddenImports(Path.of("src/procomp/shell"), List.of("procomp.platform.", "procomp.cli."), violations);
+        Assert.assertTrue(violations.isEmpty(), "Shell layer dependency violations:\n" + String.join("\n", violations));
+    }
+
     public static void testPublicTypeNamesAvoidBannedGlossarySynonyms() throws IOException {
         Path srcDir = Path.of("src/procomp");
         List<String> violations = new ArrayList<>();
