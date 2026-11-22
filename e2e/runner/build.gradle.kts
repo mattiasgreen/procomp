@@ -50,12 +50,18 @@ val e2eTest by tasks.registering(Test::class) {
         ":e2e:notifications:bootJar",
     )
 
+    val repoRootPath = rootProject.projectDir.absolutePath
+    val wiremockJarPath = wiremockJarFile.map { it.asFile.absolutePath }
     val launcher = javaToolchains.launcherFor(java.toolchain)
-    doFirst {
-        systemProperty("e2e.repoRoot", rootProject.projectDir.absolutePath)
-        systemProperty("e2e.wiremockJar", wiremockJarFile.get().asFile.absolutePath)
-        systemProperty("e2e.javaHome", launcher.get().metadata.installationPath.asFile.absolutePath)
-    }
+    val javaHomePath = launcher.map { it.metadata.installationPath.asFile.absolutePath }
+
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf(
+            "-De2e.repoRoot=$repoRootPath",
+            "-De2e.wiremockJar=${wiremockJarPath.get()}",
+            "-De2e.javaHome=${javaHomePath.get()}",
+        )
+    })
 
     testLogging {
         events("passed", "skipped", "failed")

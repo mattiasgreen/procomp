@@ -12,7 +12,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -25,6 +27,7 @@ final class JUnit5BridgeTest {
     Stream<DynamicContainer> allProcompTests() throws IOException {
         boolean fast = Boolean.parseBoolean(System.getProperty("procomp.fast", "false"));
         int onlyLevel = Integer.parseInt(System.getProperty("procomp.level", "0"));
+        Set<Integer> allowedLevels = parseAllowedLevels(System.getProperty("procomp.levels", ""));
 
         Path testRoot = Path.of("test").toAbsolutePath().normalize();
         Path procompTestDir = testRoot.resolve("procomp");
@@ -33,6 +36,9 @@ final class JUnit5BridgeTest {
         List<DynamicContainer> containers = new ArrayList<>();
         for (String className : classNames) {
             int level = classifyLevel(className);
+            if (!allowedLevels.isEmpty() && !allowedLevels.contains(level)) {
+                continue;
+            }
             if (fast && level == 3) {
                 continue;
             }
@@ -99,11 +105,25 @@ final class JUnit5BridgeTest {
         return methods;
     }
 
+    private static Set<Integer> parseAllowedLevels(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Set.of();
+        }
+        Set<Integer> levels = new HashSet<>();
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                levels.add(Integer.parseInt(trimmed));
+            }
+        }
+        return levels;
+    }
+
     private static int classifyLevel(String className) {
         if (className.startsWith("procomp.core.")) {
             return 1;
         }
-        if (className.startsWith("procomp.shell.") || className.startsWith("procomp.cli.")) {
+        if (className.startsWith("procomp.shell.") || className.startsWith("procomp.cli.") || className.startsWith("procomp.web.")) {
             return 2;
         }
         if (className.startsWith("procomp.platform.") || className.startsWith("procomp.smoke.")) {

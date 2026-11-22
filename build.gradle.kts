@@ -52,14 +52,45 @@ tasks.named<JavaCompile>("compileTestJava") {
     options.errorprone.enabled = false
 }
 
-tasks.test {
+val testSourceSet = sourceSets.test.get()
+
+val unitTest by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Runs fast Level 1-2 unit and in-memory shell/CLI/web tests in parallel."
+    testClassesDirs = testSourceSet.output.classesDirs
+    classpath = testSourceSet.runtimeClasspath
     useJUnitPlatform()
-    systemProperty("procomp.fast", System.getProperty("procomp.fast", "false"))
-    systemProperty("procomp.level", System.getProperty("procomp.level", "0"))
+    inputs.property("procomp.levels", "1,2")
+    systemProperty("procomp.levels", "1,2")
+    systemProperty("junit.jupiter.execution.parallel.enabled", "true")
+    systemProperty("junit.jupiter.execution.parallel.mode.default", "concurrent")
+    systemProperty("junit.jupiter.execution.parallel.mode.classes.default", "concurrent")
     testLogging {
         events("failed")
         showStandardStreams = false
     }
+}
+
+val integrationTest by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Runs Level 3 platform and real-OS smoke integration tests sequentially."
+    testClassesDirs = testSourceSet.output.classesDirs
+    classpath = testSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter(unitTest)
+    inputs.property("procomp.levels", "3")
+    systemProperty("procomp.levels", "3")
+    systemProperty("junit.jupiter.execution.parallel.enabled", "false")
+    testLogging {
+        events("failed")
+        showStandardStreams = false
+    }
+}
+
+tasks.test {
+    // Delegate to independently cacheable unitTest (Levels 1-2) and integrationTest (Level 3).
+    enabled = false
+    dependsOn(unitTest, integrationTest)
 }
 
 spotless {
@@ -71,15 +102,37 @@ spotless {
     }
 }
 
+val lint by tasks.registering {
+    group = "verification"
+    description = "Fast inner-loop typecheck, Error Prone + NullAway static analysis, and Spotless style check."
+    dependsOn(tasks.compileJava, tasks.compileTestJava, tasks.named("spotlessCheck"))
+}
+
+val fastCheck by tasks.registering {
+    group = "verification"
+    description = "Fast inner-loop verification: lint + unitTest (Levels 1-2)."
+    dependsOn(lint, unitTest)
+}
+
 val verifyJep458 by tasks.registering(Exec::class) {
     group = "verification"
     description = "Verifies pure zero-dependency JEP 458 direct source launch of procomp."
     val launcher = javaToolchains.launcherFor(java.toolchain)
-    executable(launcher.get().executablePath.asFile.absolutePath)
+    val javaExec = launcher.get().executablePath.asFile.absolutePath
+    val javaHome = launcher.get().metadata.installationPath.asFile.absolutePath
+    inputs.dir(layout.projectDirectory.dir("src"))
+    outputs.upToDateWhen { true }
+    executable(javaExec)
     args("src/procomp/cli/Procomp.java", "--help")
-    environment("JAVA_HOME", launcher.get().metadata.installationPath.asFile.absolutePath)
+    environment("JAVA_HOME", javaHome)
 }
 
 tasks.named("check") {
-    dependsOn(verifyJep458)
+    dependsOn(lint, unitTest, integrationTest, verifyJep458)
+}
+
+val outerLoop by tasks.registering {
+    group = "verification"
+    description = "Full outer-loop verification: check (Levels 1-3 + JEP 458) + real E2E topology suite."
+    dependsOn(tasks.named("check"), ":e2e:runner:e2eTest")
 }

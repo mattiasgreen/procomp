@@ -11,7 +11,11 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 ## Runtime & Tooling
 
 - **Pure Zero-Dependency Java 25 LTS Runtime (JEP 458):** Keep `src/` 100% JDK 25 standard library only (`record`, `sealed interface`, `ProcessHandle`, `ProcessBuilder`, `java.net.http.HttpClient`, `java.nio.file`) with zero `implementation`/`compileOnly` dependencies and zero committed binaries. End users run the CLI directly from source via `java src/procomp/cli/Procomp.java [args...]` (wrapped by `./procomp` and `procomp.cmd`).
-- **Gradle Dev & Verification Toolchain:** Use `gradle check` for incremental compilation, Spotless formatting, Error Prone + NullAway static analysis, JUnit 5 test execution, and `:verifyJep458` (empty-classpath JEP 458 smoke check). Offline fast testing remains available via `java test/TestRunner.java` (`./procomp-test` / `procomp-test.cmd`, `--fast` for Levels 1–2). See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
+- **Gradle Dev & Verification Toolchain (Inner vs. Outer Loop):** Gradle caching, parallel builds, and configuration cache are enabled in `gradle.properties`. Always verify from fastest to slowest:
+  - **Inner loop (during edits):** `gradle lint` (incremental compile, Error Prone + NullAway, Spotless) or `gradle fastCheck` (`lint` + parallel `unitTest` covering Levels 1–2, zero OS processes/ports).
+  - **Pre-commit / ticket completion:** `gradle check` (adds sequential `integrationTest` Level 3 + `:verifyJep458` empty-classpath smoke check).
+  - **Outer loop (before merging integration/process/gateway changes):** `gradle outerLoop` (`check` + `:e2e:runner:e2eTest`). Never run `:e2e:runner:e2eTest` in the inner edit loop.
+  - Offline fast testing remains available via `java test/TestRunner.java` (`./procomp-test` / `procomp-test.cmd`, `--fast` for Levels 1–2). See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
 
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 
