@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>procomp — Estate Control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">◆</span>
+          <span class="brand-name">procomp</span>
+        </div>
+        <span class="divider" aria-hidden="true">/</span>
+        <div class="project-meta">
+          <h1 id="project-name" class="project-name">Loading Project…</h1>
+          <span id="config-path" class="config-path" title=""></span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="poll-indicator" class="poll-indicator" data-state="connecting" role="status" aria-live="polite">
+          <span class="poll-dot" aria-hidden="true"></span>
+          <span id="poll-label" class="poll-label">Connecting…</span>
+          <span id="last-updated" class="last-updated"></span>
+        </div>
+        <button id="btn-refresh" type="button" class="btn btn-secondary" title="Run Discovery now (procomp status)">
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="app-main">
+      <!-- Structured DomainError Banner -->
+      <section id="error-banner" class="error-banner" role="alert" hidden>
+        <div class="error-banner-head">
+          <div class="error-banner-title">
+            <span id="error-code" class="badge badge-danger">ERROR</span>
+            <span id="error-message" class="error-message"></span>
+          </div>
+          <button id="btn-dismiss-error" type="button" class="btn-icon" aria-label="Dismiss error">&times;</button>
+        </div>
+        <dl id="error-details" class="error-details" hidden></dl>
+      </section>
+
+      <!-- Active Start Progress Strip (SSE) -->
+      <section id="progress-strip" class="progress-strip" role="status" aria-live="polite" hidden>
+        <div class="progress-strip-header">
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="progress-strip-title">Starting Processes</span>
+        </div>
+        <ul id="progress-list" class="progress-list"></ul>
+      </section>
+
+      <!-- Gateway Summary Bar -->
+      <section id="gateway-section" class="card gateway-card" aria-labelledby="gateway-heading">
+        <div class="gateway-row">
+          <div class="gateway-identity">
+            <h2 id="gateway-heading" class="section-title">Gateway</h2>
+            <span id="gateway-type" class="mono muted"></span>
+            <span id="gateway-endpoint" class="mono muted"></span>
+          </div>
+          <div id="gateway-telemetry" class="gateway-telemetry">
+            <span id="gateway-owner" class="badge badge-neutral">—</span>
+            <span id="gateway-health" class="badge badge-neutral">—</span>
+            <span id="gateway-sync" class="badge badge-neutral">—</span>
+            <span id="gateway-pid" class="mono muted"></span>
+            <span id="gateway-uptime" class="mono muted"></span>
+          </div>
+          <div id="gateway-actions" class="gateway-actions">
+            <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
+            <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
+            <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>
+          </div>
+        </div>
+        <div id="gateway-unconfigured" class="gateway-unconfigured" hidden>
+          Gateway is not configured for this Project.
+        </div>
+
+        <!-- Explicit Gateway Drift Alert -->
+        <div id="gateway-drift-alert" class="drift-alert" role="status" hidden>
+          <div class="drift-alert-header">
+            <div class="drift-alert-title">
+              <span class="badge badge-danger">DRIFTED</span>
+              <span>Live Gateway mappings differ from the Project Routing Table.</span>
+            </div>
+            <button id="btn-drift-reconcile" type="button" class="btn btn-primary btn-sm">Reconcile Gateway</button>
+          </div>
+          <ul id="gateway-drift-list" class="drift-list"></ul>
+        </div>
+      </section>
+
+      <!-- Profiles & Bulk Lifecycle Toolbar -->
+      <section class="toolbar" aria-label="Profiles and bulk Process controls">
+        <div class="profile-bar">
+          <span class="toolbar-label">Profiles</span>
+          <div id="profile-list" class="profile-list" role="group" aria-label="Project Profiles"></div>
+        </div>
+        <div class="bulk-actions">
+          <button id="btn-start-local" type="button" class="btn btn-primary" title="Start all LOCAL-routed Services">
+            Start LOCAL
+          </button>
+          <button id="btn-stop-managed" type="button" class="btn btn-secondary" title="Stop all Managed Services (leaves Gateway running)">
+            Stop Managed
+          </button>
+        </div>
+      </section>
+
+      <!-- Services Estate Table -->
+      <section class="card table-card" aria-labelledby="services-heading">
+        <div class="table-card-header">
+          <h2 id="services-heading" class="section-title">Services</h2>
+          <span id="services-summary" class="mono muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="services-table">
+            <thead>
+              <tr>
+                <th scope="col">SERVICE</th>
+                <th scope="col">ROUTE</th>
+                <th scope="col">OWNER</th>
+                <th scope="col">HEALTH</th>
+                <th scope="col">PORT</th>
+                <th scope="col">PID</th>
+                <th scope="col">UPTIME</th>
+                <th scope="col">STALE</th>
+                <th scope="col" class="col-actions">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="services-tbody">
+              <tr>
+                <td colspan="9" class="empty-cell">Running Discovery…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tabbed Bottom Drawer: Inspect & Live SSE Logs -->
+      <section id="detail-drawer" class="card drawer" aria-label="Service Inspection and Logs" hidden>
+        <div class="drawer-header">
+          <div class="drawer-title-group">
+            <span class="drawer-service-label">Service</span>
+            <h2 id="drawer-service-name" class="drawer-service-name mono"></h2>
+          </div>
+          <div class="drawer-tabs" role="tablist" aria-label="Detail views">
+            <button id="tab-inspect" type="button" role="tab" aria-selected="true" aria-controls="panel-inspect" class="drawer-tab active">
+              Inspect
+            </button>
+            <button id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" class="drawer-tab">
+              Logs
+            </button>
+          </div>
+          <div class="drawer-controls">
+            <button id="btn-drawer-close" type="button" class="btn-icon" aria-label="Close panel" title="Close panel">&times;</button>
+          </div>
+        </div>
+
+        <!-- Inspect Tab Panel -->
+        <div id="panel-inspect" class="drawer-panel" role="tabpanel" aria-labelledby="tab-inspect">
+          <div class="panel-toolbar">
+            <span id="inspect-status-note" class="muted"></span>
+            <button id="btn-inspect-refresh" type="button" class="btn btn-secondary btn-sm">Refresh Inspection</button>
+          </div>
+          <div id="inspect-content" class="inspect-content"></div>
+        </div>
+
+        <!-- Logs Tab Panel -->
+        <div id="panel-logs" class="drawer-panel" role="tabpanel" aria-labelledby="tab-logs" hidden>
+          <div class="panel-toolbar logs-toolbar">
+            <div class="logs-toolbar-left">
+              <div class="segmented-control" role="group" aria-label="Log stream">
+                <button id="btn-logs-stdout" type="button" class="seg-btn active" data-stream="stdout">stdout</button>
+                <button id="btn-logs-stderr" type="button" class="seg-btn" data-stream="stderr">stderr</button>
+              </div>
+              <span id="logs-stream-status" class="badge badge-neutral">Disconnected</span>
+              <span id="logs-line-count" class="mono muted">0 lines</span>
+            </div>
+            <div class="logs-toolbar-right">
+              <label class="checkbox-label">
+                <input id="chk-logs-autoscroll" type="checkbox" checked>
+                <span>Auto-scroll</span>
+              </label>
+              <button id="btn-logs-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
+            </div>
+          </div>
+          <div id="logs-output" class="logs-output mono" aria-live="off"></div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Persistent CLI Command Echo Footer -->
+    <footer class="cli-footer" aria-label="Verbatim CLI command echo">
+      <span class="cli-footer-label">CLI</span>
+      <code id="cli-command-echo" class="cli-command-echo">procomp status</code>
+      <button id="btn-copy-cli" type="button" class="btn btn-secondary btn-sm">Copy</button>
+    </footer>
+  </div>
+
+  <!-- Native <dialog> Confirmation Modal for Conflict Kill -->
+  <dialog id="conflict-dialog" class="conflict-dialog" aria-labelledby="conflict-dialog-title">
+    <form method="dialog" class="conflict-dialog-form">
+      <div class="dialog-header">
+        <span class="badge badge-danger">CONFLICT</span>
+        <h3 id="conflict-dialog-title" class="dialog-title">Kill Conflicting Process?</h3>
+      </div>
+      <div class="dialog-body">
+        <p class="dialog-warning">
+          An unrelated Process is occupying the port configured for <strong id="conflict-service-name" class="mono"></strong>.
+          Confirming will terminate this Process using <code>--kill-conflict</code>.
+        </p>
+        <div id="conflict-loading" class="muted">Running Inspection on conflicting Process…</div>
+        <div id="conflict-error" class="dialog-error" hidden></div>
+        <dl id="conflict-details" class="dialog-kv" hidden>
+          <dt>Port</dt>
+          <dd id="conflict-port" class="mono">—</dd>
+          <dt>Conflicting PID</dt>
+          <dd id="conflict-pid" class="mono">—</dd>
+          <dt>Command Line</dt>
+          <dd id="conflict-cmdline" class="mono code-block">—</dd>
+          <dt>Parent Chain</dt>
+          <dd id="conflict-parents" class="mono">—</dd>
+        </dl>
+        <div class="dialog-cli-preview">
+          <span class="dialog-cli-label">Verbatim CLI Command</span>
+          <code id="conflict-cli-preview" class="mono"></code>
+        </div>
+      </div>
+      <div class="dialog-footer">
+        <button id="btn-conflict-cancel" type="button" class="btn btn-secondary">Cancel</button>
+        <button id="btn-conflict-confirm" type="button" class="btn btn-danger">Kill Conflict Process</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
