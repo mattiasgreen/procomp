@@ -133,6 +133,6 @@ tasks.named("check") {
 
 val outerLoop by tasks.registering {
     group = "verification"
-    description = "Full outer-loop verification: check (Levels 1-3 + JEP 458) + real E2E topology suite."
-    dependsOn(tasks.named("check"), ":e2e:runner:e2eTest")
+    description = "Full outer-loop verification: check (Levels 1-3 + JEP 458) + real E2E topology suite + Playwright Web UI suite."
+    dependsOn(tasks.named("check"), ":e2e:runner:e2eTest", ":e2e:web-ui:uiE2eTest")
 }

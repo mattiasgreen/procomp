@@ -24,8 +24,11 @@ tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
 }
 
+val webAssetsDirPath = rootProject.file("web").absolutePath
+
 tasks.test {
     useJUnitPlatform()
+    systemProperty("e2e.webDir", webAssetsDirPath)
     testLogging {
         events("passed", "skipped", "failed")
         showStandardStreams = false
@@ -67,6 +70,28 @@ val checkDemos = tasks.register<JavaExec>("checkDemos") {
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("e2e.scenarios.demo.DemoCaptureMain")
     args("--check", demosOutputDir.absolutePath)
+}
+
+tasks.register<JavaExec>("ui") {
+    group = "application"
+    description = "Launch the real procomp Web UI over InMemoryWorld (-Pscenario=..., -Pstep=..., -Plag=none|fast|realistic, -Pport=9090)."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("e2e.scenarios.web.ScenarioWebUiMain")
+    standardInput = System.`in`
+    val uiArgs = mutableListOf("--web-dir", webAssetsDirPath)
+    (project.findProperty("scenario") as String?)?.takeIf { it.isNotBlank() }?.let {
+        uiArgs.addAll(listOf("--scenario", it))
+    }
+    (project.findProperty("step") as String?)?.takeIf { it.isNotBlank() }?.let {
+        uiArgs.addAll(listOf("--step", it))
+    }
+    (project.findProperty("lag") as String?)?.takeIf { it.isNotBlank() }?.let {
+        uiArgs.addAll(listOf("--lag", it))
+    }
+    (project.findProperty("port") as String?)?.takeIf { it.isNotBlank() }?.let {
+        uiArgs.addAll(listOf("--port", it))
+    }
+    args = uiArgs
 }
 
 tasks.named("check") {

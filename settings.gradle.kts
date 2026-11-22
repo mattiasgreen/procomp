@@ -7,4 +7,5 @@ include(
     ":e2e:notifications",
     ":e2e:scenarios",
     ":e2e:runner",
+    ":e2e:web-ui",
 )
