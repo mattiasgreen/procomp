@@ -55,6 +55,27 @@ public final class SseStream implements ApiRouter.SseSink {
         }
     }
 
+    /**
+     * Sends an SSE comment frame ({@code ": <comment>\n\n"}), ignored by EventSource clients and
+     * used as a lightweight keepalive / disconnect probe. Returns {@code false} if the stream closed.
+     */
+    public synchronized boolean sendComment(String comment) {
+        Objects.requireNonNull(comment, "comment must not be null");
+        if (!open.get()) {
+            return false;
+        }
+        String sanitized = comment.replace("\r", "").replace("\n", "");
+        byte[] frame = (": " + sanitized + "\n\n").getBytes(StandardCharsets.UTF_8);
+        try {
+            out.write(frame);
+            out.flush();
+            return true;
+        } catch (IOException e) {
+            open.set(false);
+            return false;
+        }
+    }
+
     @Override
     public boolean isOpen() {
         return open.get();

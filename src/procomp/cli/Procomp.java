@@ -20,12 +20,13 @@ public final class Procomp {
     private Procomp() {}
 
     private sealed interface CliCommand permits
-        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs {
+        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
         record Routing(RoutingCli.Action action) implements CliCommand {}
         record ProcessCommand(ProcessCli.Action action) implements CliCommand {}
         record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
+        record Ui(UiCli.Action action) implements CliCommand {}
     }
 
     public static void main(String[] args) {
@@ -59,6 +60,10 @@ public final class Procomp {
         }
         CliCommand cliCommand = ((Result.Ok<CliCommand, String>) commandRes).value();
 
+        if (cliCommand instanceof CliCommand.Ui(UiCli.Action action)) {
+            return UiCli.execute(action, parsed.configOverride(), runtime);
+        }
+
         Result<Project, DomainError> projRes = runtime.projectLoader()
             .flatMap(loader -> loader.load(parsed.configOverride()));
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
@@ -77,6 +82,7 @@ public final class Procomp {
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
             case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
+            case "ui" -> UiCli.parse(subArgs).map(CliCommand.Ui::new);
             default -> Result.err("Unknown command '" + command + "'. Run 'procomp --help' for usage.");
         };
     }
@@ -88,6 +94,7 @@ public final class Procomp {
             case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
             case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
             case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);
+            case CliCommand.Ui _ -> throw new IllegalStateException("Ui command must be dispatched via UiCli.execute");
         };
     }
 
@@ -145,7 +152,8 @@ public final class Procomp {
               route [service... <local|remote>]   Show or update the Project's Routing Table
               profile <list|use <name>>           List or apply named routing Profiles
               gateway <start|stop|status|reconcile>
-                                                  Manage the local Gateway and reconcile mappings""");
+                                                  Manage the local Gateway and reconcile mappings
+              ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 
     private record ParsedArgs(boolean help, Optional<Path> configOverride, List<String> commandArgs) {}
