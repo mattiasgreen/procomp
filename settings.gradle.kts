@@ -5,5 +5,6 @@ include(
     ":e2e:pricing",
     ":e2e:orders",
     ":e2e:notifications",
+    ":e2e:scenarios",
     ":e2e:runner",
 )
