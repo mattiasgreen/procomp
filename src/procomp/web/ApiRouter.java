@@ -64,6 +64,7 @@ public final class ApiRouter {
 
     private final ProcompRuntime runtime;
     private final LiveProjectHolder projectHolder;
+    private final CliCommandFormatter cli;
     private final int boundPort;
     private final Duration logsPollInterval;
     private final ReentrantLock mutationLock = new ReentrantLock();
@@ -80,6 +81,9 @@ public final class ApiRouter {
     ) {
         this.runtime = Objects.requireNonNull(runtime, "runtime must not be null");
         this.projectHolder = Objects.requireNonNull(projectHolder, "projectHolder must not be null");
+        this.cli = projectHolder.configOverride()
+            .map(CliCommandFormatter::withConfig)
+            .orElseGet(CliCommandFormatter::plain);
         if (boundPort <= 0 || boundPort > 65535) {
             throw new IllegalArgumentException("boundPort must be in 1..65535: " + boundPort);
         }
@@ -99,7 +103,23 @@ public final class ApiRouter {
         if ("/api/services/start/stream".equals(path)) {
             return true;
         }
-        return extractServiceSegment(path, "/logs/stream").isPresent();
+        return extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
+    }
+
+    /**
+     * Pre-flight validation for SSE endpoints before HTTP {@code 200 OK} streaming headers are sent.
+     * Enforces localhost CSRF ({@code Host}, {@code Origin}, {@code Sec-Fetch-Site}) protection on
+     * mutating SSE streams ({@code GET /api/services/start/stream}).
+     */
+    public Optional<ApiResponse> preflightSse(ApiRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+        if ("/api/services/start/stream".equals(request.path())) {
+            Optional<DomainError> csrfErr = checkCsrf(request);
+            if (csrfErr.isPresent()) {
+                return Optional.of(errorResponse(403, csrfErr.get(), ""));
+            }
+        }
+        return Optional.empty();
     }
 
     /**
@@ -170,7 +190,7 @@ public final class ApiRouter {
             return handleGatewayReconcile();
         }
 
-        Optional<String> profileUseSegment = extractProfileUseSegment(path);
+        Optional<String> profileUseSegment = extractSegment(path, PROFILES_PREFIX, "/use");
         if (profileUseSegment.isPresent()) {
             if (!"POST".equals(method)) {
                 return methodNotAllowed(method, "POST");
@@ -178,7 +198,7 @@ public final class ApiRouter {
             return handleUseProfile(profileUseSegment.get());
         }
 
-        Optional<String> inspectSegment = extractServiceSegment(path, "/inspect");
+        Optional<String> inspectSegment = extractSegment(path, SERVICES_PREFIX, "/inspect");
         if (inspectSegment.isPresent()) {
             if (!"GET".equals(method)) {
                 return methodNotAllowed(method, "GET");
@@ -186,7 +206,7 @@ public final class ApiRouter {
             return handleInspect(inspectSegment.get());
         }
 
-        Optional<String> logsSegment = extractServiceSegment(path, "/logs");
+        Optional<String> logsSegment = extractSegment(path, SERVICES_PREFIX, "/logs");
         if (logsSegment.isPresent()) {
             if (!"GET".equals(method)) {
                 return methodNotAllowed(method, "GET");
@@ -194,7 +214,7 @@ public final class ApiRouter {
             return handleLogs(logsSegment.get(), request.rawQuery());
         }
 
-        if (extractServiceSegment(path, "/logs/stream").isPresent()) {
+        if (extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent()) {
             return methodNotAllowed(method, "GET");
         }
 
@@ -218,7 +238,7 @@ public final class ApiRouter {
                 handleStartServicesStream(request, sink);
                 return;
             }
-            Optional<String> logsStreamSegment = extractServiceSegment(path, "/logs/stream");
+            Optional<String> logsStreamSegment = extractSegment(path, SERVICES_PREFIX, "/logs/stream");
             if (logsStreamSegment.isPresent()) {
                 handleLogsStream(logsStreamSegment.get(), request, sink);
                 return;
@@ -234,7 +254,7 @@ public final class ApiRouter {
     }
 
     private ApiResponse handleStatus() {
-        String cliCommand = CliCommandFormatter.status(configOverride(), false);
+        String cliCommand = cli.status(false);
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
@@ -269,7 +289,8 @@ public final class ApiRouter {
             return errorResponse(400, err, "");
         }
         String serviceName = ((Result.Ok<String, DomainError>) nameRes).value();
-        String cliCommand = CliCommandFormatter.inspect(configOverride(), serviceName, false);
+        String cliCommand = cli.inspect(serviceName, false);
+        String killConflictCliCommand = cli.stop(List.of(serviceName), false, true);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -287,7 +308,11 @@ public final class ApiRouter {
             return domainErrorResponse(err, cliCommand);
         }
         InspectionReport report = ((Result.Ok<InspectionReport, DomainError>) inspectRes).value();
-        return okEnvelope(DomainJson.inspectionReport(project, report), cliCommand);
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", DomainJson.inspectionReport(project, report));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        envelope.put("killConflictCliCommand", Json.str(killConflictCliCommand));
+        return ApiResponse.json(200, Json.obj(envelope));
     }
 
     private ApiResponse handleUpdateRoutes(ApiRequest request) {
@@ -309,7 +334,7 @@ public final class ApiRouter {
         }
         Route route = ((Result.Ok<Route, DomainError>) routeRes).value();
 
-        String cliCommand = CliCommandFormatter.updateRoutes(configOverride(), services, route);
+        String cliCommand = cli.updateRoutes(services, route);
 
         mutationLock.lock();
         try {
@@ -341,7 +366,7 @@ public final class ApiRouter {
             return errorResponse(400, err, "");
         }
         String profileName = ((Result.Ok<String, DomainError>) nameRes).value();
-        String cliCommand = CliCommandFormatter.useProfile(configOverride(), profileName);
+        String cliCommand = cli.useProfile(profileName);
 
         mutationLock.lock();
         try {
@@ -394,7 +419,7 @@ public final class ApiRouter {
         List<String> services = ((Result.Ok<List<String>, DomainError>) servicesRes).value();
         boolean detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
         Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
-        String cliCommand = CliCommandFormatter.start(configOverride(), services, detach, timeout);
+        String cliCommand = cli.start(services, detach, timeout);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -416,7 +441,7 @@ public final class ApiRouter {
     }
 
     private void handleStartServicesStream(ApiRequest request, SseSink sink) {
-        Optional<DomainError> sseCsrfErr = checkOptionalCrossOriginHeaders(request);
+        Optional<DomainError> sseCsrfErr = checkCsrf(request);
         if (sseCsrfErr.isPresent()) {
             sendSseError(sink, sseCsrfErr.get(), "");
             return;
@@ -447,7 +472,7 @@ public final class ApiRouter {
 
         boolean detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
         Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
-        String cliCommand = CliCommandFormatter.start(configOverride(), services, detach, timeout);
+        String cliCommand = cli.start(services, detach, timeout);
 
         sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
 
@@ -502,7 +527,7 @@ public final class ApiRouter {
         List<String> services = ((Result.Ok<List<String>, DomainError>) servicesRes).value();
         boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
         boolean killConflict = ((Result.Ok<Boolean, DomainError>) killConflictRes).value();
-        String cliCommand = CliCommandFormatter.stop(configOverride(), services, all, killConflict);
+        String cliCommand = cli.stop(services, all, killConflict);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -545,7 +570,7 @@ public final class ApiRouter {
 
         boolean detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
         Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
-        String cliCommand = CliCommandFormatter.gatewayStart(configOverride(), detach, timeout);
+        String cliCommand = cli.gatewayStart(detach, timeout);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -567,7 +592,7 @@ public final class ApiRouter {
     }
 
     private ApiResponse handleGatewayStop() {
-        String cliCommand = CliCommandFormatter.gatewayStop(configOverride());
+        String cliCommand = cli.gatewayStop();
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -589,7 +614,7 @@ public final class ApiRouter {
     }
 
     private ApiResponse handleGatewayReconcile() {
-        String cliCommand = CliCommandFormatter.gatewayReconcile(configOverride());
+        String cliCommand = cli.gatewayReconcile();
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -634,7 +659,7 @@ public final class ApiRouter {
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = CliCommandFormatter.logs(configOverride(), serviceName, stderr, false, lines, false);
+        String cliCommand = cli.logs(serviceName, stderr, false, lines, false);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -694,7 +719,7 @@ public final class ApiRouter {
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = CliCommandFormatter.logs(configOverride(), serviceName, stderr, false, lines, true);
+        String cliCommand = cli.logs(serviceName, stderr, false, lines, true);
 
         sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
 
@@ -722,10 +747,6 @@ public final class ApiRouter {
         }
     }
 
-    private Optional<Path> configOverride() {
-        return projectHolder.configOverride();
-    }
-
     private Optional<DomainError> checkCsrf(ApiRequest request) {
         Optional<String> hostOpt = request.header("Host");
         if (hostOpt.isEmpty() || !isAllowedHost(hostOpt.get())) {
@@ -733,18 +754,6 @@ public final class ApiRouter {
                 "FORBIDDEN_ORIGIN",
                 "Rejected mutating request with missing or non-loopback Host header",
                 Map.of("host", hostOpt.orElse("<missing>"))
-            ));
-        }
-        return checkOptionalCrossOriginHeaders(request);
-    }
-
-    private Optional<DomainError> checkOptionalCrossOriginHeaders(ApiRequest request) {
-        Optional<String> hostOpt = request.header("Host");
-        if (hostOpt.isPresent() && !isAllowedHost(hostOpt.get())) {
-            return Optional.of(DomainError.of(
-                "FORBIDDEN_ORIGIN",
-                "Rejected request with non-loopback Host header '" + hostOpt.get() + "'",
-                Map.of("host", hostOpt.get())
             ));
         }
         Optional<String> originOpt = request.header("Origin");
@@ -770,19 +779,22 @@ public final class ApiRouter {
     }
 
     private boolean isAllowedHost(String rawHost) {
-        String host = rawHost.trim().toLowerCase(Locale.ROOT);
-        if (host.equals("127.0.0.1:" + boundPort) || host.equals("localhost:" + boundPort)) {
-            return true;
-        }
-        return boundPort == 80 && (host.equals("127.0.0.1") || host.equals("localhost"));
+        return isAllowedLoopbackAuthority(rawHost.trim().toLowerCase(Locale.ROOT));
     }
 
     private boolean isAllowedOrigin(String rawOrigin) {
         String origin = rawOrigin.trim().toLowerCase(Locale.ROOT);
-        if (origin.equals("http://127.0.0.1:" + boundPort) || origin.equals("http://localhost:" + boundPort)) {
+        if (!origin.startsWith("http://")) {
+            return false;
+        }
+        return isAllowedLoopbackAuthority(origin.substring("http://".length()));
+    }
+
+    private boolean isAllowedLoopbackAuthority(String authority) {
+        if (authority.equals("127.0.0.1:" + boundPort) || authority.equals("localhost:" + boundPort)) {
             return true;
         }
-        return boundPort == 80 && (origin.equals("http://127.0.0.1") || origin.equals("http://localhost"));
+        return boundPort == 80 && (authority.equals("127.0.0.1") || authority.equals("localhost"));
     }
 
     private static boolean isMutatingMethod(String method) {
@@ -855,28 +867,11 @@ public final class ApiRouter {
         };
     }
 
-    private static Optional<String> extractServiceSegment(String path, String suffix) {
-        if (!path.startsWith(SERVICES_PREFIX) || !path.endsWith(suffix)) {
+    private static Optional<String> extractSegment(String path, String prefix, String suffix) {
+        if (!path.startsWith(prefix) || !path.endsWith(suffix)) {
             return Optional.empty();
         }
-        int start = SERVICES_PREFIX.length();
-        int end = path.length() - suffix.length();
-        if (end <= start) {
-            return Optional.empty();
-        }
-        String segment = path.substring(start, end);
-        if (segment.indexOf('/') >= 0) {
-            return Optional.empty();
-        }
-        return Optional.of(segment);
-    }
-
-    private static Optional<String> extractProfileUseSegment(String path) {
-        String suffix = "/use";
-        if (!path.startsWith(PROFILES_PREFIX) || !path.endsWith(suffix)) {
-            return Optional.empty();
-        }
-        int start = PROFILES_PREFIX.length();
+        int start = prefix.length();
         int end = path.length() - suffix.length();
         if (end <= start) {
             return Optional.empty();

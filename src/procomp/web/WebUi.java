@@ -212,6 +212,11 @@ public final class WebUi implements AutoCloseable {
 
         if (router.isSseEndpoint(method, rawPath)) {
             ApiRequest request = ApiRequest.of(method, rawPath, rawQuery, headers, "");
+            Optional<ApiResponse> preflightError = router.preflightSse(request);
+            if (preflightError.isPresent()) {
+                sendApiResponse(exchange, preflightError.get());
+                return;
+            }
             Headers respHeaders = exchange.getResponseHeaders();
             respHeaders.set("Content-Type", SseStream.CONTENT_TYPE);
             respHeaders.set("Cache-Control", "no-cache");
@@ -234,8 +239,10 @@ public final class WebUi implements AutoCloseable {
 
         String body = readBodyUtf8(exchange.getRequestBody());
         ApiRequest request = ApiRequest.of(method, rawPath, rawQuery, headers, body);
-        ApiResponse response = router.handle(request);
+        sendApiResponse(exchange, router.handle(request));
+    }
 
+    private static void sendApiResponse(HttpExchange exchange, ApiResponse response) throws IOException {
         byte[] payload = response.body().getBytes(StandardCharsets.UTF_8);
         Headers respHeaders = exchange.getResponseHeaders();
         respHeaders.set("Content-Type", response.contentType());

@@ -21,31 +21,29 @@ public final class UiCli {
     public static final int DEFAULT_PORT = WebUi.DEFAULT_PORT;
     private static final String USAGE = "Usage: procomp ui [--port <n>] [--open]";
 
-    public sealed interface Action permits Action.Serve {
-        record Serve(int port, boolean openBrowser) implements Action {}
-    }
+    public record Options(int port, boolean open) {}
 
     private UiCli() {}
 
-    public static Result<Action, String> parse(List<String> args) {
+    public static Result<Options, String> parse(List<String> args) {
         int port = DEFAULT_PORT;
-        boolean openBrowser = false;
+        boolean open = false;
 
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
             if ("--open".equals(arg)) {
-                openBrowser = true;
-            } else if ("--port".equals(arg)) {
-                if (i + 1 >= args.size()) {
-                    return Result.err("Option '--port' requires a port number (0-65535). " + USAGE);
+                open = true;
+            } else if ("--port".equals(arg) || arg.startsWith("--port=")) {
+                String rawPort;
+                if ("--port".equals(arg)) {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '--port' requires a port number (0-65535). " + USAGE);
+                    }
+                    rawPort = args.get(++i);
+                } else {
+                    rawPort = arg.substring("--port=".length());
                 }
-                Result<Integer, String> parsedPort = parsePort(args.get(++i));
-                if (parsedPort instanceof Result.Err<Integer, String>(String msg)) {
-                    return Result.err(msg);
-                }
-                port = ((Result.Ok<Integer, String>) parsedPort).value();
-            } else if (arg.startsWith("--port=")) {
-                Result<Integer, String> parsedPort = parsePort(arg.substring("--port=".length()));
+                Result<Integer, String> parsedPort = parsePort(rawPort);
                 if (parsedPort instanceof Result.Err<Integer, String>(String msg)) {
                     return Result.err(msg);
                 }
@@ -57,12 +55,10 @@ public final class UiCli {
             }
         }
 
-        return Result.ok(new Action.Serve(port, openBrowser));
+        return Result.ok(new Options(port, open));
     }
 
-    static int execute(Action action, Optional<Path> configOverride, CliRuntime runtime) {
-        Action.Serve serve = (Action.Serve) action;
-
+    static int execute(Options options, Optional<Path> configOverride, CliRuntime runtime) {
         Result<ProjectLoader, DomainError> loaderRes = runtime.projectLoader();
         if (loaderRes instanceof Result.Err<ProjectLoader, DomainError>(DomainError error)) {
             runtime.err().println("Error: " + error.format());
@@ -84,7 +80,7 @@ public final class UiCli {
         }
         StaticAssets assets = ((Result.Ok<StaticAssets, DomainError>) assetsRes).value();
 
-        WebUi webUi = new WebUi(runtime.runtime(), projectHolder, assets, serve.port());
+        WebUi webUi = new WebUi(runtime.runtime(), projectHolder, assets, options.port());
         Result<Integer, DomainError> startRes = webUi.start();
         if (startRes instanceof Result.Err<Integer, DomainError>(DomainError error)) {
             runtime.err().println("Error: " + error.format());
@@ -95,7 +91,7 @@ public final class UiCli {
         runtime.out().println(url);
         runtime.out().flush();
 
-        if (serve.openBrowser()) {
+        if (options.open()) {
             WebUi.openBrowser(url);
         }
 

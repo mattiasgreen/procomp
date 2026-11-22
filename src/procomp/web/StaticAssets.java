@@ -11,9 +11,12 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.security.CodeSource;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Disk-backed static frontend asset resolver for zero-build Vanilla ES6 assets under {@code web/}.
@@ -34,45 +37,58 @@ public final class StaticAssets {
     }
 
     /**
-     * Discovers the {@code web/} directory relative to the current working directory or the
-     * source/code location of {@code StaticAssets}.
+     * Discovers the {@code web/} directory by walking up from {@code StaticAssets}'s
+     * {@link CodeSource} (procomp's own repository/install root) first, falling back to the
+     * current working directory only when {@code CodeSource} does not locate {@code web/index.html}.
      */
     public static Result<StaticAssets, DomainError> discoverDefault() {
-        Path cwdCandidate = Path.of("web").toAbsolutePath().normalize();
-        if (Files.isDirectory(cwdCandidate)) {
-            return Result.ok(new StaticAssets(cwdCandidate));
+        List<Path> searchRoots = new ArrayList<>(2);
+        codeSourcePath().ifPresent(searchRoots::add);
+        searchRoots.add(Path.of("").toAbsolutePath().normalize());
+        return discoverFrom(searchRoots);
+    }
+
+    static Result<StaticAssets, DomainError> discoverFrom(List<Path> searchRoots) {
+        for (Path root : searchRoots) {
+            Optional<Path> found = findWebRootWalkingUp(root);
+            if (found.isPresent()) {
+                return Result.ok(new StaticAssets(found.get()));
+            }
         }
 
-        Path cursor = Path.of("").toAbsolutePath().normalize();
+        Path cwd = Path.of("").toAbsolutePath().normalize();
+        return Result.err(DomainError.of(
+            "WEB_ASSETS_NOT_FOUND",
+            "Could not locate static web assets directory 'web/' relative to '" + cwd + "'",
+            Map.of("cwd", cwd.toString())
+        ));
+    }
+
+    private static Optional<Path> codeSourcePath() {
+        CodeSource codeSource = StaticAssets.class.getProtectionDomain().getCodeSource();
+        if (codeSource == null || codeSource.getLocation() == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Path.of(codeSource.getLocation().toURI()).toAbsolutePath().normalize());
+        } catch (URISyntaxException | IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<Path> findWebRootWalkingUp(Path start) {
+        Path cursor = start.toAbsolutePath().normalize();
+        if (Files.isRegularFile(cursor)) {
+            cursor = cursor.getParent();
+        }
         while (cursor != null) {
             Path candidate = cursor.resolve("web").normalize();
-            if (Files.isDirectory(candidate)) {
-                return Result.ok(new StaticAssets(candidate));
+            if (Files.isDirectory(candidate) && Files.isRegularFile(candidate.resolve("index.html"))) {
+                return Optional.of(candidate);
             }
             cursor = cursor.getParent();
         }
-
-        CodeSource codeSource = StaticAssets.class.getProtectionDomain().getCodeSource();
-        if (codeSource != null && codeSource.getLocation() != null) {
-            try {
-                Path codeCursor = Path.of(codeSource.getLocation().toURI()).toAbsolutePath().normalize();
-                while (codeCursor != null) {
-                    Path candidate = codeCursor.resolve("web").normalize();
-                    if (Files.isDirectory(candidate)) {
-                        return Result.ok(new StaticAssets(candidate));
-                    }
-                    codeCursor = codeCursor.getParent();
-                }
-            } catch (URISyntaxException | IllegalArgumentException ignored) {
-                // Fall through to error below.
-            }
-        }
-
-        return Result.err(DomainError.of(
-            "WEB_ASSETS_NOT_FOUND",
-            "Could not locate static web assets directory 'web/' relative to '" + Path.of("").toAbsolutePath().normalize() + "'",
-            Map.of("cwd", Path.of("").toAbsolutePath().normalize().toString())
-        ));
+        return Optional.empty();
     }
 
     public Path webRoot() {

@@ -26,7 +26,7 @@ public final class Procomp {
         record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
-        record Ui(UiCli.Action action) implements CliCommand {}
+        record Ui(UiCli.Options options) implements CliCommand {}
     }
 
     public static void main(String[] args) {
@@ -60,8 +60,8 @@ public final class Procomp {
         }
         CliCommand cliCommand = ((Result.Ok<CliCommand, String>) commandRes).value();
 
-        if (cliCommand instanceof CliCommand.Ui(UiCli.Action action)) {
-            return UiCli.execute(action, parsed.configOverride(), runtime);
+        if (cliCommand instanceof CliCommand.Ui(UiCli.Options options)) {
+            return UiCli.execute(options, parsed.configOverride(), runtime);
         }
 
         Result<Project, DomainError> projRes = runtime.projectLoader()

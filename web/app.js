@@ -217,13 +217,6 @@ function formatClockTime(date) {
   return date.toLocaleTimeString([], { hour12: false });
 }
 
-function quoteCliArg(arg) {
-  if (/^[a-zA-Z0-9\-_./\\:@=+]+$/.test(arg)) {
-    return arg;
-  }
-  return `"${arg.replace(/"/g, '\\"')}"`;
-}
-
 /* ---------- CLI Command Echo & Error Banner ---------- */
 
 function setCliCommand(command, { explicit = true } = {}) {
@@ -629,37 +622,39 @@ function stopPolling() {
 
 /* ---------- Action Handlers ---------- */
 
-async function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
-  const buttons = toggleGroup.querySelectorAll('button');
-  buttons.forEach((b) => {
-    b.disabled = true;
-  });
+async function runAction(controls, actionFn, { onSettled = null } = {}) {
+  const list = Array.from(controls || []).filter(Boolean);
+  for (const control of list) {
+    control.disabled = true;
+  }
   try {
-    const payload = await updateRoutes([serviceName], targetRoute);
-    setCliCommand(payload.cliCommand, { explicit: true });
+    const payload = await actionFn();
+    if (payload && payload.cliCommand) {
+      setCliCommand(payload.cliCommand, { explicit: true });
+    }
+    if (onSettled) {
+      onSettled();
+    }
     clearError();
     await refreshStatus({ explicit: false });
   } catch (err) {
+    if (onSettled) {
+      onSettled();
+    }
     showError(err);
   } finally {
-    buttons.forEach((b) => {
-      b.disabled = false;
-    });
+    for (const control of list) {
+      control.disabled = false;
+    }
   }
 }
 
-async function handleUseProfile(profileName, btn) {
-  btn.disabled = true;
-  try {
-    const payload = await useProfile(profileName);
-    setCliCommand(payload.cliCommand, { explicit: true });
-    clearError();
-    await refreshStatus({ explicit: false });
-  } catch (err) {
-    showError(err);
-  } finally {
-    btn.disabled = false;
-  }
+function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
+  return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute));
+}
+
+function handleUseProfile(profileName, btn) {
+  return runAction([btn], () => useProfile(profileName));
 }
 
 function handleStartServices(services = []) {
@@ -707,36 +702,12 @@ function handleStartServices(services = []) {
   renderServices();
 }
 
-async function handleStopServices(services = [], triggerBtn = null) {
-  if (triggerBtn) {
-    triggerBtn.disabled = true;
-  }
-  try {
-    const payload = await stopServices(services, { all: false, killConflict: false });
-    setCliCommand(payload.cliCommand, { explicit: true });
-    clearError();
-    await refreshStatus({ explicit: false });
-  } catch (err) {
-    showError(err);
-  } finally {
-    if (triggerBtn) {
-      triggerBtn.disabled = false;
-    }
-  }
+function handleStopServices(services = [], triggerBtn = null) {
+  return runAction([triggerBtn], () => stopServices(services, { all: false, killConflict: false }));
 }
 
-async function handleGatewayAction(actionFn, triggerBtn) {
-  triggerBtn.disabled = true;
-  try {
-    const payload = await actionFn();
-    setCliCommand(payload.cliCommand, { explicit: true });
-    clearError();
-    await refreshStatus({ explicit: false });
-  } catch (err) {
-    showError(err);
-  } finally {
-    triggerBtn.disabled = false;
-  }
+function handleGatewayAction(actionFn, triggerBtn) {
+  return runAction([triggerBtn], actionFn);
 }
 
 /* ---------- Detail Drawer: Inspect & Live SSE Logs ---------- */
@@ -976,7 +947,7 @@ function startLogStream(serviceName) {
 async function openConflictDialog(serviceName) {
   state.conflictService = serviceName;
   dom.conflictServiceName.textContent = serviceName;
-  dom.conflictCliPreview.textContent = `procomp stop ${quoteCliArg(serviceName)} --kill-conflict`;
+  dom.conflictCliPreview.textContent = 'Loading CLI command…';
   dom.conflictLoading.hidden = false;
   dom.conflictError.hidden = true;
   dom.conflictDetails.hidden = true;
@@ -1003,6 +974,7 @@ async function openConflictDialog(serviceName) {
       parents.length > 0
         ? parents.map((p) => `${p.pid} (${p.executable || p.commandLine || 'unknown'})`).join(' ← ')
         : '—';
+    dom.conflictCliPreview.textContent = payload.killConflictCliCommand || '—';
 
     dom.conflictLoading.hidden = true;
     dom.conflictDetails.hidden = false;
@@ -1011,6 +983,7 @@ async function openConflictDialog(serviceName) {
       return;
     }
     dom.conflictLoading.hidden = true;
+    dom.conflictCliPreview.textContent = '(unavailable — inspection failed)';
     dom.conflictError.textContent = err instanceof Error ? err.message : String(err);
     dom.conflictError.hidden = false;
   }
@@ -1023,23 +996,16 @@ function closeConflictDialog() {
   }
 }
 
-async function confirmConflictKill() {
+function confirmConflictKill() {
   const serviceName = state.conflictService;
   if (!serviceName) {
     return;
   }
-  dom.btnConflictConfirm.disabled = true;
-  try {
-    const payload = await stopServices([serviceName], { all: false, killConflict: true });
-    setCliCommand(payload.cliCommand, { explicit: true });
-    closeConflictDialog();
-    clearError();
-    await refreshStatus({ explicit: false });
-  } catch (err) {
-    dom.btnConflictConfirm.disabled = false;
-    closeConflictDialog();
-    showError(err);
-  }
+  return runAction(
+    [dom.btnConflictConfirm],
+    () => stopServices([serviceName], { all: false, killConflict: true }),
+    { onSettled: closeConflictDialog },
+  );
 }
 
 /* ---------- Clipboard Copy ---------- */

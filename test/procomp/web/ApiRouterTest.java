@@ -97,6 +97,11 @@ public final class ApiRouterTest {
             str(inspectRoot, "cliCommand"),
             "inspect cliCommand"
         );
+        Assert.assertEquals(
+            "procomp --config " + Path.of("custom/procomp.json") + " stop billing --kill-conflict",
+            str(inspectRoot, "killConflictCliCommand"),
+            "inspect killConflictCliCommand echoes --config"
+        );
         JsonValue.JsonObject inspectData = obj(inspectRoot, "data");
         Assert.assertEquals("billing", str(inspectData, "service"), "inspected service");
         Assert.assertEquals("UNMANAGED", str(inspectData, "owner"), "owner UNMANAGED");
@@ -176,6 +181,17 @@ public final class ApiRouterTest {
             ApiResponse res = fx.router.handle(ApiRequest.of("PUT", "/api/routes", headers, body));
             Assert.assertEquals(403, res.statusCode(), "Expected 403 for headers " + headers + ", got " + res.statusCode());
             Assert.assertEquals("FORBIDDEN_ORIGIN", str(obj(parseObj(res.body()), "error"), "code"), "FORBIDDEN_ORIGIN");
+
+            Optional<ApiResponse> ssePreflight = fx.router.preflightSse(
+                ApiRequest.of("GET", "/api/services/start/stream", "services=orders", headers, "")
+            );
+            Assert.assertTrue(ssePreflight.isPresent(), "Expected SSE preflight rejection for headers " + headers);
+            Assert.assertEquals(403, ssePreflight.get().statusCode(), "SSE preflight returns 403 for headers " + headers);
+            Assert.assertEquals(
+                "FORBIDDEN_ORIGIN",
+                str(obj(parseObj(ssePreflight.get().body()), "error"), "code"),
+                "SSE preflight FORBIDDEN_ORIGIN"
+            );
         }
 
         // Valid localhost Host without Origin (e.g. curl) and with localhost Origin are accepted
@@ -189,6 +205,11 @@ public final class ApiRouterTest {
             body
         ));
         Assert.assertEquals(200, localhostOrigin.statusCode(), "matching localhost Origin allowed");
+
+        Optional<ApiResponse> allowedSse = fx.router.preflightSse(
+            ApiRequest.of("GET", "/api/services/start/stream", "services=orders", LOCAL_HEADERS, "")
+        );
+        Assert.assertTrue(allowedSse.isEmpty(), "same-origin SSE start stream passes preflight");
     }
 
     public static void testStartStopConflictKillGatingAndStartSseStream() {
@@ -198,7 +219,10 @@ public final class ApiRouterTest {
         // SSE start stream: GET /api/services/start/stream?services=orders&timeout=15
         Assert.assertTrue(fx.router.isSseEndpoint("GET", "/api/services/start/stream"), "recognized as SSE endpoint");
         RecordingSseSink sink = new RecordingSseSink();
-        fx.router.handleSse(ApiRequest.get("/api/services/start/stream", "services=orders&timeout=15"), sink);
+        fx.router.handleSse(
+            ApiRequest.of("GET", "/api/services/start/stream", "services=orders&timeout=15", LOCAL_HEADERS, ""),
+            sink
+        );
 
         Assert.assertFalse(sink.isOpen(), "SSE sink closed after completion");
         Assert.assertTrue(sink.events().size() >= 3, "expected meta + progress + done events, got " + sink.events().size());
@@ -221,6 +245,15 @@ public final class ApiRouterTest {
             Optional.of("python -m http.server 9003"), List.of(),
             List.of(), Optional.empty(), Optional.of("python")
         ));
+
+        // GET /api/services/payments/inspect returns plain killConflictCliCommand (without --config)
+        ApiResponse conflictInspect = fx.router.handle(ApiRequest.get("/api/services/payments/inspect"));
+        Assert.assertEquals(200, conflictInspect.statusCode(), "conflict inspect returns 200");
+        Assert.assertEquals(
+            "procomp stop payments --kill-conflict",
+            str(parseObj(conflictInspect.body()), "killConflictCliCommand"),
+            "plain inspect killConflictCliCommand"
+        );
 
         // POST /api/services/start on conflicting port -> 409 PORT_CONFLICT
         ApiResponse conflictStart = fx.router.handle(ApiRequest.of(

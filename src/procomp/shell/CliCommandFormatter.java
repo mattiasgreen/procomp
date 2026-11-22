@@ -11,7 +11,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * Pure, zero-I/O formatter producing verbatim, copy-pasteable {@code procomp [--config <path>] ...}
@@ -19,28 +18,43 @@ import java.util.Optional;
  */
 public final class CliCommandFormatter {
 
-    private CliCommandFormatter() {}
+    private static final CliCommandFormatter PLAIN = new CliCommandFormatter(List.of("procomp"));
 
-    public static String status(Optional<Path> configOverride, boolean json) {
-        List<String> tokens = base(configOverride, "status");
+    private final List<String> prefixTokens;
+
+    private CliCommandFormatter(List<String> prefixTokens) {
+        this.prefixTokens = prefixTokens;
+    }
+
+    public static CliCommandFormatter plain() {
+        return PLAIN;
+    }
+
+    public static CliCommandFormatter withConfig(Path configOverride) {
+        Objects.requireNonNull(configOverride, "configOverride must not be null");
+        return new CliCommandFormatter(List.of("procomp", "--config", quoteArg(configOverride.toString())));
+    }
+
+    public String status(boolean json) {
+        List<String> tokens = base("status");
         if (json) {
             tokens.add("--json");
         }
         return join(tokens);
     }
 
-    public static String showRoutes(Optional<Path> configOverride, boolean json) {
-        List<String> tokens = base(configOverride, "route");
+    public String showRoutes(boolean json) {
+        List<String> tokens = base("route");
         if (json) {
             tokens.add("--json");
         }
         return join(tokens);
     }
 
-    public static String updateRoutes(Optional<Path> configOverride, List<String> services, Route route) {
+    public String updateRoutes(List<String> services, Route route) {
         Objects.requireNonNull(services, "services must not be null");
         Objects.requireNonNull(route, "route must not be null");
-        List<String> tokens = base(configOverride, "route");
+        List<String> tokens = base("route");
         for (String svc : services) {
             tokens.add(quoteArg(svc));
         }
@@ -48,8 +62,8 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String listProfiles(Optional<Path> configOverride, boolean json) {
-        List<String> tokens = base(configOverride, "profile");
+    public String listProfiles(boolean json) {
+        List<String> tokens = base("profile");
         tokens.add("list");
         if (json) {
             tokens.add("--json");
@@ -57,23 +71,18 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String useProfile(Optional<Path> configOverride, String profileName) {
+    public String useProfile(String profileName) {
         Objects.requireNonNull(profileName, "profileName must not be null");
-        List<String> tokens = base(configOverride, "profile");
+        List<String> tokens = base("profile");
         tokens.add("use");
         tokens.add(quoteArg(profileName));
         return join(tokens);
     }
 
-    public static String start(
-        Optional<Path> configOverride,
-        List<String> services,
-        boolean detach,
-        Duration timeout
-    ) {
+    public String start(List<String> services, boolean detach, Duration timeout) {
         Objects.requireNonNull(services, "services must not be null");
         Objects.requireNonNull(timeout, "timeout must not be null");
-        List<String> tokens = base(configOverride, "start");
+        List<String> tokens = base("start");
         for (String svc : services) {
             tokens.add(quoteArg(svc));
         }
@@ -87,14 +96,9 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String stop(
-        Optional<Path> configOverride,
-        List<String> services,
-        boolean all,
-        boolean killConflict
-    ) {
+    public String stop(List<String> services, boolean all, boolean killConflict) {
         Objects.requireNonNull(services, "services must not be null");
-        List<String> tokens = base(configOverride, "stop");
+        List<String> tokens = base("stop");
         for (String svc : services) {
             tokens.add(quoteArg(svc));
         }
@@ -107,9 +111,9 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String inspect(Optional<Path> configOverride, String service, boolean json) {
+    public String inspect(String service, boolean json) {
         Objects.requireNonNull(service, "service must not be null");
-        List<String> tokens = base(configOverride, "inspect");
+        List<String> tokens = base("inspect");
         tokens.add(quoteArg(service));
         if (json) {
             tokens.add("--json");
@@ -117,8 +121,7 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String logs(
-        Optional<Path> configOverride,
+    public String logs(
         String service,
         boolean stderr,
         boolean pathOnly,
@@ -126,7 +129,7 @@ public final class CliCommandFormatter {
         boolean follow
     ) {
         Objects.requireNonNull(service, "service must not be null");
-        List<String> tokens = base(configOverride, "logs");
+        List<String> tokens = base("logs");
         tokens.add(quoteArg(service));
         if (!pathOnly && lines != LogsRequest.DEFAULT_LINES) {
             tokens.add("-n");
@@ -144,9 +147,9 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String gatewayStart(Optional<Path> configOverride, boolean detach, Duration timeout) {
+    public String gatewayStart(boolean detach, Duration timeout) {
         Objects.requireNonNull(timeout, "timeout must not be null");
-        List<String> tokens = base(configOverride, "gateway");
+        List<String> tokens = base("gateway");
         tokens.add("start");
         if (detach) {
             tokens.add("-d");
@@ -158,14 +161,14 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String gatewayStop(Optional<Path> configOverride) {
-        List<String> tokens = base(configOverride, "gateway");
+    public String gatewayStop() {
+        List<String> tokens = base("gateway");
         tokens.add("stop");
         return join(tokens);
     }
 
-    public static String gatewayStatus(Optional<Path> configOverride, boolean json) {
-        List<String> tokens = base(configOverride, "gateway");
+    public String gatewayStatus(boolean json) {
+        List<String> tokens = base("gateway");
         tokens.add("status");
         if (json) {
             tokens.add("--json");
@@ -173,8 +176,8 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
-    public static String gatewayReconcile(Optional<Path> configOverride) {
-        List<String> tokens = base(configOverride, "gateway");
+    public String gatewayReconcile() {
+        List<String> tokens = base("gateway");
         tokens.add("reconcile");
         return join(tokens);
     }
@@ -201,14 +204,9 @@ public final class CliCommandFormatter {
         return sb.toString();
     }
 
-    private static List<String> base(Optional<Path> configOverride, String command) {
-        Objects.requireNonNull(configOverride, "configOverride must not be null");
-        List<String> tokens = new ArrayList<>();
-        tokens.add("procomp");
-        if (configOverride.isPresent()) {
-            tokens.add("--config");
-            tokens.add(quoteArg(configOverride.get().toString()));
-        }
+    private List<String> base(String command) {
+        List<String> tokens = new ArrayList<>(prefixTokens.size() + 1);
+        tokens.addAll(prefixTokens);
         tokens.add(command);
         return tokens;
     }

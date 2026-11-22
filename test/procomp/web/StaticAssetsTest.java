@@ -1,6 +1,7 @@
 package procomp.web;
 
 import procomp.Assert;
+import procomp.core.common.DomainError;
 import procomp.web.StaticAssets.AssetResult;
 
 import java.io.IOException;
@@ -8,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
 import java.util.stream.Stream;
 
 public final class StaticAssetsTest {
@@ -59,6 +61,55 @@ public final class StaticAssetsTest {
                 Assert.assertTrue(res instanceof AssetResult.Forbidden,
                     "malicious path '" + malicious + "' must return Forbidden, got " + res);
             }
+        } finally {
+            deleteRecursively(tempRoot);
+        }
+    }
+
+    public static void testDiscoverDefaultLocatesRepoWebRootAndPrefersCodeSourceOverCwd() throws IOException {
+        StaticAssets discovered = Assert.assertOk(StaticAssets.discoverDefault(), "discoverDefault locates repo web/");
+        Assert.assertTrue(Files.isRegularFile(discovered.webRoot().resolve("index.html")), "discovered web/ has index.html");
+        Assert.assertTrue(Files.isRegularFile(discovered.webRoot().resolve("app.js")), "discovered web/ has app.js");
+
+        Path tempRoot = Files.createTempDirectory("procomp-static-discover-test");
+        try {
+            // Simulate procomp repo root (CodeSource) vs developer project dir (CWD) that also has web/index.html
+            Path repoRoot = tempRoot.resolve("procomp-repo");
+            Path repoWeb = repoRoot.resolve("web");
+            Path repoClasses = repoRoot.resolve("build/classes/java/main");
+            Files.createDirectories(repoWeb);
+            Files.createDirectories(repoClasses);
+            Files.writeString(repoWeb.resolve("index.html"), "procomp-ui", StandardCharsets.UTF_8);
+
+            Path userProject = tempRoot.resolve("user-app");
+            Path userWeb = userProject.resolve("web");
+            Files.createDirectories(userWeb);
+            Files.writeString(userWeb.resolve("index.html"), "user-app-web", StandardCharsets.UTF_8);
+
+            // CodeSource search root wins over CWD search root
+            StaticAssets preferred = Assert.assertOk(
+                StaticAssets.discoverFrom(List.of(repoClasses, userProject)),
+                "CodeSource root takes precedence over CWD"
+            );
+            Assert.assertEquals(repoWeb.toAbsolutePath().normalize(), preferred.webRoot(), "resolves repo web/ first");
+
+            // When CodeSource does not locate web/index.html, falls back to CWD
+            Path unrelatedCodeSource = tempRoot.resolve("tmp-classes");
+            Files.createDirectories(unrelatedCodeSource);
+            StaticAssets fallback = Assert.assertOk(
+                StaticAssets.discoverFrom(List.of(unrelatedCodeSource, userProject)),
+                "falls back to CWD when CodeSource has no web/index.html"
+            );
+            Assert.assertEquals(userWeb.toAbsolutePath().normalize(), fallback.webRoot(), "falls back to CWD web/");
+
+            // Directory with web/ but no index.html is ignored
+            Path emptyWebProject = tempRoot.resolve("empty-web-project");
+            Files.createDirectories(emptyWebProject.resolve("web"));
+            DomainError notFound = Assert.assertErr(
+                StaticAssets.discoverFrom(List.of(emptyWebProject)),
+                "web/ without index.html is not accepted"
+            );
+            Assert.assertEquals("WEB_ASSETS_NOT_FOUND", notFound.code(), "WEB_ASSETS_NOT_FOUND code");
         } finally {
             deleteRecursively(tempRoot);
         }

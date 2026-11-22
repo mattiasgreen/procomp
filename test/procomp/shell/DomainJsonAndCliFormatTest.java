@@ -272,91 +272,91 @@ public final class DomainJsonAndCliFormatTest {
     }
 
     public static void testCliCommandFormatterFormatsAllV1CommandsAndQuotesUnsafeArgs() {
-        Optional<Path> noCfg = Optional.empty();
-        Assert.assertEquals("procomp status", CliCommandFormatter.status(noCfg, false), "status");
-        Assert.assertEquals("procomp status --json", CliCommandFormatter.status(noCfg, true), "status --json");
-        Assert.assertEquals("procomp route", CliCommandFormatter.showRoutes(noCfg, false), "route");
-        Assert.assertEquals("procomp route --json", CliCommandFormatter.showRoutes(noCfg, true), "route --json");
+        CliCommandFormatter plain = CliCommandFormatter.plain();
+        Assert.assertEquals("procomp status", plain.status(false), "status");
+        Assert.assertEquals("procomp status --json", plain.status(true), "status --json");
+        Assert.assertEquals("procomp route", plain.showRoutes(false), "route");
+        Assert.assertEquals("procomp route --json", plain.showRoutes(true), "route --json");
         Assert.assertEquals(
             "procomp route orders billing local",
-            CliCommandFormatter.updateRoutes(noCfg, List.of("orders", "billing"), Route.LOCAL),
+            plain.updateRoutes(List.of("orders", "billing"), Route.LOCAL),
             "route update local"
         );
         Assert.assertEquals(
             "procomp route orders remote",
-            CliCommandFormatter.updateRoutes(noCfg, List.of("orders"), Route.REMOTE),
+            plain.updateRoutes(List.of("orders"), Route.REMOTE),
             "route update remote"
         );
-        Assert.assertEquals("procomp profile list", CliCommandFormatter.listProfiles(noCfg, false), "profile list");
-        Assert.assertEquals("procomp profile list --json", CliCommandFormatter.listProfiles(noCfg, true), "profile list --json");
-        Assert.assertEquals("procomp profile use checkout", CliCommandFormatter.useProfile(noCfg, "checkout"), "profile use");
+        Assert.assertEquals("procomp profile list", plain.listProfiles(false), "profile list");
+        Assert.assertEquals("procomp profile list --json", plain.listProfiles(true), "profile list --json");
+        Assert.assertEquals("procomp profile use checkout", plain.useProfile("checkout"), "profile use");
         Assert.assertEquals(
             "procomp start",
-            CliCommandFormatter.start(noCfg, List.of(), false, ProcessShell.StartRequest.DEFAULT_TIMEOUT),
+            plain.start(List.of(), false, ProcessShell.StartRequest.DEFAULT_TIMEOUT),
             "start default"
         );
         Assert.assertEquals(
             "procomp start orders -d --timeout 60",
-            CliCommandFormatter.start(noCfg, List.of("orders"), true, Duration.ofSeconds(60)),
+            plain.start(List.of("orders"), true, Duration.ofSeconds(60)),
             "start explicit with flags"
         );
-        Assert.assertEquals("procomp stop", CliCommandFormatter.stop(noCfg, List.of(), false, false), "stop default");
+        Assert.assertEquals("procomp stop", plain.stop(List.of(), false, false), "stop default");
         Assert.assertEquals(
             "procomp stop orders --kill-conflict",
-            CliCommandFormatter.stop(noCfg, List.of("orders"), false, true),
+            plain.stop(List.of("orders"), false, true),
             "stop kill-conflict"
         );
-        Assert.assertEquals("procomp stop --all", CliCommandFormatter.stop(noCfg, List.of(), true, false), "stop --all");
-        Assert.assertEquals("procomp inspect orders", CliCommandFormatter.inspect(noCfg, "orders", false), "inspect");
-        Assert.assertEquals("procomp inspect orders --json", CliCommandFormatter.inspect(noCfg, "orders", true), "inspect --json");
+        Assert.assertEquals("procomp stop --all", plain.stop(List.of(), true, false), "stop --all");
+        Assert.assertEquals("procomp inspect orders", plain.inspect("orders", false), "inspect");
+        Assert.assertEquals("procomp inspect orders --json", plain.inspect("orders", true), "inspect --json");
         Assert.assertEquals(
             "procomp logs orders",
-            CliCommandFormatter.logs(noCfg, "orders", false, false, LogsShell.LogsRequest.DEFAULT_LINES, false),
+            plain.logs("orders", false, false, LogsShell.LogsRequest.DEFAULT_LINES, false),
             "logs default"
         );
         Assert.assertEquals(
             "procomp logs orders -n 50 -f --err",
-            CliCommandFormatter.logs(noCfg, "orders", true, false, 50, true),
+            plain.logs("orders", true, false, 50, true),
             "logs follow err custom lines"
         );
         Assert.assertEquals(
             "procomp logs orders --err --path",
-            CliCommandFormatter.logs(noCfg, "orders", true, true, 100, false),
+            plain.logs("orders", true, true, 100, false),
             "logs path"
         );
         Assert.assertEquals(
             "procomp gateway start",
-            CliCommandFormatter.gatewayStart(noCfg, false, GatewayShell.GatewayStartRequest.DEFAULT_TIMEOUT),
+            plain.gatewayStart(false, GatewayShell.GatewayStartRequest.DEFAULT_TIMEOUT),
             "gateway start default"
         );
         Assert.assertEquals(
             "procomp gateway start -d --timeout 45",
-            CliCommandFormatter.gatewayStart(noCfg, true, Duration.ofSeconds(45)),
+            plain.gatewayStart(true, Duration.ofSeconds(45)),
             "gateway start flags"
         );
-        Assert.assertEquals("procomp gateway stop", CliCommandFormatter.gatewayStop(noCfg), "gateway stop");
-        Assert.assertEquals("procomp gateway status", CliCommandFormatter.gatewayStatus(noCfg, false), "gateway status");
-        Assert.assertEquals("procomp gateway status --json", CliCommandFormatter.gatewayStatus(noCfg, true), "gateway status --json");
-        Assert.assertEquals("procomp gateway reconcile", CliCommandFormatter.gatewayReconcile(noCfg), "gateway reconcile");
+        Assert.assertEquals("procomp gateway stop", plain.gatewayStop(), "gateway stop");
+        Assert.assertEquals("procomp gateway status", plain.gatewayStatus(false), "gateway status");
+        Assert.assertEquals("procomp gateway status --json", plain.gatewayStatus(true), "gateway status --json");
+        Assert.assertEquals("procomp gateway reconcile", plain.gatewayReconcile(), "gateway reconcile");
 
         // Config override quoting
         Path simpleCfg = Path.of("acme/procomp.json");
         Assert.assertEquals(
             "procomp --config " + simpleCfg + " status",
-            CliCommandFormatter.status(Optional.of(simpleCfg), false),
+            CliCommandFormatter.withConfig(simpleCfg).status(false),
             "simple config path unquoted"
         );
 
         Path spacedCfg = Path.of("my project/procomp.json");
         Assert.assertEquals(
             "procomp --config \"" + spacedCfg + "\" gateway reconcile",
-            CliCommandFormatter.gatewayReconcile(Optional.of(spacedCfg)),
+            CliCommandFormatter.withConfig(spacedCfg).gatewayReconcile(),
             "spaced config path quoted"
         );
 
         Assert.assertEquals(
             "procomp profile use \"my \\\"quoted\\\" profile\"",
-            CliCommandFormatter.useProfile(noCfg, "my \"quoted\" profile"),
+            plain.useProfile("my \"quoted\" profile"),
             "quotes escaped"
         );
     }
