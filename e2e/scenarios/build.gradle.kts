@@ -31,3 +31,40 @@ tasks.test {
         showStandardStreams = false
     }
 }
+
+val demosOutputDir = rootProject.file("docs/demos")
+
+tasks.register<JavaExec>("repl") {
+    group = "application"
+    description = "Launch the interactive procomp Scenario REPL over InMemoryWorld (-Pscenario=..., -Pstep=..., -Plag=none|fast|realistic)."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("e2e.scenarios.repl.ScenarioReplMain")
+    standardInput = System.`in`
+    val replArgs = mutableListOf<String>()
+    (project.findProperty("scenario") as String?)?.takeIf { it.isNotBlank() }?.let {
+        replArgs.addAll(listOf("--scenario", it))
+    }
+    (project.findProperty("step") as String?)?.takeIf { it.isNotBlank() }?.let {
+        replArgs.addAll(listOf("--step", it))
+    }
+    (project.findProperty("lag") as String?)?.takeIf { it.isNotBlank() }?.let {
+        replArgs.addAll(listOf("--lag", it))
+    }
+    args = replArgs
+}
+
+tasks.register<JavaExec>("generateDemos") {
+    group = "documentation"
+    description = "Generate deterministic Markdown demo snapshots under docs/demos/*.md."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("e2e.scenarios.demo.DemoCaptureMain")
+    args("--generate", demosOutputDir.absolutePath)
+}
+
+tasks.register<JavaExec>("checkDemos") {
+    group = "verification"
+    description = "Verify that committed docs/demos/*.md files match deterministic DemoCapture output."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("e2e.scenarios.demo.DemoCaptureMain")
+    args("--check", demosOutputDir.absolutePath)
+}
