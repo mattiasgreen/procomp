@@ -9,6 +9,7 @@ import procomp.platform.JdkHttpClient;
 import procomp.platform.OsPortScanner;
 import procomp.platform.OsProcessRunner;
 import procomp.platform.SystemClock;
+import procomp.shell.BuildShell;
 import procomp.shell.GatewayShell;
 import procomp.shell.LogsShell;
 import procomp.shell.ProcessShell;
@@ -162,6 +163,10 @@ public final class CliRuntime {
 
     Result<LogsShell, DomainError> logsShell() {
         return logsRuntime.logsShell();
+    }
+
+    Result<BuildShell, DomainError> buildShell() {
+        return runtime.buildShell();
     }
 
     Result<ProcessShell, DomainError> processShell() {

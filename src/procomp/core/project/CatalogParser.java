@@ -129,6 +129,7 @@ final class CatalogParser {
     ) {
         Optional<Integer> port = Optional.empty();
         Optional<String> runtime = Optional.empty();
+        Optional<String> builder = Optional.empty();
         Optional<String> repository = Optional.empty();
         Optional<String> repositoryUrl = Optional.empty();
         Optional<String> workingDir = Optional.empty();
@@ -167,6 +168,11 @@ final class CatalogParser {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
                     if (s.isErr()) return s.castError();
                     runtime = Optional.of(okVal(s));
+                }
+                case "builder" -> {
+                    Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
+                    if (s.isErr()) return s.castError();
+                    builder = Optional.of(okVal(s));
                 }
                 case "repository" -> {
                     Result<String, DomainError> s = expectNonBlankString(rawVal, index, serviceName, sourceField, target);
@@ -210,7 +216,7 @@ final class CatalogParser {
         }
 
         return Result.ok(new RawProjectConfig.RawServiceConfig(
-            port, runtime, repository, repositoryUrl, workingDir,
+            port, runtime, builder, repository, repositoryUrl, workingDir,
             healthPath, proxyPath, remoteUrl, vars, Map.of(), List.of()
         ));
     }

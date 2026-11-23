@@ -266,6 +266,30 @@ public final class ProjectResolver {
         );
         if (defaultsCheck.isErr()) return defaultsCheck.castError();
 
+        if (rawConfig.defaults().builder().isPresent()) {
+            String defaultBuilder = rawConfig.defaults().builder().get();
+            if (!rawConfig.builders().containsKey(defaultBuilder)) {
+                return Result.err(DomainError.of(
+                    "CONFIG_UNKNOWN_BUILDER",
+                    "defaults.builder references unknown builder '" + defaultBuilder + "'",
+                    Map.of("field", "defaults.builder", "builder", defaultBuilder)
+                ));
+            }
+        }
+
+        Map<String, BuilderDefinition> resolvedBuilders = new LinkedHashMap<>();
+        for (Map.Entry<String, RawProjectConfig.RawBuilderConfig> entry : rawConfig.builders().entrySet()) {
+            String builderName = entry.getKey();
+            RawProjectConfig.RawBuilderConfig b = entry.getValue();
+            Result<Map<String, String>, DomainError> bEnvRes = validateBuilderTemplates(
+                builderName, b, validationVars, hostEnv
+            );
+            if (bEnvRes.isErr()) return bEnvRes.castError();
+            resolvedBuilders.put(builderName, new BuilderDefinition(
+                builderName, b.command(), b.workingDir(), SecretEnv.of(okVal(bEnvRes))
+            ));
+        }
+
         Map<String, RuntimeDefinition> resolvedRuntimes = new LinkedHashMap<>();
         for (Map.Entry<String, RawProjectConfig.RawRuntimeConfig> entry : rawConfig.runtimes().entrySet()) {
             String rtName = entry.getKey();
@@ -289,7 +313,7 @@ public final class ProjectResolver {
 
         for (ServiceDraft draft : plan.serviceDrafts()) {
             Result<ServiceDefinition, DomainError> svcRes = resolveService(
-                draft, rawConfig, parsedEnvFiles, topEnvFileOverlay, hostEnv
+                draft, plan.configDir(), rawConfig, parsedEnvFiles, topEnvFileOverlay, hostEnv
             );
             if (svcRes.isErr()) return svcRes.castError();
             ServiceDefinition svc = okVal(svcRes);
@@ -331,6 +355,7 @@ public final class ProjectResolver {
             plan.configPath(),
             plan.configDir(),
             plan.repositoriesRoot(),
+            resolvedBuilders,
             resolvedRuntimes,
             gateway,
             services,
@@ -354,15 +379,19 @@ public final class ProjectResolver {
             return Result.ok(service.command());
         }
         if (artifactPath == null || artifactPath.isEmpty()) {
+            Map<String, String> details = new LinkedHashMap<>();
+            details.put("service", service.name());
+            details.put("workingDir", service.workingDir().toString());
+            details.put("artifactGlob", service.artifactGlob().orElse(""));
+            service.buildConfig().ifPresent(cfg -> details.put("builder", cfg.builder()));
+            String suffix = service.buildConfig().isPresent()
+                ? " — build the Service before starting it"
+                : "";
             return Result.err(DomainError.of(
                 "ARTIFACT_NOT_FOUND",
                 "No runnable artifact found for service '" + service.name() + "' (glob: '"
-                    + service.artifactGlob().orElse("none") + "', workingDir: '" + service.workingDir() + "')",
-                Map.of(
-                    "service", service.name(),
-                    "workingDir", service.workingDir().toString(),
-                    "artifactGlob", service.artifactGlob().orElse("")
-                )
+                    + service.artifactGlob().orElse("none") + "', workingDir: '" + service.workingDir() + "')" + suffix,
+                details
             ));
         }
         String artifact = artifactPath.get().toString();
@@ -375,6 +404,7 @@ public final class ProjectResolver {
 
     private static Result<ServiceDefinition, DomainError> resolveService(
         ServiceDraft draft,
+        Path configDir,
         RawProjectConfig rawConfig,
         Map<Path, Map<String, String>> parsedEnvFiles,
         Map<String, String> topEnvFileOverlay,
@@ -460,10 +490,16 @@ public final class ProjectResolver {
             finalEnv.put(entry.getKey(), okVal(hostExpanded));
         }
 
+        Result<Optional<ServiceBuildConfig>, DomainError> buildConfigRes = resolveServiceBuildConfig(
+            name, svc, draft, configDir, rawConfig, envFromFiles, hostEnv
+        );
+        if (buildConfigRes.isErr()) return buildConfigRes.castError();
+
         return Result.ok(new ServiceDefinition(
             name,
             svc.port(),
             rtName,
+            okVal(buildConfigRes),
             draft.repository(),
             draft.workingDir(),
             normalizeHealthPath(okVal(healthRes)),
@@ -475,6 +511,77 @@ public final class ProjectResolver {
             SecretEnv.of(finalEnv),
             svc.envFiles()
         ));
+    }
+
+    private static Result<Optional<ServiceBuildConfig>, DomainError> resolveServiceBuildConfig(
+        String name,
+        RawProjectConfig.RawServiceConfig svc,
+        ServiceDraft draft,
+        Path configDir,
+        RawProjectConfig rawConfig,
+        Map<String, String> envFromFiles,
+        Map<String, String> hostEnv
+    ) {
+        Optional<String> effectiveBuilderName = svc.builder().or(() -> rawConfig.defaults().builder());
+        if (effectiveBuilderName.isEmpty()) {
+            return Result.ok(Optional.empty());
+        }
+        String builderName = effectiveBuilderName.get();
+        RawProjectConfig.RawBuilderConfig builderCfg = rawConfig.builders().get(builderName);
+        if (builderCfg == null) {
+            return Result.err(DomainError.of(
+                "CONFIG_UNKNOWN_BUILDER",
+                "Service '" + name + "' references unknown builder '" + builderName + "'",
+                Map.of("service", name, "builder", builderName)
+            ));
+        }
+
+        Map<String, VarValue> vars = draft.effectiveVars();
+        Result<List<String>, DomainError> hostExpandedBuildCmd = expandHostEnvInArgv(
+            builderCfg.command(), hostEnv, "services." + name + ".buildCommand"
+        );
+        if (hostExpandedBuildCmd.isErr()) return hostExpandedBuildCmd.castError();
+        Result<List<String>, DomainError> buildCmdRes = TemplateExpander.expandArgv(
+            okVal(hostExpandedBuildCmd), vars, Set.of(), "services." + name + ".buildCommand"
+        );
+        if (buildCmdRes.isErr()) return buildCmdRes.castError();
+
+        Path buildWorkingDir = draft.workingDir();
+        if (builderCfg.workingDir().isPresent()) {
+            String wdCtx = "builders." + builderName + ".workingDir";
+            Result<String, DomainError> hostWd = EnvFileParser.expandHostEnvRefs(
+                builderCfg.workingDir().get(), hostEnv, wdCtx
+            );
+            if (hostWd.isErr()) return hostWd.castError();
+            Result<String, DomainError> expandedWd = TemplateExpander.expandScalar(
+                okVal(hostWd), vars, Set.of(), wdCtx
+            );
+            if (expandedWd.isErr()) return expandedWd.castError();
+            Result<Path, DomainError> resolvedWd = resolvePath(configDir, okVal(expandedWd), wdCtx);
+            if (resolvedWd.isErr()) return resolvedWd.castError();
+            buildWorkingDir = okVal(resolvedWd);
+        }
+
+        Map<String, String> buildConfigEnvLayer = new LinkedHashMap<>(rawConfig.defaults().env());
+        buildConfigEnvLayer.putAll(builderCfg.env());
+        buildConfigEnvLayer.putAll(svc.env());
+
+        Map<String, String> finalBuildEnv = new LinkedHashMap<>(envFromFiles);
+        for (Map.Entry<String, String> entry : buildConfigEnvLayer.entrySet()) {
+            String ctx = "services." + name + ".buildEnv." + entry.getKey();
+            Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(entry.getValue(), vars, Set.of(), ctx);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
+            Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, ctx);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
+            finalBuildEnv.put(entry.getKey(), okVal(hostExpanded));
+        }
+
+        return Result.ok(Optional.of(new ServiceBuildConfig(
+            builderName,
+            okVal(buildCmdRes),
+            buildWorkingDir,
+            SecretEnv.of(finalBuildEnv)
+        )));
     }
 
     private static Result<Optional<GatewayDefinition>, DomainError> resolveGateway(
@@ -608,6 +715,7 @@ public final class ProjectResolver {
                 merged.put(name, new RawProjectConfig.RawServiceConfig(
                     override.port().isPresent() ? override.port() : base.port(),
                     override.runtime().isPresent() ? override.runtime() : base.runtime(),
+                    override.builder().isPresent() ? override.builder() : base.builder(),
                     override.repository().isPresent() ? override.repository() : base.repository(),
                     override.repositoryUrl().isPresent() ? override.repositoryUrl() : base.repositoryUrl(),
                     override.workingDir().isPresent() ? override.workingDir() : base.workingDir(),
@@ -767,6 +875,34 @@ public final class ProjectResolver {
         );
         if (envCheck.isErr()) return envCheck.castError();
         return Result.ok(procomp.core.common.Unit.VALUE);
+    }
+
+    private static Result<Map<String, String>, DomainError> validateBuilderTemplates(
+        String builderName,
+        RawProjectConfig.RawBuilderConfig builder,
+        Map<String, VarValue> validationVars,
+        Map<String, String> hostEnv
+    ) {
+        String prefix = "builders." + builderName;
+        Map<String, VarValue> buildValidationVars = new LinkedHashMap<>(validationVars);
+        buildValidationVars.remove("artifact");
+        Result<List<String>, DomainError> hostCmd = expandHostEnvInArgv(builder.command(), hostEnv, prefix + ".command");
+        if (hostCmd.isErr()) return hostCmd.castError();
+        Result<List<String>, DomainError> cmdCheck = TemplateExpander.expandArgv(
+            okVal(hostCmd), buildValidationVars, Set.of(), prefix + ".command"
+        );
+        if (cmdCheck.isErr()) return cmdCheck.castError();
+        if (builder.workingDir().isPresent()) {
+            Result<String, DomainError> hostWd = EnvFileParser.expandHostEnvRefs(
+                builder.workingDir().get(), hostEnv, prefix + ".workingDir"
+            );
+            if (hostWd.isErr()) return hostWd.castError();
+            Result<String, DomainError> wdCheck = TemplateExpander.expandScalar(
+                okVal(hostWd), buildValidationVars, Set.of(), prefix + ".workingDir"
+            );
+            if (wdCheck.isErr()) return wdCheck.castError();
+        }
+        return expandAndValidateEnvMap(builder.env(), buildValidationVars, hostEnv, prefix + ".env");
     }
 
     private static Result<Map<String, String>, DomainError> validateRuntimeTemplates(

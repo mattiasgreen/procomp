@@ -20,11 +20,14 @@ final class ProjectConfigParser {
 
     private static final Set<String> TOP_LEVEL_KEYS = Set.of(
         "project", "repositoriesRoot", "envFiles", "defaults",
-        "runtimes", "gateway", "catalog", "services", "profiles"
+        "builders", "runtimes", "gateway", "catalog", "services", "profiles"
     );
     private static final Set<String> ENV_FILE_KEYS = Set.of("path", "optional");
     private static final Set<String> DEFAULTS_KEYS = Set.of(
-        "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env"
+        "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env"
+    );
+    private static final Set<String> BUILDER_KEYS = Set.of(
+        "command", "workingDir", "env"
     );
     private static final Set<String> RUNTIME_KEYS = Set.of(
         "command", "healthPath", "artifactGlob", "artifactExclude", "workingDir", "env"
@@ -34,11 +37,11 @@ final class ProjectConfigParser {
     );
     private static final Set<String> CATALOG_KEYS = Set.of("path", "itemsPath", "map");
     private static final Set<String> CATALOG_MAP_SCALAR_TARGETS = Set.of(
-        "name", "port", "runtime", "repository", "repositoryUrl",
+        "name", "port", "runtime", "builder", "repository", "repositoryUrl",
         "workingDir", "healthPath", "proxyPath", "remoteUrl"
     );
     private static final Set<String> SERVICE_KEYS = Set.of(
-        "port", "runtime", "repository", "repositoryUrl", "workingDir",
+        "port", "runtime", "builder", "repository", "repositoryUrl", "workingDir",
         "healthPath", "proxyPath", "remoteUrl", "vars", "env", "envFiles"
     );
     private static final Set<String> PROFILE_KEYS = Set.of("local");
@@ -82,6 +85,11 @@ final class ProjectConfigParser {
             return defaultsRes.castError();
         }
 
+        Result<Map<String, RawProjectConfig.RawBuilderConfig>, DomainError> buildersRes = parseOptionalBuilders(root);
+        if (buildersRes.isErr()) {
+            return buildersRes.castError();
+        }
+
         Result<Map<String, RawProjectConfig.RawRuntimeConfig>, DomainError> runtimesRes = parseRuntimes(root);
         if (runtimesRes.isErr()) {
             return runtimesRes.castError();
@@ -112,6 +120,7 @@ final class ProjectConfigParser {
             okVal(reposRootRes),
             okVal(envFilesRes),
             okVal(defaultsRes),
+            okVal(buildersRes),
             okVal(runtimesRes),
             okVal(gatewayRes),
             okVal(catalogRes),
@@ -156,6 +165,8 @@ final class ProjectConfigParser {
             return unknown.castError();
         }
 
+        Result<Optional<String>, DomainError> builder = optionalNonBlankString(obj, "builder", "defaults");
+        if (builder.isErr()) return builder.castError();
         Result<Optional<String>, DomainError> proxyPath = optionalNonBlankString(obj, "proxyPathTemplate", "defaults");
         if (proxyPath.isErr()) return proxyPath.castError();
         Result<Optional<String>, DomainError> remoteUrl = optionalNonBlankString(obj, "remoteUrlTemplate", "defaults");
@@ -168,8 +179,45 @@ final class ProjectConfigParser {
         if (env.isErr()) return env.castError();
 
         return Result.ok(new RawProjectConfig.RawDefaultsConfig(
-            okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env)
+            okVal(builder), okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env)
         ));
+    }
+
+    private static Result<Map<String, RawProjectConfig.RawBuilderConfig>, DomainError> parseOptionalBuilders(JsonValue.JsonObject root) {
+        Optional<JsonValue> maybe = root.get("builders");
+        if (maybe.isEmpty()) {
+            return Result.ok(Map.of());
+        }
+        Result<JsonValue.JsonObject, DomainError> mapObjRes = asObject(maybe.get(), "builders");
+        if (mapObjRes.isErr()) {
+            return mapObjRes.castError();
+        }
+        Map<String, RawProjectConfig.RawBuilderConfig> builders = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
+            String builderName = entry.getKey();
+            if (builderName.isBlank()) {
+                return Result.err(DomainError.of("CONFIG_INVALID_VALUE", "Builder name must not be blank", Map.of("field", "builders")));
+            }
+            String path = "builders." + builderName;
+            Result<JsonValue.JsonObject, DomainError> bObjRes = asObject(entry.getValue(), path);
+            if (bObjRes.isErr()) return bObjRes.castError();
+            JsonValue.JsonObject bObj = okVal(bObjRes);
+
+            Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(bObj, BUILDER_KEYS, path);
+            if (unknown.isErr()) return unknown.castError();
+
+            Result<List<String>, DomainError> cmdRes = requireNonEmptyStringArray(bObj, "command", path);
+            if (cmdRes.isErr()) return cmdRes.castError();
+            Result<Optional<String>, DomainError> workingDir = optionalNonBlankString(bObj, "workingDir", path);
+            if (workingDir.isErr()) return workingDir.castError();
+            Result<Map<String, String>, DomainError> env = parseOptionalStringMap(bObj, "env", path + ".env");
+            if (env.isErr()) return env.castError();
+
+            builders.put(builderName, new RawProjectConfig.RawBuilderConfig(
+                okVal(cmdRes), okVal(workingDir), okVal(env)
+            ));
+        }
+        return Result.ok(builders);
     }
 
     private static Result<Map<String, RawProjectConfig.RawRuntimeConfig>, DomainError> parseRuntimes(JsonValue.JsonObject root) {
@@ -359,6 +407,8 @@ final class ProjectConfigParser {
 
             Result<Optional<String>, DomainError> runtime = optionalNonBlankString(svcObj, "runtime", path);
             if (runtime.isErr()) return runtime.castError();
+            Result<Optional<String>, DomainError> builder = optionalNonBlankString(svcObj, "builder", path);
+            if (builder.isErr()) return builder.castError();
             Result<Optional<String>, DomainError> repository = optionalNonBlankString(svcObj, "repository", path);
             if (repository.isErr()) return repository.castError();
             Result<Optional<String>, DomainError> repositoryUrl = optionalNonBlankString(svcObj, "repositoryUrl", path);
@@ -379,7 +429,7 @@ final class ProjectConfigParser {
             if (envFiles.isErr()) return envFiles.castError();
 
             services.put(svcName, new RawProjectConfig.RawServiceConfig(
-                port, okVal(runtime), okVal(repository), okVal(repositoryUrl), okVal(workingDir),
+                port, okVal(runtime), okVal(builder), okVal(repository), okVal(repositoryUrl), okVal(workingDir),
                 okVal(healthPath), okVal(proxyPath), okVal(remoteUrl), okVal(vars), okVal(env), okVal(envFiles)
             ));
         }

@@ -8,11 +8,11 @@ End-to-end hybrid workflow: Profile application, Gateway Reconciliation, bare st
 ```console
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER  HEALTH   PORT   PID  UPTIME  STALE
-broker         REMOTE  NONE   STOPPED  16161  -    -       no
-orders         REMOTE  NONE   STOPPED  18101  -    -       no
-pricing        REMOTE  NONE   STOPPED  18102  -    -       no
-notifications  REMOTE  NONE   STOPPED  18103  -    -       no
+SERVICE        ROUTE   OWNER  HEALTH   BUILD       PORT   PID  UPTIME  STALE
+broker         REMOTE  NONE   STOPPED  NO_BUILDER  16161  -    -       no
+orders         REMOTE  NONE   STOPPED  NO_BUILDER  18101  -    -       no
+pricing        REMOTE  NONE   STOPPED  NO_BUILDER  18102  -    -       no
+notifications  REMOTE  NONE   STOPPED  NO_BUILDER  18103  -    -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
 ```
 
@@ -49,11 +49,11 @@ Summary: 3 started, 0 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL   MANAGED  HEALTHY  16161  10001  5s      no
-orders         LOCAL   MANAGED  HEALTHY  18101  10002  5s      no
-pricing        REMOTE  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL   MANAGED  HEALTHY  18103  10003  5s      no
+SERVICE        ROUTE   OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL   MANAGED  HEALTHY  NO_BUILDER  16161  10001  5s      no
+orders         LOCAL   MANAGED  HEALTHY  NO_BUILDER  18101  10002  5s      no
+pricing        REMOTE  NONE     STOPPED  NO_BUILDER  18102  -      -       no
+notifications  LOCAL   MANAGED  HEALTHY  NO_BUILDER  18103  10003  5s      no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```
 
@@ -70,11 +70,11 @@ Updated route: pricing -> LOCAL
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE  OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL  MANAGED  HEALTHY  16161  10001  10s     no
-orders         LOCAL  MANAGED  HEALTHY  18101  10002  10s     no
-pricing        LOCAL  MANAGED  HEALTHY  18102  10004  5s      no
-notifications  LOCAL  MANAGED  HEALTHY  18103  10003  10s     no
+SERVICE        ROUTE  OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL  MANAGED  HEALTHY  NO_BUILDER  16161  10001  10s     no
+orders         LOCAL  MANAGED  HEALTHY  NO_BUILDER  18101  10002  10s     no
+pricing        LOCAL  MANAGED  HEALTHY  NO_BUILDER  18102  10004  5s      no
+notifications  LOCAL  MANAGED  HEALTHY  NO_BUILDER  18103  10003  10s     no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, DRIFTED (1)
 ```
 
@@ -86,11 +86,11 @@ Gateway: reconciled 4 route mapping(s) on http://127.0.0.1:18080 (IN_SYNC) [clea
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE  OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL  MANAGED  HEALTHY  16161  10001  15s     no
-orders         LOCAL  MANAGED  HEALTHY  18101  10002  15s     no
-pricing        LOCAL  MANAGED  HEALTHY  18102  10004  10s     no
-notifications  LOCAL  MANAGED  HEALTHY  18103  10003  15s     no
+SERVICE        ROUTE  OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL  MANAGED  HEALTHY  NO_BUILDER  16161  10001  15s     no
+orders         LOCAL  MANAGED  HEALTHY  NO_BUILDER  18101  10002  15s     no
+pricing        LOCAL  MANAGED  HEALTHY  NO_BUILDER  18102  10004  10s     no
+notifications  LOCAL  MANAGED  HEALTHY  NO_BUILDER  18103  10003  15s     no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```
 
@@ -104,10 +104,10 @@ Summary: 1 stopped.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE  OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL  MANAGED  HEALTHY  16161  10001  20s     no
-orders         LOCAL  MANAGED  HEALTHY  18101  10002  20s     no
-pricing        LOCAL  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL  MANAGED  HEALTHY  18103  10003  20s     no
+SERVICE        ROUTE  OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL  MANAGED  HEALTHY  NO_BUILDER  16161  10001  20s     no
+orders         LOCAL  MANAGED  HEALTHY  NO_BUILDER  18101  10002  20s     no
+pricing        LOCAL  NONE     STOPPED  NO_BUILDER  18102  -      -       no
+notifications  LOCAL  MANAGED  HEALTHY  NO_BUILDER  18103  10003  20s     no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```

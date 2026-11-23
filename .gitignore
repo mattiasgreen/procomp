@@ -1,6 +1,7 @@
 .scratch/
 .gradle/
-build/
+/build/
+e2e/*/build/
 *.class
 *.jar
 .env

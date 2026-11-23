@@ -56,6 +56,44 @@ public final class SimulatedProcessRunner implements ProcessRunner {
     }
 
     @Override
+    public Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+        os.applyLagIfEnabled();
+
+        String targetName = extractTargetName(request.stdoutLog());
+        VirtualProcess proc = os.registerManagedProcess(
+            targetName,
+            ProcessKind.MANAGED_SERVICE,
+            OptionalInt.empty(),
+            request.command(),
+            request.stdoutLog(),
+            request.stderrLog()
+        );
+        return Result.ok(new RunningProcess() {
+            @Override
+            public long pid() {
+                return proc.pid;
+            }
+
+            @Override
+            public java.time.Instant startedAt() {
+                return proc.startedAt;
+            }
+
+            @Override
+            public String commandLine() {
+                return proc.commandLine;
+            }
+
+            @Override
+            public ExitOutcome awaitExit(Optional<Duration> timeout) {
+                os.stopProcess(proc.pid);
+                return new ExitOutcome.Exited(0);
+            }
+        });
+    }
+
+    @Override
     public Result<Optional<ObservedProcess>, DomainError> inspect(long pid) {
         return Result.ok(os.processByPid(pid).map(VirtualProcess::toObservedProcess));
     }

@@ -16,6 +16,7 @@ public record Project(
     Path configPath,
     Path configDir,
     Optional<Path> repositoriesRoot,
+    Map<String, BuilderDefinition> builders,
     Map<String, RuntimeDefinition> runtimes,
     Optional<GatewayDefinition> gateway,
     Map<String, ServiceDefinition> services,
@@ -29,11 +30,16 @@ public record Project(
         Objects.requireNonNull(configPath);
         Objects.requireNonNull(configDir);
         Objects.requireNonNull(repositoriesRoot);
+        builders = Collections.unmodifiableMap(new LinkedHashMap<>(builders));
         runtimes = Collections.unmodifiableMap(new LinkedHashMap<>(runtimes));
         Objects.requireNonNull(gateway);
         services = Collections.unmodifiableMap(new LinkedHashMap<>(services));
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
         repositories = List.copyOf(repositories);
+    }
+
+    public Optional<BuilderDefinition> builder(String builderName) {
+        return Optional.ofNullable(builders.get(builderName));
     }
 
     public Optional<ServiceDefinition> service(String serviceName) {

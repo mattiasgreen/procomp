@@ -1,8 +1,8 @@
 # `procomp` Configuration Schema (`procomp.json`)
 
-`procomp` is language- and framework-agnostic with **zero built-in presets**. Every `Runtime`, `Gateway`, `Profile`, `Catalog`, and `Service` is declared explicitly in **`procomp.json`** using canonical terms from [GLOSSARY.md](../GLOSSARY.md).
+`procomp` is language- and framework-agnostic with **zero built-in presets**. Every `Builder`, `Runtime`, `Gateway`, `Profile`, `Catalog`, and `Service` is declared explicitly in **`procomp.json`** using canonical terms from [GLOSSARY.md](../GLOSSARY.md).
 
-**Strict validation:** `procomp.json` fails fast on unrecognized fields, invalid types, undefined `{{var}}` templates, missing required `envFiles`, unset `${env:VAR}` references, and unknown `Service` or `Runtime` names.
+**Strict validation:** `procomp.json` fails fast on unrecognized fields, invalid types, undefined `{{var}}` templates, missing required `envFiles`, unset `${env:VAR}` references, and unknown `Service`, `Builder`, or `Runtime` names.
 
 ---
 
@@ -81,7 +81,8 @@
 | `project` | `string` | Yes | Explicit `Project` identifier used to scope local state and logs (`~/.local/state/procomp/<project>/` or `%LOCALAPPDATA%\procomp\<project>\`). |
 | `repositoriesRoot` | `string` | No | Base folder for local `Repository` checkouts (resolved relative to `configDir` if relative). Exposed as `{{repositoriesRoot}}`. |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Explicit `.env` files loaded into `Process` environments. Missing files fail fast unless `optional: true`. |
-| `defaults` | `object` | No | Default `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all `Service`s unless overridden. |
+| `defaults` | `object` | No | Default `builder`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all `Service`s unless overridden. |
+| `builders` | `map<string, Builder>` | No | Named `Builder` templates referenced by `Service`s or `defaults.builder`. |
 | `runtimes` | `map<string, Runtime>` | Yes | Named `Runtime` execution templates referenced by `Service`s. |
 | `gateway` | `object` | No | Local `Gateway` definition (`type`, `port`, optional `healthPath`, `command`, `workingDir`, `env`). |
 | `catalog` | `object` | No | External `Catalog` JSON importer with explicit field mapping. |
@@ -116,13 +117,23 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 
 ## 4. Environment Variables & Secrets
 
-1. **Precedence (lowest to highest):** host process environment < `envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
+1. **Precedence (lowest to highest):**
+   - **Runtime `Process`:** host process environment < `envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
+   - **Build `Process`:** host process environment < `envFiles` (in listed order) < `defaults.env` < `builder.env` < `service.env` (`runtime.env` is deliberately excluded).
 2. **Host-env pass-through:** `env` values, `command` elements, `workingDir`, and `vars` (scalar or array) may reference host variables via `"${env:VAR_NAME}"` (for example, `"${env:JAVA_HOME}/bin/java"` in `runtimes.<name>.command`). Unset host variables fail fast rather than silently expanding to empty strings.
 3. **Secret hygiene:** `procomp` never persists resolved `env` values in state files and never prints them in `inspect`, `status --json`, or error logs.
 
 ---
 
-## 5. `runtimes`, `gateway`, `catalog`, and `services` Reference
+## 5. `builders`, `runtimes`, `gateway`, `catalog`, and `services` Reference
+
+### `builders.<name>`
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `command` | `string[]` | Yes | Build `argv` array (executed in-place without a shell wrapper). Relative executable paths resolve against the build working directory. |
+| `workingDir` | `string` | No | Build working directory template override (overrides `service.workingDir` when set; defaults to `service.workingDir`). |
+| `env` | `map<string, string>` | No | Builder-level environment variables. |
 
 ### `runtimes.<name>`
 
@@ -152,7 +163,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | :--- | :--- | :--- | :--- |
 | `path` | `string` | Yes | Path to external JSON catalog (relative to `configDir`, absolute, or using `{{repositoriesRoot}}`). |
 | `itemsPath` | `string` | No | Dot-path to the array of entries inside the catalog JSON (omit if the root JSON is an array). |
-| `map` | `map<string, string>` | Yes | Explicit mapping from `procomp` `Service` fields (`name`, `port`, `runtime`, `repository`, `repositoryUrl`, `workingDir`, `healthPath`, `proxyPath`, `remoteUrl`, `vars.<key>`) to source field names in each catalog item. Unmapped source fields are ignored; numeric string ports (e.g., `"9001"`) are strictly parsed as integers. |
+| `map` | `map<string, string>` | Yes | Explicit mapping from `procomp` `Service` fields (`name`, `port`, `runtime`, `builder`, `repository`, `repositoryUrl`, `workingDir`, `healthPath`, `proxyPath`, `remoteUrl`, `vars.<key>`) to source field names in each catalog item. Unmapped source fields are ignored; numeric string ports (e.g., `"9001"`) are strictly parsed as integers. |
 
 ### `services.<name>`
 
@@ -160,6 +171,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | :--- | :--- | :--- | :--- |
 | `port` | `integer` | No* | Local TCP port the `Service` listens on (*required if `proxyPath` is routed `LOCAL`). |
 | `runtime` | `string` | Yes* | Key in top-level `runtimes` (validated strictly; *optional when overriding a `Service` already imported with a `runtime` from `catalog`). |
+| `builder` | `string` | No | Key in top-level `builders` (defaults to `defaults.builder` if omitted). |
 | `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). |
 | `repositoryUrl` | `string` | No | Remote Git URL used to derive `<repositoriesRoot>/<basename>` when `repository` is omitted. |
 | `workingDir` | `string` | No* | Working directory for the `Service`'s `Process`. Defaults to `{{repository}}` when a `Repository` is configured (*required if the `Service` has no `Repository`). |

@@ -13,11 +13,11 @@ Summary: 0 started, 1 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   PORT   PID    UPTIME  STALE
-broker         REMOTE  NONE             STOPPED  16161  -      -       no
-orders         REMOTE  NONE             STOPPED  18101  -      -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  18102  10000  5s      no
-notifications  REMOTE  NONE             STOPPED  18103  -      -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  5s      no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
 ```
 
@@ -30,11 +30,11 @@ Summary: 0 stopped, 1 Unmanaged spared.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   PORT   PID    UPTIME  STALE
-broker         REMOTE  NONE             STOPPED  16161  -      -       no
-orders         REMOTE  NONE             STOPPED  18101  -      -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  18102  10000  10s     no
-notifications  REMOTE  NONE             STOPPED  18103  -      -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  10s     no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
 ```
 
@@ -64,6 +64,7 @@ Health Endpoint: http://127.0.0.1:18101/actuator/health
 Health Response: HTTP 404 (GET http://127.0.0.1:18101/actuator/health)
 Stdout Log:      /in-memory-state/procomp-e2e/logs/orders.out.log
 Stderr Log:      /in-memory-state/procomp-e2e/logs/orders.err.log
+Build Run:       NO_BUILDER
 ```
 
 ## Step 4: An Unmanaged Gateway is reused and reconciled, while gateway stop refuses to terminate it

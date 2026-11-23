@@ -34,6 +34,7 @@ public final class ProcompRuntime {
     private Optional<ProjectLoader> projectLoader = Optional.empty();
     private Optional<RoutingShell> routingShell = Optional.empty();
     private Optional<LogsShell> logsShell = Optional.empty();
+    private Optional<BuildShell> buildShell = Optional.empty();
     private Optional<ProcessShell> processShell = Optional.empty();
     private Optional<GatewayShell> gatewayShell = Optional.empty();
     private Optional<StatusShell> statusShell = Optional.empty();
@@ -123,6 +124,35 @@ public final class ProcompRuntime {
             logsShell = Optional.of(new LogsShell(stateStore.get(), clock.get(), observer));
         }
         return Result.ok(logsShell.get());
+    }
+
+    public synchronized Result<BuildShell, DomainError> buildShell() {
+        List<String> missing = new ArrayList<>();
+        if (stateStore.isEmpty()) {
+            missing.add("StateStore");
+        }
+        if (processRunner.isEmpty()) {
+            missing.add("ProcessRunner");
+        }
+        if (projectFiles.isEmpty()) {
+            missing.add("ProjectFiles");
+        }
+        if (clock.isEmpty()) {
+            missing.add("Clock");
+        }
+        if (!missing.isEmpty()) {
+            return Result.err(missingPorts("BuildShell", missing));
+        }
+        if (buildShell.isEmpty()) {
+            buildShell = Optional.of(new BuildShell(
+                stateStore.get(),
+                processRunner.get(),
+                projectFiles.get(),
+                clock.get(),
+                observer
+            ));
+        }
+        return Result.ok(buildShell.get());
     }
 
     public synchronized Result<ProcessShell, DomainError> processShell() {

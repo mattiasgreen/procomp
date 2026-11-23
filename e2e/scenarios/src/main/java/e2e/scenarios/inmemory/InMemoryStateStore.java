@@ -1,5 +1,6 @@
 package e2e.scenarios.inmemory;
 
+import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
@@ -24,6 +25,7 @@ public final class InMemoryStateStore implements StateStore {
     private final Path rootStateDir;
     private final Map<String, Map<String, String>> routingByProject = new LinkedHashMap<>();
     private final Map<String, Map<ProcessKey, ManagedProcessRecord>> managedByProject = new LinkedHashMap<>();
+    private final Map<String, Map<String, BuildRunRecord>> buildRunsByProject = new LinkedHashMap<>();
     private final Map<Path, StringBuilder> logs = new LinkedHashMap<>();
 
     public InMemoryStateStore() {
@@ -38,6 +40,7 @@ public final class InMemoryStateStore implements StateStore {
     public synchronized void clear() {
         routingByProject.clear();
         managedByProject.clear();
+        buildRunsByProject.clear();
         logs.clear();
     }
 
@@ -99,10 +102,26 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
+    public synchronized Result<Optional<BuildRunRecord>, DomainError> readBuildRun(String project, String serviceName) {
+        Map<String, BuildRunRecord> map = buildRunsByProject.get(project);
+        if (map == null) {
+            return Result.ok(Optional.empty());
+        }
+        return Result.ok(Optional.ofNullable(map.get(serviceName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeBuildRun(String project, String serviceName, BuildRunRecord record) {
+        buildRunsByProject.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(serviceName, record);
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
             case ProcessKey.Gateway _ -> "gateway";
+            case ProcessKey.Build(String svc) -> svc + ".build";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix).normalize();

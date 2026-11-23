@@ -114,6 +114,19 @@ export function stopServices(services = [], { all = false, killConflict = false 
   });
 }
 
+export function buildService(serviceName, { force = false } = {}) {
+  return requestJson(`/api/services/${encodeURIComponent(serviceName)}/build`, {
+    method: 'POST',
+    body: JSON.stringify({ force }),
+  });
+}
+
+export function cancelBuild(serviceName) {
+  return requestJson(`/api/services/${encodeURIComponent(serviceName)}/build/cancel`, {
+    method: 'POST',
+  });
+}
+
 export function startGateway({ detach = false, timeoutSeconds = 30 } = {}) {
   return requestJson('/api/gateway/start', {
     method: 'POST',
@@ -133,10 +146,11 @@ export function reconcileGateway() {
   });
 }
 
-export function fetchServiceLogs(serviceName, { lines = 100, err = false } = {}) {
+export function fetchServiceLogs(serviceName, { lines = 100, err = false, build = false } = {}) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
+    build: build ? 'true' : 'false',
   });
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/logs?${params.toString()}`);
 }
@@ -364,6 +378,7 @@ export function streamServiceLogs(serviceName, handlers = {}) {
   const params = new URLSearchParams({
     lines: String(handlers.lines ?? 100),
     err: handlers.err ? 'true' : 'false',
+    build: handlers.build ? 'true' : 'false',
   });
   const url = `/api/services/${encodeURIComponent(serviceName)}/logs/stream?${params.toString()}`;
   const eventSource = new EventSource(url);

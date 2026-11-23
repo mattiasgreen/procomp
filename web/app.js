@@ -1,5 +1,7 @@
 import {
   ApiError,
+  buildService,
+  cancelBuild,
   fetchInspect,
   fetchStatus,
   reconcileGateway,
@@ -34,6 +36,7 @@ const state = {
   },
   logs: {
     err: false,
+    build: false,
     autoScroll: true,
     lineCount: 0,
     stream: null,
@@ -95,6 +98,8 @@ const dom = {
   inspectContent: document.getElementById('inspect-content'),
 
   panelLogs: document.getElementById('panel-logs'),
+  btnLogsSourceService: document.getElementById('btn-logs-source-service'),
+  btnLogsSourceBuild: document.getElementById('btn-logs-source-build'),
   btnLogsStdout: document.getElementById('btn-logs-stdout'),
   btnLogsStderr: document.getElementById('btn-logs-stderr'),
   logsStreamStatus: document.getElementById('logs-stream-status'),
@@ -477,6 +482,15 @@ function renderServices() {
     }
     tdHealth.append(healthBadge);
 
+    // BUILD
+    const tdBuild = el('td');
+    const buildState = row.buildRun?.displayState || 'NO_BUILDER';
+    const buildBadge = el('span', `badge ${buildBadgeClass(buildState)}`, buildState);
+    if (row.buildRun?.reason) {
+      buildBadge.title = row.buildRun.reason;
+    }
+    tdBuild.append(buildBadge);
+
     // PORT, PID, UPTIME
     const tdPort = el('td', 'mono', row.port ?? '—');
     const tdPid = el('td', 'mono', row.pid ?? '—');
@@ -495,6 +509,32 @@ function renderServices() {
     // ACTIONS
     const tdActions = el('td', 'col-actions');
     const actionsWrap = el('div', 'row-actions');
+
+    if (buildState === 'RUNNING') {
+      const btnCancelBuild = el('button', 'btn btn-danger btn-xs', 'Cancel Build');
+      btnCancelBuild.type = 'button';
+      btnCancelBuild.dataset.service = row.service;
+      btnCancelBuild.dataset.action = 'cancel-build';
+      btnCancelBuild.title = `Cancel active Build Run for ${row.service}`;
+      btnCancelBuild.addEventListener('click', () => handleCancelBuild(row.service, btnCancelBuild));
+      actionsWrap.append(btnCancelBuild);
+    } else if (buildState === 'UNKNOWN') {
+      const btnForceBuild = el('button', 'btn btn-secondary btn-xs', 'Force Build');
+      btnForceBuild.type = 'button';
+      btnForceBuild.dataset.service = row.service;
+      btnForceBuild.dataset.action = 'build';
+      btnForceBuild.title = `Clear UNKNOWN Build Run and rebuild ${row.service}`;
+      btnForceBuild.addEventListener('click', () => handleBuildService(row.service, true, btnForceBuild));
+      actionsWrap.append(btnForceBuild);
+    } else if (buildState !== 'NO_BUILDER') {
+      const btnBuild = el('button', 'btn btn-secondary btn-xs', 'Build');
+      btnBuild.type = 'button';
+      btnBuild.dataset.service = row.service;
+      btnBuild.dataset.action = 'build';
+      btnBuild.title = `Build ${row.service}`;
+      btnBuild.addEventListener('click', () => handleBuildService(row.service, false, btnBuild));
+      actionsWrap.append(btnBuild);
+    }
 
     const starting = isServiceStarting(row.service);
     const btnStart = el('button', 'btn btn-secondary btn-xs', starting ? 'Starting…' : 'Start');
@@ -552,7 +592,7 @@ function renderServices() {
 
     tdActions.append(actionsWrap);
 
-    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdPort, tdPid, tdUptime, tdStale, tdActions);
+    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdPort, tdPid, tdUptime, tdStale, tdActions);
     dom.servicesTbody.append(tr);
   }
 }
@@ -875,6 +915,24 @@ function renderInspection(report) {
     ['Stdout Log Path', report.outLogPath || '—'],
     ['Stderr Log Path', report.errLogPath || '—'],
   ];
+  if (report.buildRun) {
+    items.push(['Build Run', report.buildRun.displayState]);
+    if (report.buildRun.pid !== null && report.buildRun.pid !== undefined) {
+      items.push(['Build PID', report.buildRun.pid]);
+    }
+    if (report.buildRun.exitCode !== null && report.buildRun.exitCode !== undefined) {
+      items.push(['Build Exit Code', report.buildRun.exitCode]);
+    }
+    if (report.buildRun.reason) {
+      items.push(['Build Reason', report.buildRun.reason]);
+    }
+    if (report.buildRun.stdoutLog) {
+      items.push(['Build Stdout Log', report.buildRun.stdoutLog]);
+    }
+    if (report.buildRun.stderrLog) {
+      items.push(['Build Stderr Log', report.buildRun.stderrLog]);
+    }
+  }
 
   for (const [label, value] of items) {
     const box = el('div', 'inspect-item');
@@ -972,17 +1030,43 @@ function closeLogStream() {
   setLogsStreamBadge('Disconnected', 'badge-neutral');
 }
 
+function buildBadgeClass(displayState) {
+  switch (displayState) {
+    case 'SUCCEEDED':
+    case 'ARTIFACT_PRESENT':
+      return 'badge-healthy';
+    case 'RUNNING':
+      return 'badge-starting';
+    case 'FAILED':
+    case 'UNKNOWN':
+      return 'badge-danger';
+    default:
+      return 'badge-neutral';
+  }
+}
+
+function handleBuildService(serviceName, force, button) {
+  return runAction([button], () => buildService(serviceName, { force }));
+}
+
+function handleCancelBuild(serviceName, button) {
+  return runAction([button], () => cancelBuild(serviceName));
+}
+
 function startLogStream(serviceName) {
   closeLogStream();
   clearLogsOutput();
   setLogsStreamBadge('Connecting…', 'badge-starting');
 
+  dom.btnLogsSourceService.classList.toggle('active', !state.logs.build);
+  dom.btnLogsSourceBuild.classList.toggle('active', state.logs.build);
   dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
   dom.btnLogsStderr.classList.toggle('active', state.logs.err);
 
   state.logs.stream = streamServiceLogs(serviceName, {
     lines: 100,
     err: state.logs.err,
+    build: state.logs.build,
     onOpen() {
       dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
@@ -1148,6 +1232,24 @@ function init() {
   dom.btnInspectRefresh.addEventListener('click', () => {
     if (state.drawer.service) {
       loadInspection(state.drawer.service);
+    }
+  });
+
+  dom.btnLogsSourceService.addEventListener('click', () => {
+    if (state.logs.build) {
+      state.logs.build = false;
+      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
+        startLogStream(state.drawer.service);
+      }
+    }
+  });
+
+  dom.btnLogsSourceBuild.addEventListener('click', () => {
+    if (!state.logs.build) {
+      state.logs.build = true;
+      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
+        startLogStream(state.drawer.service);
+      }
     }
   });
 

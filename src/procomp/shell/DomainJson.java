@@ -1,5 +1,8 @@
 package procomp.shell;
 
+import procomp.core.build.BuildRunRecord;
+import procomp.core.build.BuildStatus;
+import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
@@ -13,6 +16,9 @@ import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
+import procomp.shell.BuildShell.BuildResult;
+import procomp.shell.BuildShell.BuildServiceOutcome;
+import procomp.shell.BuildShell.CancelResult;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
 import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStatusReport;
@@ -65,6 +71,7 @@ public final class DomainJson {
             sObj.put("stale", Json.bool(row.stale()));
             sObj.put("healthEndpoint", strOrNull(row.healthEndpoint()));
             sObj.put("healthNote", strOrNull(row.healthNote()));
+            sObj.put("buildRun", observedBuildRun(row.build()));
             serviceNodes.add(Json.obj(sObj));
         }
         root.put("services", Json.arr(serviceNodes));
@@ -152,9 +159,103 @@ public final class DomainJson {
         return Json.obj(root);
     }
 
+    public static JsonValue.JsonObject observedBuildRun(ObservedBuildRun build) {
+        Objects.requireNonNull(build, "build must not be null");
+        Map<String, JsonValue> obj = new LinkedHashMap<>();
+        obj.put("displayState", Json.str(build.displayState().name()));
+        obj.put("status", strOrNull(build.status().map(BuildStatus::name)));
+        if (build.record().isEmpty()) {
+            obj.put("pid", Json.nil());
+            obj.put("startedAt", Json.nil());
+            obj.put("finishedAt", Json.nil());
+            obj.put("exitCode", Json.nil());
+            obj.put("reason", Json.nil());
+            obj.put("stdoutLog", Json.nil());
+            obj.put("stderrLog", Json.nil());
+            return Json.obj(obj);
+        }
+        BuildRunRecord rec = build.record().get();
+        obj.put("pid", Json.num(rec.pid()));
+        obj.put("startedAt", Json.str(rec.startedAt().toString()));
+        switch (rec) {
+            case BuildRunRecord.Running _ -> {
+                obj.put("finishedAt", Json.nil());
+                obj.put("exitCode", Json.nil());
+                obj.put("reason", Json.nil());
+            }
+            case BuildRunRecord.Succeeded s -> {
+                obj.put("finishedAt", Json.str(s.finishedAt().toString()));
+                obj.put("exitCode", Json.num(0));
+                obj.put("reason", Json.nil());
+            }
+            case BuildRunRecord.Failed f -> {
+                obj.put("finishedAt", Json.str(f.finishedAt().toString()));
+                obj.put("exitCode", numOrNull(f.exitCode()));
+                obj.put("reason", Json.str(f.reason()));
+            }
+        }
+        obj.put("stdoutLog", Json.str(rec.stdoutLog().toString()));
+        obj.put("stderrLog", Json.str(rec.stderrLog().toString()));
+        return Json.obj(obj);
+    }
+
+    public static JsonValue.JsonObject buildResult(Project project, BuildResult result) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(project.name()));
+        List<JsonValue> outcomes = new ArrayList<>(result.outcomes().size());
+        for (BuildServiceOutcome item : result.outcomes()) {
+            Map<String, JsonValue> oObj = new LinkedHashMap<>();
+            oObj.put("service", Json.str(item.service()));
+            oObj.put("builder", Json.str(item.builder()));
+            oObj.put("status", Json.str(BuildStatus.SUCCEEDED.name()));
+            oObj.put("pid", Json.num(item.record().pid()));
+            oObj.put("startedAt", Json.str(item.record().startedAt().toString()));
+            oObj.put("finishedAt", Json.str(item.record().finishedAt().toString()));
+            oObj.put("durationMillis", Json.num(Math.max(0L, item.duration().toMillis())));
+            oObj.put("stdoutLog", Json.str(item.record().stdoutLog().toString()));
+            oObj.put("stderrLog", Json.str(item.record().stderrLog().toString()));
+            outcomes.add(Json.obj(oObj));
+        }
+        root.put("outcomes", Json.arr(outcomes));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject cancelResult(Project project, CancelResult result) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(project.name()));
+        root.put("service", Json.str(result.service()));
+        root.put("disposition", Json.str(result.disposition().name()));
+        if (result.record().isPresent()) {
+            BuildRunRecord.Failed f = result.record().get();
+            root.put("pid", Json.num(f.pid()));
+            root.put("reason", Json.str(f.reason()));
+            root.put("stdoutLog", Json.str(f.stdoutLog().toString()));
+            root.put("stderrLog", Json.str(f.stderrLog().toString()));
+        } else {
+            root.put("pid", Json.nil());
+            root.put("reason", Json.nil());
+            root.put("stdoutLog", Json.nil());
+            root.put("stderrLog", Json.nil());
+        }
+        return Json.obj(root);
+    }
+
     public static JsonValue.JsonObject inspectionReport(Project project, InspectionReport report) {
+        return inspectionReport(project, report, Optional.empty());
+    }
+
+    public static JsonValue.JsonObject inspectionReport(
+        Project project,
+        InspectionReport report,
+        Optional<ObservedBuildRun> buildRun
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(report, "report must not be null");
+        Objects.requireNonNull(buildRun, "buildRun must not be null");
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("project", Json.str(project.name()));
         root.put("service", Json.str(report.service()));
@@ -190,6 +291,7 @@ public final class DomainJson {
         root.put("outLogPath", Json.str(report.outLogPath().toString()));
         root.put("errLogPath", Json.str(report.errLogPath().toString()));
         root.put("stale", Json.bool(report.stale()));
+        buildRun.ifPresent(b -> root.put("buildRun", observedBuildRun(b)));
         return Json.obj(root);
     }
 

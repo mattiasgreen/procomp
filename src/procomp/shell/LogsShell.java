@@ -57,7 +57,10 @@ public final class LogsShell {
             ));
         }
 
-        Path logPath = stateStore.logPath(project.name(), ProcessKey.service(request.serviceName()), request.stderr());
+        ProcessKey key = request.build()
+            ? ProcessKey.build(request.serviceName())
+            : ProcessKey.service(request.serviceName());
+        Path logPath = stateStore.logPath(project.name(), key, request.stderr());
         if (request.pathOnly()) {
             return Result.ok(new LogsResult.ResolvedPath(logPath));
         }
@@ -110,9 +113,20 @@ public final class LogsShell {
         boolean stderr,
         boolean pathOnly,
         int lines,
-        boolean follow
+        boolean follow,
+        boolean build
     ) {
         public static final int DEFAULT_LINES = 100;
+
+        public LogsRequest(
+            String serviceName,
+            boolean stderr,
+            boolean pathOnly,
+            int lines,
+            boolean follow
+        ) {
+            this(serviceName, stderr, pathOnly, lines, follow, false);
+        }
 
         public LogsRequest {
             if (serviceName == null || serviceName.isBlank()) {
