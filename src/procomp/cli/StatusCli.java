@@ -1,22 +1,19 @@
 package procomp.cli;
 
 import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.process.Ownership;
 import procomp.core.project.Project;
+import procomp.shell.DomainJson;
 import procomp.shell.GatewayShell.GatewayStatusReport;
 import procomp.shell.StatusShell.EstateStatus;
 import procomp.shell.StatusShell.GatewaySummary;
 import procomp.shell.StatusShell.ServiceStatusRow;
 
 import java.io.PrintWriter;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -87,54 +84,7 @@ public final class StatusCli {
     }
 
     private static void renderJson(EstateStatus status, PrintWriter out) {
-        Map<String, JsonValue> root = new LinkedHashMap<>();
-        root.put("project", Json.str(status.project()));
-        root.put("gateway", buildGatewayJson(status.gateway()));
-
-        List<JsonValue> serviceNodes = new ArrayList<>(status.services().size());
-        for (ServiceStatusRow row : status.services()) {
-            Map<String, JsonValue> sObj = new LinkedHashMap<>();
-            sObj.put("service", Json.str(row.service()));
-            sObj.put("route", Json.str(row.route().name()));
-            sObj.put("owner", Json.str(row.ownership().name()));
-            sObj.put("provenance", CliFormat.jsonStrOrNull(row.provenance()));
-            sObj.put("health", Json.str(row.health().name()));
-            sObj.put("port", CliFormat.jsonNumOrNull(row.port()));
-            sObj.put("pid", CliFormat.jsonNumOrNull(row.pid()));
-            sObj.put("startedAt", CliFormat.jsonStrOrNull(row.startedAt().map(Instant::toString)));
-            sObj.put("uptimeSeconds", CliFormat.jsonUptimeOrNull(row.uptime()));
-            sObj.put("stale", Json.bool(row.stale()));
-            sObj.put("healthEndpoint", CliFormat.jsonStrOrNull(row.healthEndpoint()));
-            sObj.put("healthNote", CliFormat.jsonStrOrNull(row.healthNote()));
-            serviceNodes.add(Json.obj(sObj));
-        }
-        root.put("services", Json.arr(serviceNodes));
-
-        out.println(Json.stringify(Json.obj(root)));
-    }
-
-    private static JsonValue.JsonObject buildGatewayJson(GatewaySummary summary) {
-        Map<String, JsonValue> gw = new LinkedHashMap<>();
-        if (summary.report().isEmpty()) {
-            gw.put("configured", Json.bool(false));
-            gw.put("type", Json.nil());
-            gw.put("port", Json.nil());
-            gw.put("adminUrl", Json.nil());
-            gw.put("owner", Json.nil());
-            gw.put("provenance", Json.nil());
-            gw.put("health", Json.nil());
-            gw.put("pid", Json.nil());
-            gw.put("uptimeSeconds", Json.nil());
-            gw.put("healthEndpoint", Json.nil());
-            gw.put("healthResponse", Json.nil());
-            gw.put("syncStatus", Json.nil());
-            gw.put("drifted", Json.arr(List.of()));
-            gw.put("staleMappings", Json.arr(List.of()));
-            return Json.obj(gw);
-        }
-        gw.put("configured", Json.bool(true));
-        GatewayCli.appendGatewayStatusFields(gw, summary.report().get());
-        return Json.obj(gw);
+        out.println(Json.stringify(DomainJson.estateStatus(status)));
     }
 
     private static String formatGatewayLine(GatewaySummary summary) {

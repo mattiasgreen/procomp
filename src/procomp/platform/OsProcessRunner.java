@@ -147,6 +147,17 @@ public final class OsProcessRunner implements ProcessRunner {
                     Map.of("pid", Long.toString(pid))
                 ));
             }
+            List<ProcessHandle> latestDescendants = new ArrayList<>(root.descendants().toList());
+            Collections.reverse(latestDescendants);
+            Set<Long> seenPids = new HashSet<>();
+            for (ProcessHandle h : allHandles) {
+                seenPids.add(h.pid());
+            }
+            for (ProcessHandle child : latestDescendants) {
+                if (seenPids.add(child.pid())) {
+                    allHandles.add(child);
+                }
+            }
             for (ProcessHandle handle : allHandles) {
                 if (handle.isAlive()) {
                     handle.destroyForcibly();
@@ -162,11 +173,15 @@ public final class OsProcessRunner implements ProcessRunner {
             }
         }
 
-        if (root.isAlive()) {
+        List<String> survivingPids = allHandles.stream()
+            .filter(ProcessHandle::isAlive)
+            .map(h -> Long.toString(h.pid()))
+            .toList();
+        if (!survivingPids.isEmpty()) {
             return Result.err(DomainError.of(
                 "PROCESS_STOP_FAILED",
-                "Process PID " + pid + " remained alive after termination attempt",
-                Map.of("pid", Long.toString(pid))
+                "Process PID " + pid + " (or descendant) remained alive after termination attempt: " + String.join(", ", survivingPids),
+                Map.of("pid", Long.toString(pid), "survivingPids", String.join(",", survivingPids))
             ));
         }
         return Result.ok(Unit.VALUE);
@@ -202,7 +217,7 @@ public final class OsProcessRunner implements ProcessRunner {
         }
         try {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
-                .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                .get(Math.max(1L, timeout.toNanos()), TimeUnit.NANOSECONDS);
             return true;
         } catch (TimeoutException e) {
             return handles.stream().noneMatch(ProcessHandle::isAlive);
@@ -215,17 +230,36 @@ public final class OsProcessRunner implements ProcessRunner {
     }
 
     private static String resolveExecutable(String rawExe, Path workingDir) {
+        boolean isWindows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         if (Path.of(rawExe).isAbsolute()) {
-            return rawExe;
+            return resolveWindowsExt(Path.of(rawExe), isWindows).map(Path::toString).orElse(rawExe);
         }
         if (rawExe.contains("/") || rawExe.contains("\\")) {
-            return workingDir.resolve(rawExe).normalize().toString();
+            Path resolved = workingDir.resolve(rawExe).normalize();
+            return resolveWindowsExt(resolved, isWindows).map(Path::toString).orElse(resolved.toString());
         }
         Path candidateInWorkingDir = workingDir.resolve(rawExe).normalize();
-        if (Files.isRegularFile(candidateInWorkingDir)) {
-            return candidateInWorkingDir.toString();
+        Optional<Path> found = resolveWindowsExt(candidateInWorkingDir, isWindows);
+        if (found.isPresent()) {
+            return found.get().toString();
         }
         return rawExe;
+    }
+
+    private static Optional<Path> resolveWindowsExt(Path base, boolean isWindows) {
+        if (Files.isRegularFile(base)) {
+            return Optional.of(base);
+        }
+        if (!isWindows) {
+            return Optional.empty();
+        }
+        for (String ext : List.of(".exe", ".cmd", ".bat")) {
+            Path withExt = base.resolveSibling(base.getFileName() + ext);
+            if (Files.isRegularFile(withExt)) {
+                return Optional.of(withExt);
+            }
+        }
+        return Optional.empty();
     }
 
     private static void ensureParentDir(Path file) throws IOException {

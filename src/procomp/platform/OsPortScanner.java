@@ -28,7 +28,7 @@ public final class OsPortScanner implements PortScanner {
 
     private static final Pattern SS_PID_PATTERN = Pattern.compile("pid=(\\d+)");
     private static final Set<String> NON_LISTEN_STATES = Set.of(
-        "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "SYN_SENT", "SYN_RECV", "LAST_ACK", "CLOSING"
+        "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "SYN_SENT", "SYN_RECV", "LAST_ACK", "CLOSING", "BOUND"
     );
 
     private final String osName;
@@ -113,13 +113,13 @@ public final class OsPortScanner implements PortScanner {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (!trimmed.startsWith("TCP")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 5) {
                 continue;
             }
@@ -131,22 +131,22 @@ public final class OsPortScanner implements PortScanner {
             if (!isListening || !matchesLoopbackOrWildcardPort(localAddr, targetPort)) {
                 continue;
             }
-            best = pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr));
+            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr)));
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
     public static Optional<PortBinding> parseLinuxSs(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("State") || trimmed.startsWith("Netid")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 5) {
                 continue;
             }
@@ -163,39 +163,40 @@ public final class OsPortScanner implements PortScanner {
             if (m.find()) {
                 pid = parsePositivePid(m.group(1));
             }
-            best = pickBetterListener(best, new PortBinding(targetPort, pid, localAddr));
+            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, localAddr)));
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
     public static Optional<PortBinding> parsePosixLsof(String output, int targetPort) {
         if (output == null || output.isBlank()) {
             return Optional.empty();
         }
-        PortBinding best = null;
-        for (String line : output.split("\\R")) {
+        Optional<PortBinding> best = Optional.empty();
+        for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("COMMAND")) {
                 continue;
             }
-            String[] cols = trimmed.split("\\s+");
+            String[] cols = trimmed.split("\\s+", -1);
             if (cols.length < 9) {
                 continue;
             }
             Optional<Long> pid = parsePositivePid(cols[1]);
             for (int i = 7; i < cols.length; i++) {
                 if (matchesLoopbackOrWildcardPort(cols[i], targetPort)) {
-                    best = pickBetterListener(best, new PortBinding(targetPort, pid, cols[i]));
+                    best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, cols[i])));
                 }
             }
         }
-        return Optional.ofNullable(best);
+        return best;
     }
 
-    private static PortBinding pickBetterListener(PortBinding current, PortBinding candidate) {
-        if (current == null) {
+    private static PortBinding pickBetterListener(Optional<PortBinding> currentOpt, PortBinding candidate) {
+        if (currentOpt.isEmpty()) {
             return candidate;
         }
+        PortBinding current = currentOpt.get();
         if (current.pid().isEmpty() && candidate.pid().isPresent()) {
             return candidate;
         }
@@ -213,18 +214,34 @@ public final class OsPortScanner implements PortScanner {
     }
 
     private static Optional<String> runCommandQuiet(List<String> command) {
+        Process p = null;
         try {
-            Process p = new ProcessBuilder(command).redirectErrorStream(true).start();
-            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            p = new ProcessBuilder(command).redirectErrorStream(true).start();
+            Process proc = p;
+            java.util.concurrent.CompletableFuture<byte[]> stdoutFuture = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try (java.io.InputStream in = proc.getInputStream()) {
+                    return in.readAllBytes();
+                } catch (IOException e) {
+                    return new byte[0];
+                }
+            });
             if (!p.waitFor(5, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
+                stdoutFuture.cancel(true);
                 return Optional.empty();
             }
-            return p.exitValue() == 0 ? Optional.of(output) : Optional.empty();
-        } catch (IOException e) {
+            byte[] bytes = stdoutFuture.get(1, TimeUnit.SECONDS);
+            return p.exitValue() == 0 ? Optional.of(new String(bytes, StandardCharsets.UTF_8)) : Optional.empty();
+        } catch (IOException | java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            if (p != null) {
+                p.destroyForcibly();
+            }
             return Optional.empty();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (p != null) {
+                p.destroyForcibly();
+            }
             return Optional.empty();
         }
     }

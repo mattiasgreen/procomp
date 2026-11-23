@@ -1,7 +1,6 @@
 package procomp.platform;
 
 import procomp.Assert;
-import procomp.core.common.DomainError;
 import procomp.core.project.Project;
 import procomp.shell.ProjectLoader;
 import procomp.shell.ports.LogChunk;

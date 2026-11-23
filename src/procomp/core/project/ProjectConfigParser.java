@@ -120,8 +120,18 @@ final class ProjectConfigParser {
         ));
     }
 
+    static boolean isPathSafeIdentifier(String value) {
+        return value != null
+            && !value.isBlank()
+            && !value.equals(".")
+            && !value.equals("..")
+            && !value.contains("/")
+            && !value.contains("\\")
+            && !value.contains("\0");
+    }
+
     private static Result<String, DomainError> validateProjectIdentifier(String project) {
-        if (project.equals(".") || project.equals("..") || project.contains("/") || project.contains("\\") || project.contains("\0")) {
+        if (!isPathSafeIdentifier(project)) {
             return Result.err(DomainError.of(
                 "CONFIG_INVALID_VALUE",
                 "Invalid project identifier '" + project + "': must be a single path-safe segment",
@@ -324,8 +334,12 @@ final class ProjectConfigParser {
         Map<String, RawProjectConfig.RawServiceConfig> services = new LinkedHashMap<>();
         for (Map.Entry<String, JsonValue> entry : okVal(mapObjRes).fields().entrySet()) {
             String svcName = entry.getKey();
-            if (svcName.isBlank()) {
-                return Result.err(DomainError.of("CONFIG_INVALID_VALUE", "Service name must not be blank", Map.of("field", "services")));
+            if (!isPathSafeIdentifier(svcName)) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Invalid service name '" + svcName + "': must be a single path-safe segment",
+                    Map.of("field", "services", "value", svcName)
+                ));
             }
             String path = "services." + svcName;
             Result<JsonValue.JsonObject, DomainError> svcObjRes = asObject(entry.getValue(), path);
@@ -336,8 +350,9 @@ final class ProjectConfigParser {
             if (unknown.isErr()) return unknown.castError();
 
             Optional<Integer> port = Optional.empty();
-            if (svcObj.containsKey("port")) {
-                Result<Integer, DomainError> portRes = parsePort(svcObj.fields().get("port"), path + ".port");
+            Optional<JsonValue> rawPort = svcObj.get("port");
+            if (rawPort.isPresent()) {
+                Result<Integer, DomainError> portRes = parsePort(rawPort.get(), path + ".port");
                 if (portRes.isErr()) return portRes.castError();
                 port = Optional.of(okVal(portRes));
             }

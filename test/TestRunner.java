@@ -255,7 +255,9 @@ public final class TestRunner {
         if (className.startsWith("procomp.core.")) {
             return 1;
         }
-        if (className.startsWith("procomp.shell.") || className.startsWith("procomp.cli.")) {
+        if (className.startsWith("procomp.shell.")
+            || className.startsWith("procomp.cli.")
+            || className.startsWith("procomp.web.")) {
             return 2;
         }
         if (className.startsWith("procomp.platform.") || className.startsWith("procomp.smoke.")) {
@@ -267,7 +269,7 @@ public final class TestRunner {
     private static String classifyLevel(String className) {
         return switch (classifyLevelNumber(className)) {
             case 1 -> "Level 1 (core)";
-            case 2 -> "Level 2 (shell/cli)";
+            case 2 -> "Level 2 (shell/cli/web)";
             case 3 -> "Level 3 (platform/e2e)";
             default -> "Other";
         };

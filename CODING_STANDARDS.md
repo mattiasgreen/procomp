@@ -15,6 +15,7 @@ Judgement-call standards enforced during `/code-review` (mechanical import, puri
 
 ## Domain Clarity & Minimalism
 
+- Prefer `sealed interface` + `record` sum types over flat records with `Optional` fields whenever field presence depends on state (make illegal states unrepresentable; see `docs/adr/0002-non-null-illegal-states-unrepresentable.md`). Avoid `Optional` method parameters and never use `null` in `core/`.
 - Prefer small domain enums or records over raw status strings whenever the set of values is closed.
 - Keep `shell/ports/` narrow: avoid adding port methods without an active caller in `src/`.
 - Avoid middle-man wrapper types that only forward fields from an inner record without adding domain behavior.

@@ -2,17 +2,16 @@ package procomp.cli;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.project.ProfileDefinition;
 import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
+import procomp.shell.DomainJson;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -170,24 +169,7 @@ public final class RoutingCli {
     }
 
     private static void renderRoutesJson(Project project, RoutingTable table, PrintWriter out) {
-        List<JsonValue> items = new ArrayList<>(table.size());
-        for (Map.Entry<String, Route> entry : table.routes().entrySet()) {
-            String svcName = entry.getKey();
-            Route route = entry.getValue();
-            ServiceDefinition svc = project.service(svcName).orElseThrow();
-
-            Map<String, JsonValue> obj = new LinkedHashMap<>();
-            obj.put("service", Json.str(svcName));
-            obj.put("route", Json.str(route.name()));
-            obj.put("proxyPath", Json.str(svc.proxyPath()));
-            obj.put("port", svc.port().<JsonValue>map(Json::num).orElse(Json.nil()));
-            obj.put("remoteUrl", svc.remoteUrl().<JsonValue>map(Json::str).orElse(Json.nil()));
-            items.add(Json.obj(obj));
-        }
-        Map<String, JsonValue> root = new LinkedHashMap<>();
-        root.put("project", Json.str(project.name()));
-        root.put("routes", Json.arr(items));
-        out.println(Json.stringify(Json.obj(root)));
+        out.println(Json.stringify(DomainJson.routingTable(project, table)));
     }
 
     private static void renderProfilesTable(Project project, List<ProfileDefinition> profiles, PrintWriter out) {
@@ -206,20 +188,6 @@ public final class RoutingCli {
     }
 
     private static void renderProfilesJson(Project project, List<ProfileDefinition> profiles, PrintWriter out) {
-        List<JsonValue> items = new ArrayList<>(profiles.size());
-        for (ProfileDefinition profile : profiles) {
-            List<JsonValue> localNodes = new ArrayList<>(profile.localServices().size());
-            for (String svc : profile.localServices()) {
-                localNodes.add(Json.str(svc));
-            }
-            Map<String, JsonValue> obj = new LinkedHashMap<>();
-            obj.put("name", Json.str(profile.name()));
-            obj.put("local", Json.arr(localNodes));
-            items.add(Json.obj(obj));
-        }
-        Map<String, JsonValue> root = new LinkedHashMap<>();
-        root.put("project", Json.str(project.name()));
-        root.put("profiles", Json.arr(items));
-        out.println(Json.stringify(Json.obj(root)));
+        out.println(Json.stringify(DomainJson.profiles(project, profiles)));
     }
 }

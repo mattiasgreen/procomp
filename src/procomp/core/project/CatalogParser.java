@@ -99,6 +99,13 @@ final class CatalogParser {
                 ));
             }
             String serviceName = nameOpt.get();
+            if (!ProjectConfigParser.isPathSafeIdentifier(serviceName)) {
+                return Result.err(DomainError.of(
+                    "CATALOG_INVALID_VALUE",
+                    "Invalid service name '" + serviceName + "' in catalog: must be a single path-safe segment",
+                    Map.of("service", serviceName, "index", Integer.toString(i))
+                ));
+            }
             if (result.containsKey(serviceName)) {
                 return Result.err(DomainError.of(
                     "CATALOG_DUPLICATE_SERVICE",

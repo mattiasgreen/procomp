@@ -233,7 +233,7 @@ final class ProcessLifecycle {
         // 1. Read-only pre-start Discovery across all targets before spawning anything
         Map<String, DiscoveryContext> preDiscovery = new LinkedHashMap<>();
         List<InspectionReport> conflicts = new ArrayList<>();
-        StartTargetSpec firstConflictSpec = null;
+        Optional<StartTargetSpec> firstConflictSpec = Optional.empty();
         for (StartTargetSpec spec : targets) {
             Result<DiscoveryContext, DomainError> discRes = spec.discoverer().get();
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
@@ -242,21 +242,21 @@ final class ProcessLifecycle {
             DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
             preDiscovery.put(spec.id(), ctx);
             if (ProcessPlanner.planStart(ctx.discovery()) == StartAction.FAIL_CONFLICT) {
-                if (firstConflictSpec == null) {
-                    firstConflictSpec = spec;
+                if (firstConflictSpec.isEmpty()) {
+                    firstConflictSpec = Optional.of(spec);
                 }
                 conflicts.add(inspect(ctx, spec.desiredRoute(), Optional.empty()));
             }
         }
 
-        if (!conflicts.isEmpty()) {
-            return Result.err(conflictError(conflicts, firstConflictSpec));
+        if (firstConflictSpec.isPresent()) {
+            return Result.err(conflictError(conflicts, firstConflictSpec.get()));
         }
 
         // 2. Pre-spawn validation & launch plan preparation for all SPAWN targets before spawning any
         Map<String, LaunchPlan> launchPlans = new LinkedHashMap<>();
         for (StartTargetSpec spec : targets) {
-            DiscoveryContext ctx = preDiscovery.get(spec.id());
+            DiscoveryContext ctx = Objects.requireNonNull(preDiscovery.get(spec.id()));
             if (ProcessPlanner.planStart(ctx.discovery()) == StartAction.SPAWN) {
                 Result<LaunchPlan, DomainError> planRes = spec.launchPlanner().get();
                 if (planRes instanceof Result.Err<LaunchPlan, DomainError>(DomainError err)) {
@@ -270,11 +270,11 @@ final class ProcessLifecycle {
         Map<String, TargetStartDisposition> dispositions = new LinkedHashMap<>();
         List<StartTargetSpec> pendingHealth = new ArrayList<>();
         for (StartTargetSpec spec : targets) {
-            DiscoveryContext ctx = preDiscovery.get(spec.id());
+            DiscoveryContext ctx = Objects.requireNonNull(preDiscovery.get(spec.id()));
             StartAction action = ProcessPlanner.planStart(ctx.discovery());
             switch (action) {
                 case SPAWN -> {
-                    LaunchPlan plan = launchPlans.get(spec.id());
+                    LaunchPlan plan = Objects.requireNonNull(launchPlans.get(spec.id()));
                     Result<SpawnedProcess, DomainError> spawnRes = spawnAndRecord(
                         projectName,
                         spec.key(),
@@ -354,7 +354,7 @@ final class ProcessLifecycle {
             }
             for (StartTargetSpec spec : targets) {
                 if (!finalDiscoveries.containsKey(spec.id())) {
-                    finalDiscoveries.put(spec.id(), preDiscovery.get(spec.id()).discovery());
+                    finalDiscoveries.put(spec.id(), Objects.requireNonNull(preDiscovery.get(spec.id())).discovery());
                 }
             }
         }
@@ -363,8 +363,8 @@ final class ProcessLifecycle {
         for (StartTargetSpec spec : targets) {
             outcomes.add(new TargetStartOutcome(
                 spec.id(),
-                dispositions.get(spec.id()),
-                finalDiscoveries.get(spec.id())
+                Objects.requireNonNull(dispositions.get(spec.id())),
+                Objects.requireNonNull(finalDiscoveries.get(spec.id()))
             ));
         }
         return Result.ok(outcomes);
@@ -529,7 +529,11 @@ final class ProcessLifecycle {
         );
         Result<Unit, DomainError> writeRes = stateStore.writeManagedProcess(projectName, key, record);
         if (writeRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
-            return Result.err(err);
+            // Best-effort rollback so we don't leak an orphaned OS process if persisting the record fails.
+            processRunner.stopTree(spawned.pid(), Duration.ofSeconds(2));
+            Map<String, String> details = new LinkedHashMap<>(err.details());
+            details.put("spawnedPid", Long.toString(spawned.pid()));
+            return Result.err(DomainError.of(err.code(), err.message(), details));
         }
         return Result.ok(spawned);
     }

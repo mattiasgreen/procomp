@@ -159,7 +159,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
 | `port` | `integer` | No* | Local TCP port the `Service` listens on (*required if `proxyPath` is routed `LOCAL`). |
-| `runtime` | `string` | Yes | Key in top-level `runtimes` (validated strictly). |
+| `runtime` | `string` | Yes* | Key in top-level `runtimes` (validated strictly; *optional when overriding a `Service` already imported with a `runtime` from `catalog`). |
 | `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). |
 | `repositoryUrl` | `string` | No | Remote Git URL used to derive `<repositoriesRoot>/<basename>` when `repository` is omitted. |
 | `workingDir` | `string` | No* | Working directory for the `Service`'s `Process`. Defaults to `{{repository}}` when a `Repository` is configured (*required if the `Service` has no `Repository`). |

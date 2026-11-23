@@ -1,12 +1,12 @@
 package procomp.cli;
 
 import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.gateway.RouteDrift;
 import procomp.core.gateway.StaleManagedMapping;
 import procomp.core.project.Project;
+import procomp.shell.DomainJson;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
 import procomp.shell.GatewayShell.GatewayStartDisposition;
 import procomp.shell.GatewayShell.GatewayStartRequest;
@@ -18,9 +18,7 @@ import procomp.shell.GatewayShell.GatewayStopResult;
 import java.io.PrintWriter;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * CLI argument parser and text/JSON renderer for {@code procomp gateway <start|stop|status|reconcile>}.
@@ -186,43 +184,6 @@ public final class GatewayCli {
     }
 
     private static void renderStatusJson(GatewayStatusReport report, PrintWriter out) {
-        Map<String, JsonValue> root = new LinkedHashMap<>();
-        root.put("project", Json.str(report.projectName()));
-        appendGatewayStatusFields(root, report);
-        out.println(Json.stringify(Json.obj(root)));
-    }
-
-    static void appendGatewayStatusFields(Map<String, JsonValue> target, GatewayStatusReport report) {
-        target.put("type", Json.str(report.gateway().type()));
-        target.put("port", Json.num(report.gateway().port()));
-        target.put("adminUrl", Json.str(report.gateway().adminUrl()));
-        target.put("owner", Json.str(report.discovery().ownership().name()));
-        target.put("provenance", CliFormat.jsonStrOrNull(report.discovery().provenance()));
-        target.put("health", Json.str(report.discovery().health().name()));
-        target.put("pid", CliFormat.jsonNumOrNull(report.discovery().pid()));
-        target.put("uptimeSeconds", CliFormat.jsonUptimeOrNull(report.uptime()));
-        target.put("healthEndpoint", CliFormat.jsonStrOrNull(report.discovery().healthEndpoint()));
-        target.put("healthResponse", Json.str(report.discovery().healthResponse()));
-        target.put("syncStatus", Json.str(report.drift().syncStatus().name()));
-
-        List<JsonValue> driftedNodes = new ArrayList<>(report.drift().drifted().size());
-        for (RouteDrift item : report.drift().drifted()) {
-            Map<String, JsonValue> dObj = new LinkedHashMap<>();
-            dObj.put("service", Json.str(item.service()));
-            dObj.put("desired", Json.str(item.desired().name()));
-            dObj.put("live", Json.str(item.live()));
-            driftedNodes.add(Json.obj(dObj));
-        }
-        target.put("drifted", Json.arr(driftedNodes));
-
-        List<JsonValue> staleNodes = new ArrayList<>(report.drift().staleMappings().size());
-        for (StaleManagedMapping stale : report.drift().staleMappings()) {
-            Map<String, JsonValue> sObj = new LinkedHashMap<>();
-            sObj.put("id", CliFormat.jsonStrOrNull(stale.id()));
-            sObj.put("service", CliFormat.jsonStrOrNull(stale.service()));
-            sObj.put("targetUrl", CliFormat.jsonStrOrNull(stale.targetUrl()));
-            staleNodes.add(Json.obj(sObj));
-        }
-        target.put("staleMappings", Json.arr(staleNodes));
+        out.println(Json.stringify(DomainJson.gatewayStatus(report)));
     }
 }

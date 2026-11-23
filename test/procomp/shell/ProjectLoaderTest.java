@@ -6,7 +6,6 @@ import procomp.core.project.Project;
 import procomp.fakes.InMemoryConfigSource;
 
 import java.nio.file.Path;
-import java.util.Map;
 import java.util.Optional;
 
 public final class ProjectLoaderTest {
@@ -124,5 +123,38 @@ public final class ProjectLoaderTest {
         Assert.assertEquals("CONFIG_UNSET_ENV_VAR", unsetErr.code(), "unset host env code");
         Assert.assertNotContains(unsetErr.format(), "secret-value-xyz", "error must not leak dotenv secrets");
         Assert.assertNotContains(unsetErr.format(), "top-secret-from-defaults", "error must not leak default secrets");
+    }
+
+    public static void testLoadWithPathReturnsResolvedConfigPathAndProject() {
+        Path repoRoot = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Path subDir = repoRoot.resolve("services/orders");
+        Path walkUpCfg = repoRoot.resolve("procomp.json");
+        Path overrideCfg = Path.of("C:/work/override.procomp.json").toAbsolutePath().normalize();
+
+        var source = new InMemoryConfigSource(subDir)
+            .withFile(walkUpCfg, "{\"project\":\"walk\",\"runtimes\":{}}")
+            .withFile(overrideCfg, "{\"project\":\"override\",\"runtimes\":{}}");
+
+        ProjectLoader loader = new ProjectLoader(source);
+
+        ProjectLoader.LoadedProject walked = Assert.assertOk(
+            loader.loadWithPath(Optional.empty()),
+            "loadWithPath walk-up should succeed"
+        );
+        Assert.assertEquals(walkUpCfg, walked.configPath(), "walk-up configPath");
+        Assert.assertEquals("walk", walked.project().name(), "walk-up project name");
+
+        ProjectLoader.LoadedProject overridden = Assert.assertOk(
+            loader.loadWithPath(Optional.of(overrideCfg)),
+            "loadWithPath explicit override should succeed"
+        );
+        Assert.assertEquals(overrideCfg, overridden.configPath(), "override configPath");
+        Assert.assertEquals("override", overridden.project().name(), "override project name");
+
+        DomainError missing = Assert.assertErr(
+            loader.loadWithPath(Optional.of(Path.of("C:/work/does-not-exist.json"))),
+            "loadWithPath missing override fails"
+        );
+        Assert.assertEquals("CONFIG_NOT_FOUND", missing.code(), "missing override error code");
     }
 }
