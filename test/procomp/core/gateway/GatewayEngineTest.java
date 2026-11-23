@@ -275,16 +275,17 @@ public final class GatewayEngineTest {
             "LOCAL service receives gateway.proxyHeaders"
         );
         Assert.assertEquals(
-            Map.of(),
+            Map.of("USERNAME", "alice", "X-GATEWAY", "local-procomp"),
             billingMap.additionalProxyRequestHeaders(),
-            "REMOTE service does not receive gateway.proxyHeaders"
+            "REMOTE service also receives gateway.proxyHeaders"
         );
 
         String ordersJson = GatewayEngine.toMappingJson(ordersMap);
         String billingJson = GatewayEngine.toMappingJson(billingMap);
         Assert.assertContains(ordersJson, "\"additionalProxyRequestHeaders\"", "LOCAL JSON emits additionalProxyRequestHeaders");
         Assert.assertContains(ordersJson, "\"USERNAME\":\"alice\"", "LOCAL JSON contains resolved USERNAME");
-        Assert.assertFalse(billingJson.contains("additionalProxyRequestHeaders"), "REMOTE JSON omits additionalProxyRequestHeaders");
+        Assert.assertContains(billingJson, "\"additionalProxyRequestHeaders\"", "REMOTE JSON also emits additionalProxyRequestHeaders");
+        Assert.assertContains(billingJson, "\"USERNAME\":\"alice\"", "REMOTE JSON contains resolved USERNAME");
 
         // Live mappings matching plan -> IN_SYNC
         String syncedLive = "{\"mappings\":[" + ordersJson + "," + billingJson + "]}";
@@ -294,16 +295,16 @@ public final class GatewayEngineTest {
         );
         Assert.assertEquals(GatewaySyncStatus.IN_SYNC, inSync.syncStatus(), "should be IN_SYNC");
 
-        // Changing USERNAME in live WireMock mapping -> DRIFTED (MISMATCH)
+        // Changing USERNAME in live WireMock mappings -> DRIFTED (MISMATCH) for both LOCAL and REMOTE
         String driftedLive = syncedLive.replace("\"USERNAME\":\"alice\"", "\"USERNAME\":\"bob\"");
         GatewayDriftReport drifted = Assert.assertOk(
             GatewayEngine.computeDrift(project, routing, true, driftedLive),
             "computeDrift header mismatch"
         );
         Assert.assertEquals(GatewaySyncStatus.DRIFTED, drifted.syncStatus(), "header change must be detected as DRIFTED");
-        Assert.assertEquals(1, drifted.drifted().size(), "one drifted route");
-        Assert.assertEquals("orders", drifted.drifted().get(0).service(), "orders drifted");
-        Assert.assertEquals("MISMATCH", drifted.drifted().get(0).live(), "header diff reports MISMATCH");
+        Assert.assertEquals(2, drifted.drifted().size(), "both LOCAL and REMOTE drifted");
+        Assert.assertEquals("MISMATCH", drifted.drifted().get(0).live(), "LOCAL header diff reports MISMATCH");
+        Assert.assertEquals("MISMATCH", drifted.drifted().get(1).live(), "REMOTE header diff reports MISMATCH");
     }
 
     public static void testGatewayCoreHasZeroDependencyOnProcessOrShellPackages() {

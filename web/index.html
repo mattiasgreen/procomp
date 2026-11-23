@@ -75,6 +75,7 @@
             <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
             <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
             <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>
+            <button id="btn-gateway-logs" type="button" class="btn btn-secondary">Logs</button>
           </div>
         </div>
         <div id="gateway-unconfigured" class="gateway-unconfigured" hidden>
@@ -145,7 +146,7 @@
       <section id="detail-drawer" class="card drawer" aria-label="Service Inspection and Logs" hidden>
         <div class="drawer-header">
           <div class="drawer-title-group">
-            <span class="drawer-service-label">Service</span>
+            <span id="drawer-target-label" class="drawer-service-label">Service</span>
             <h2 id="drawer-service-name" class="drawer-service-name mono"></h2>
           </div>
           <div class="drawer-tabs" role="tablist" aria-label="Detail views">
@@ -174,7 +175,7 @@
         <div id="panel-logs" class="drawer-panel" role="tabpanel" aria-labelledby="tab-logs" hidden>
           <div class="panel-toolbar logs-toolbar">
             <div class="logs-toolbar-left">
-              <div class="segmented-control" role="group" aria-label="Log source">
+              <div id="logs-source-group" class="segmented-control" role="group" aria-label="Log source">
                 <button id="btn-logs-source-service" type="button" class="seg-btn active" data-source="service">Service</button>
                 <button id="btn-logs-source-build" type="button" class="seg-btn" data-source="build">Build</button>
               </div>

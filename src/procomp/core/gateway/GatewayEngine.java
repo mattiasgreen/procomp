@@ -38,7 +38,7 @@ public final class GatewayEngine {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(routing, "routing must not be null");
 
-        Map<String, String> localProxyHeaders = project.gateway()
+        Map<String, String> proxyHeaders = project.gateway()
             .map(GatewayDefinition::proxyHeaders)
             .orElse(Map.of());
 
@@ -53,7 +53,6 @@ public final class GatewayEngine {
             String prefix = normalizePrefix(service.proxyPath());
             String urlPathPattern = toUrlPathPattern(prefix);
             Optional<String> prefixToRemove = "/".equals(prefix) ? Optional.empty() : Optional.of(prefix);
-            Map<String, String> headers = route == Route.LOCAL ? localProxyHeaders : Map.of();
 
             mappings.add(new WireMockMapping(
                 deterministicMappingId(project.name(), service.name()),
@@ -65,7 +64,7 @@ public final class GatewayEngine {
                 urlPathPattern,
                 targetUrl,
                 prefixToRemove,
-                headers
+                proxyHeaders
             ));
         }
         return Result.ok(new GatewayPlan(project.name(), mappings));
@@ -191,7 +190,7 @@ public final class GatewayEngine {
             }
         }
 
-        Map<String, String> localProxyHeaders = project.gateway()
+        Map<String, String> proxyHeaders = project.gateway()
             .map(GatewayDefinition::proxyHeaders)
             .orElse(Map.of());
 
@@ -200,7 +199,7 @@ public final class GatewayEngine {
         for (WireMockMapping desired : plan.mappings()) {
             ServiceDefinition svc = project.service(desired.service()).orElseThrow();
             List<ManagedLiveMapping> actuals = byService.getOrDefault(desired.service(), List.of());
-            String liveState = classifyServiceLiveState(svc, desired, actuals, localProxyHeaders);
+            String liveState = classifyServiceLiveState(svc, desired, actuals, proxyHeaders);
             liveRoutes.put(desired.service(), liveState);
             if (!desired.route().name().equals(liveState)) {
                 drifted.add(new RouteDrift(desired.service(), desired.route(), liveState));
@@ -237,7 +236,6 @@ public final class GatewayEngine {
             return desired.route().name();
         }
         Route alternate = desired.route() == Route.LOCAL ? Route.REMOTE : Route.LOCAL;
-        Map<String, String> altHeaders = alternate == Route.LOCAL ? localProxyHeaders : Map.of();
         Result<String, DomainError> altTargetRes = resolveTargetUrl(svc, alternate);
         if (altTargetRes instanceof Result.Ok<String, DomainError>(String altTarget)
             && matchesMappingSpec(
@@ -246,7 +244,7 @@ public final class GatewayEngine {
                 altTarget,
                 desired.proxyUrlPrefixToRemove(),
                 alternate,
-                altHeaders
+                localProxyHeaders
             )) {
             return alternate.name();
         }

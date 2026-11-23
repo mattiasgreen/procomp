@@ -91,7 +91,7 @@ final class LogsCli {
         return Result.ok(new LogsRequest(serviceName, stderr, pathOnly, lines, follow, build));
     }
 
-    private static Result<Integer, String> parseNonNegativeInt(String raw) {
+    static Result<Integer, String> parseNonNegativeInt(String raw) {
         if (raw == null || raw.isEmpty()) {
             return Result.err("Invalid line count: value must be a non-negative integer.");
         }

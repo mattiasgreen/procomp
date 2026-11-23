@@ -125,6 +125,7 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp gateway stop` | Stops a `Managed` `Gateway` `Process` (never kills an `Unmanaged` `Gateway`). |
 | `procomp gateway status` | Shows `Gateway` ownership, `Health State`, and whether live mappings match the `Routing Table`. |
 | `procomp gateway reconcile` | Converges the live `Gateway` mappings to match the Project's `Routing Table`. |
+| `procomp gateway logs` | Minimal raw log reader for `gateway.out.log` (or `gateway.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. |
 
 ---
 

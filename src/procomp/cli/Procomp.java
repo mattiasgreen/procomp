@@ -175,8 +175,8 @@ public final class Procomp {
               logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
               profile <list|use <name>>           List or apply named routing Profiles (--json on list)
-              gateway <start|stop|status|reconcile>
-                                                  Manage the local Gateway (-d|--detach, --timeout <sec>, --json)
+              gateway <start|stop|status|reconcile|logs>
+                                                  Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 
