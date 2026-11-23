@@ -26,6 +26,7 @@ import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProgressObserver.DiagnosticCategory;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
 import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
@@ -35,6 +36,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -378,8 +380,13 @@ public final class GatewayShell {
 
     private Result<String, DomainError> fetchMappingsJson(GatewayDefinition gateway) {
         URI uri = URI.create(gateway.adminUrl() + "/__admin/mappings");
+        Instant start = clock.now();
         Result<HttpResponseData, DomainError> res = httpClient.get(uri, DEFAULT_ADMIN_TIMEOUT);
+        long elapsedMs = Math.max(0L, Duration.between(start, clock.now()).toMillis());
         if (res instanceof Result.Err<HttpResponseData, DomainError>(DomainError err)) {
+            observer.diagnostic(
+                DiagnosticCategory.GATEWAY, "GET " + uri + " -> FAILED (" + err.message() + ", " + elapsedMs + "ms)"
+            );
             return Result.err(DomainError.of(
                 "GATEWAY_ADMIN_ERROR",
                 "Failed to query WireMock mappings at " + uri + ": " + err.message(),
@@ -387,6 +394,9 @@ public final class GatewayShell {
             ));
         }
         HttpResponseData resp = ((Result.Ok<HttpResponseData, DomainError>) res).value();
+        observer.diagnostic(
+            DiagnosticCategory.GATEWAY, "GET " + uri + " -> HTTP " + resp.statusCode() + " (" + elapsedMs + "ms)"
+        );
         if (!resp.is2xx()) {
             return Result.err(DomainError.of(
                 "GATEWAY_ADMIN_ERROR",
@@ -406,6 +416,9 @@ public final class GatewayShell {
                 new HttpRequestData("DELETE", uri, Map.of(), "", DEFAULT_ADMIN_TIMEOUT)
             );
             if (delRes instanceof Result.Err<HttpResponseData, DomainError>(DomainError err)) {
+                observer.diagnostic(
+                    DiagnosticCategory.GATEWAY, "DELETE " + uri + " -> FAILED (" + err.message() + ")"
+                );
                 return Result.err(DomainError.of(
                     "GATEWAY_ADMIN_ERROR",
                     "Failed to delete prior WireMock mapping at " + uri + ": " + err.message(),
@@ -413,6 +426,9 @@ public final class GatewayShell {
                 ));
             }
             HttpResponseData resp = ((Result.Ok<HttpResponseData, DomainError>) delRes).value();
+            observer.diagnostic(
+                DiagnosticCategory.GATEWAY, "DELETE " + uri + " -> HTTP " + resp.statusCode()
+            );
             if (!resp.is2xx() && resp.statusCode() != 404) {
                 return Result.err(DomainError.of(
                     "GATEWAY_ADMIN_ERROR",
@@ -430,6 +446,7 @@ public final class GatewayShell {
     private Result<Boolean, DomainError> applyMappings(GatewayDefinition gateway, GatewayPlan plan) {
         URI importUri = URI.create(gateway.adminUrl() + "/__admin/mappings/import");
         String importJson = GatewayEngine.toImportPayloadJson(plan);
+        Instant start = clock.now();
         Result<HttpResponseData, DomainError> importRes = httpClient.send(new HttpRequestData(
             "POST",
             importUri,
@@ -437,7 +454,11 @@ public final class GatewayShell {
             importJson,
             DEFAULT_ADMIN_TIMEOUT
         ));
+        long elapsedMs = Math.max(0L, Duration.between(start, clock.now()).toMillis());
         if (importRes instanceof Result.Err<HttpResponseData, DomainError>(DomainError err)) {
+            observer.diagnostic(
+                DiagnosticCategory.GATEWAY, "POST " + importUri + " (" + plan.mappings().size() + " mappings) -> FAILED (" + err.message() + ", " + elapsedMs + "ms)"
+            );
             return Result.err(DomainError.of(
                 "GATEWAY_ADMIN_ERROR",
                 "Failed to import WireMock mappings at " + importUri + ": " + err.message(),
@@ -445,6 +466,9 @@ public final class GatewayShell {
             ));
         }
         HttpResponseData importResp = ((Result.Ok<HttpResponseData, DomainError>) importRes).value();
+        observer.diagnostic(
+            DiagnosticCategory.GATEWAY, "POST " + importUri + " (" + plan.mappings().size() + " mappings) -> HTTP " + importResp.statusCode() + " (" + elapsedMs + "ms)"
+        );
         if (importResp.is2xx()) {
             return Result.ok(false);
         }
@@ -467,6 +491,9 @@ public final class GatewayShell {
                 DEFAULT_ADMIN_TIMEOUT
             ));
             if (postRes instanceof Result.Err<HttpResponseData, DomainError>(DomainError err)) {
+                observer.diagnostic(
+                    DiagnosticCategory.GATEWAY, "POST " + singleUri + " (" + mapping.service() + ") -> FAILED (" + err.message() + ")"
+                );
                 return Result.err(DomainError.of(
                     "GATEWAY_ADMIN_ERROR",
                     "Failed to post WireMock mapping for '" + mapping.service() + "' at " + singleUri + ": " + err.message(),
@@ -474,6 +501,9 @@ public final class GatewayShell {
                 ));
             }
             HttpResponseData postResp = ((Result.Ok<HttpResponseData, DomainError>) postRes).value();
+            observer.diagnostic(
+                DiagnosticCategory.GATEWAY, "POST " + singleUri + " (" + mapping.service() + ") -> HTTP " + postResp.statusCode()
+            );
             if (!postResp.is2xx()) {
                 return Result.err(DomainError.of(
                     "GATEWAY_ADMIN_ERROR",

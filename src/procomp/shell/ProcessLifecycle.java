@@ -28,6 +28,7 @@ import procomp.shell.ports.ProcessRunner;
 import procomp.shell.ports.ProcessRunner.SpawnRequest;
 import procomp.shell.ports.ProcessRunner.SpawnedProcess;
 import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProgressObserver.DiagnosticCategory;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
 import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.ProjectFiles.ArtifactInfo;
@@ -157,6 +158,11 @@ final class ProcessLifecycle {
                 healthCheck,
                 latestArtifactTs
             ));
+            observer.diagnostic(
+                DiagnosticCategory.DISCOVERY,
+                target.name() + ": managed record PID " + managedRecord.get().pid() + " -> " + discovery.ownership()
+                    + " / " + discovery.health()
+            );
             return Result.ok(new DiscoveryContext(target, managedRecord, discovery));
         }
 
@@ -165,13 +171,19 @@ final class ProcessLifecycle {
         HealthCheck healthCheck = HealthCheck.None.INSTANCE;
 
         if (target.port().isPresent()) {
-            Result<Optional<PortBinding>, DomainError> listenerRes = portScanner.findListener(target.port().get());
+            int port = target.port().get();
+            Result<Optional<PortBinding>, DomainError> listenerRes = portScanner.findListener(port);
             if (listenerRes instanceof Result.Err<Optional<PortBinding>, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
             portBinding = ((Result.Ok<Optional<PortBinding>, DomainError>) listenerRes).value();
             if (portBinding.isPresent()) {
                 PortBinding listener = portBinding.get();
+                observer.diagnostic(
+                    DiagnosticCategory.DISCOVERY,
+                    target.name() + ": port " + port + " listener found (PID "
+                        + listener.pid().map(Object::toString).orElse("unknown") + ")"
+                );
                 if (listener.pid().isPresent()) {
                     Result<Optional<ObservedProcess>, DomainError> snapRes = processRunner.inspect(listener.pid().get());
                     if (snapRes instanceof Result.Err<Optional<ObservedProcess>, DomainError>(DomainError err)) {
@@ -180,6 +192,11 @@ final class ProcessLifecycle {
                     observed = ((Result.Ok<Optional<ObservedProcess>, DomainError>) snapRes).value();
                 }
                 healthCheck = checkHealth(target, true);
+            } else {
+                observer.diagnostic(
+                    DiagnosticCategory.DISCOVERY,
+                    target.name() + ": port " + port + " free"
+                );
             }
         }
 
@@ -191,6 +208,11 @@ final class ProcessLifecycle {
             healthCheck,
             Optional.empty()
         ));
+        observer.diagnostic(
+            DiagnosticCategory.DISCOVERY,
+            target.name() + ": " + discovery.ownership() + " / " + discovery.health()
+                + discovery.pid().map(p -> " (PID " + p + ")").orElse("")
+        );
         return Result.ok(new DiscoveryContext(target, Optional.empty(), discovery));
     }
 
@@ -472,10 +494,22 @@ final class ProcessLifecycle {
                     ));
                 }
                 long pid = disc.pid().get();
+                observer.diagnostic(
+                    DiagnosticCategory.PROCESS,
+                    target.name() + ": stopping Conflict PID " + pid + " (graceful timeout " + gracefulTimeout.toSeconds() + "s)"
+                );
                 Result<Unit, DomainError> stopRes = processRunner.stopTree(pid, gracefulTimeout);
                 if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                    observer.diagnostic(
+                        DiagnosticCategory.PROCESS,
+                        target.name() + ": failed stopping Conflict PID " + pid + " (" + err.message() + ")"
+                    );
                     yield Result.err(err);
                 }
+                observer.diagnostic(
+                    DiagnosticCategory.PROCESS,
+                    target.name() + ": stopped Conflict PID " + pid
+                );
                 observer.onEvent(new ProgressEvent.StatusMessage(
                     target.name(),
                     "Killed Conflict Process (PID " + pid + ") with explicit consent"
@@ -492,20 +526,27 @@ final class ProcessLifecycle {
             return Result.ok(Optional.empty());
         }
         String glob = service.artifactGlob().get();
-        Result<Optional<ArtifactInfo>, DomainError> fromWorkingDir =
+        Result<Optional<ArtifactInfo>, DomainError> res =
             projectFiles.findNewestArtifact(service.workingDir(), glob, service.artifactExclude());
-        if (fromWorkingDir.isErr()) {
-            return fromWorkingDir;
+        if (res.isErr()) {
+            return res;
         }
-        Optional<ArtifactInfo> found = ((Result.Ok<Optional<ArtifactInfo>, DomainError>) fromWorkingDir).value();
-        if (found.isPresent() || service.repository().isEmpty()) {
-            return fromWorkingDir;
+        Optional<ArtifactInfo> found = ((Result.Ok<Optional<ArtifactInfo>, DomainError>) res).value();
+        if (found.isEmpty() && service.repository().isPresent()) {
+            Path repoRoot = service.repository().get().root();
+            if (!repoRoot.equals(service.workingDir())) {
+                res = projectFiles.findNewestArtifact(repoRoot, glob, service.artifactExclude());
+                if (res.isErr()) {
+                    return res;
+                }
+                found = ((Result.Ok<Optional<ArtifactInfo>, DomainError>) res).value();
+            }
         }
-        Path repoRoot = service.repository().get().root();
-        if (repoRoot.equals(service.workingDir())) {
-            return fromWorkingDir;
-        }
-        return projectFiles.findNewestArtifact(repoRoot, glob, service.artifactExclude());
+        found.ifPresent(info -> observer.diagnostic(
+            DiagnosticCategory.PROCESS,
+            service.name() + ": resolved Artifact " + info.path() + " (mtime=" + info.lastModified() + ")"
+        ));
+        return res;
     }
 
     private Result<SpawnedProcess, DomainError> spawnAndRecord(
@@ -514,11 +555,24 @@ final class ProcessLifecycle {
         SpawnRequest spawnRequest,
         Optional<Instant> artifactTimestamp
     ) {
+        String label = keyLabel(key);
+        observer.diagnostic(
+            DiagnosticCategory.PROCESS,
+            label + ": spawning argv=" + spawnRequest.command()
+                + " cwd=" + spawnRequest.workingDir()
+                + " envOverrides=" + spawnRequest.envOverrides().size()
+                + " stdout=" + spawnRequest.stdoutLog()
+                + " stderr=" + spawnRequest.stderrLog()
+        );
         Result<SpawnedProcess, DomainError> spawnRes = processRunner.spawnDetached(spawnRequest);
         if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
             return Result.err(err);
         }
         SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnRes).value();
+        observer.diagnostic(
+            DiagnosticCategory.PROCESS,
+            label + ": spawned PID " + spawned.pid()
+        );
         ManagedProcessRecord record = new ManagedProcessRecord(
             spawned.pid(),
             spawned.startedAt(),
@@ -619,10 +673,23 @@ final class ProcessLifecycle {
         Duration gracefulTimeout
     ) {
         if (stopOsTree) {
+            String label = keyLabel(key);
+            observer.diagnostic(
+                DiagnosticCategory.PROCESS,
+                label + ": stopping PID " + pid + " (graceful timeout " + gracefulTimeout.toSeconds() + "s)"
+            );
             Result<Unit, DomainError> stopRes = processRunner.stopTree(pid, gracefulTimeout);
-            if (stopRes.isErr()) {
+            if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                observer.diagnostic(
+                    DiagnosticCategory.PROCESS,
+                    label + ": failed stopping PID " + pid + " (" + err.message() + ")"
+                );
                 return stopRes;
             }
+            observer.diagnostic(
+                DiagnosticCategory.PROCESS,
+                label + ": stopped PID " + pid
+            );
         }
         return stateStore.deleteManagedProcess(projectName, key);
     }
@@ -630,19 +697,40 @@ final class ProcessLifecycle {
     private HealthCheck checkHealth(ProcessTarget target, boolean listenerConfirmed) {
         if (target.healthEndpoint().isPresent()) {
             URI uri = URI.create(target.healthEndpoint().get());
-            return switch (httpClient.get(uri, DEFAULT_HEALTH_CHECK_TIMEOUT)) {
-                case Result.Ok<HttpResponseData, DomainError>(HttpResponseData resp) ->
-                    new HealthCheck.HttpResult(resp.statusCode(), "");
-                case Result.Err<HttpResponseData, DomainError>(DomainError err) ->
-                    new HealthCheck.HttpFailure(err.message());
+            Instant checkStart = clock.now();
+            Result<HttpResponseData, DomainError> httpRes = httpClient.get(uri, DEFAULT_HEALTH_CHECK_TIMEOUT);
+            long elapsedMs = Math.max(0L, Duration.between(checkStart, clock.now()).toMillis());
+            return switch (httpRes) {
+                case Result.Ok<HttpResponseData, DomainError>(HttpResponseData resp) -> {
+                    observer.diagnostic(
+                        DiagnosticCategory.DISCOVERY,
+                        target.name() + ": GET " + uri + " -> HTTP " + resp.statusCode() + " (" + elapsedMs + "ms)"
+                    );
+                    yield new HealthCheck.HttpResult(resp.statusCode(), "");
+                }
+                case Result.Err<HttpResponseData, DomainError>(DomainError err) -> {
+                    observer.diagnostic(
+                        DiagnosticCategory.DISCOVERY,
+                        target.name() + ": GET " + uri + " -> FAILED (" + err.message() + ", " + elapsedMs + "ms)"
+                    );
+                    yield new HealthCheck.HttpFailure(err.message());
+                }
             };
         }
         if (target.port().isPresent()) {
             boolean listening = listenerConfirmed
                 || portScanner.isTcpListening(target.port().get(), DEFAULT_HEALTH_CHECK_TIMEOUT);
+            observer.diagnostic(
+                DiagnosticCategory.DISCOVERY,
+                target.name() + ": TCP 127.0.0.1:" + target.port().get() + " -> " + (listening ? "LISTENING" : "CLOSED")
+            );
             return new HealthCheck.TcpResult(listening);
         }
         return HealthCheck.None.INSTANCE;
+    }
+
+    private static String keyLabel(ProcessKey key) {
+        return key instanceof ProcessKey.Service(String name) ? name : "gateway";
     }
 
     private static DomainError conflictError(List<InspectionReport> conflicts, StartTargetSpec firstSpec) {

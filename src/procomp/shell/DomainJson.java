@@ -24,6 +24,7 @@ import procomp.shell.ProcessShell.StopServiceOutcome;
 import procomp.shell.StatusShell.EstateStatus;
 import procomp.shell.StatusShell.GatewaySummary;
 import procomp.shell.StatusShell.ServiceStatusRow;
+import procomp.shell.ports.ProgressObserver.DiagnosticCategory;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
 
 import java.time.Duration;
@@ -299,6 +300,11 @@ public final class DomainJson {
                 root.put("service", Json.str(service));
                 root.put("stderr", Json.bool(stderr));
                 root.put("line", Json.str(line));
+            }
+            case ProgressEvent.Diagnostic(DiagnosticCategory category, String message) -> {
+                root.put("type", Json.str("diagnostic"));
+                root.put("category", Json.str(category.label()));
+                root.put("message", Json.str(message));
             }
         }
         return Json.obj(root);

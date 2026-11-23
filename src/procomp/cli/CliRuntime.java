@@ -27,6 +27,9 @@ import procomp.shell.ports.ProjectFiles;
 import procomp.shell.ports.StateStore;
 
 import java.io.PrintWriter;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
 
@@ -46,12 +49,20 @@ public final class CliRuntime {
         this.out = Objects.requireNonNull(out, "out");
         this.err = Objects.requireNonNull(err, "err");
         ProgressObserver delegateObserver = runtime.observer();
-        ProgressObserver cliLogsObserver = event -> {
-            if (event instanceof ProgressEvent.LogLine logLine) {
-                out.print(logLine.line());
-                out.flush();
+        ProgressObserver cliLogsObserver = new ProgressObserver() {
+            @Override
+            public boolean diagnosticsEnabled() {
+                return delegateObserver.diagnosticsEnabled();
             }
-            delegateObserver.onEvent(event);
+
+            @Override
+            public void onEvent(ProgressEvent event) {
+                if (event instanceof ProgressEvent.LogLine logLine) {
+                    out.print(logLine.line());
+                    out.flush();
+                }
+                delegateObserver.onEvent(event);
+            }
         };
         this.logsRuntime = runtime.withObserver(cliLogsObserver);
     }
@@ -79,6 +90,45 @@ public final class CliRuntime {
 
     public ProcompRuntime runtime() {
         return runtime;
+    }
+
+    CliRuntime withVerbose() {
+        Instant startedAt = runtime.clock().map(Clock::now).orElseGet(Instant::now);
+        ProgressObserver delegate = runtime.observer();
+        ProgressObserver verboseObserver = new ProgressObserver() {
+            @Override
+            public boolean diagnosticsEnabled() {
+                return true;
+            }
+
+            @Override
+            public void onEvent(ProgressEvent event) {
+                switch (event) {
+                    case ProgressEvent.Diagnostic(ProgressObserver.DiagnosticCategory category, String message) -> {
+                        printVerboseLine(startedAt, category.label(), message);
+                        if (delegate.diagnosticsEnabled()) {
+                            delegate.onEvent(event);
+                        }
+                    }
+                    case ProgressEvent.StatusMessage(String target, String message) -> {
+                        printVerboseLine(startedAt, target, message);
+                        delegate.onEvent(event);
+                    }
+                    case ProgressEvent.LogLine _ -> delegate.onEvent(event);
+                }
+            }
+        };
+        return new CliRuntime(runtime.withObserver(verboseObserver), out, err);
+    }
+
+    private void printVerboseLine(Instant startedAt, String category, String message) {
+        Instant now = runtime.clock().map(Clock::now).orElseGet(Instant::now);
+        long elapsedMs = Math.max(0L, Duration.between(startedAt, now).toMillis());
+        String formatted = String.format(Locale.ROOT, "[+%.3fs] [%s] %s", elapsedMs / 1000.0, category, message);
+        synchronized (err) {
+            err.println(formatted);
+            err.flush();
+        }
     }
 
     PrintWriter out() {

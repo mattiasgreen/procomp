@@ -9,11 +9,38 @@ public interface ProgressObserver {
 
     void onEvent(ProgressEvent event);
 
+    default boolean diagnosticsEnabled() {
+        return false;
+    }
+
+    default void diagnostic(DiagnosticCategory category, String message) {
+        if (diagnosticsEnabled()) {
+            onEvent(new ProgressEvent.Diagnostic(category, message));
+        }
+    }
+
     static ProgressObserver noop() {
         return event -> {};
     }
 
-    sealed interface ProgressEvent permits ProgressEvent.StatusMessage, ProgressEvent.LogLine {
+    enum DiagnosticCategory {
+        CONFIG("config"),
+        DISCOVERY("discovery"),
+        PROCESS("process"),
+        GATEWAY("gateway");
+
+        private final String label;
+
+        DiagnosticCategory(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
+    sealed interface ProgressEvent permits ProgressEvent.StatusMessage, ProgressEvent.LogLine, ProgressEvent.Diagnostic {
 
         record StatusMessage(String target, String message) implements ProgressEvent {
             public StatusMessage {
@@ -26,6 +53,13 @@ public interface ProgressObserver {
             public LogLine {
                 Objects.requireNonNull(service);
                 Objects.requireNonNull(line);
+            }
+        }
+
+        record Diagnostic(DiagnosticCategory category, String message) implements ProgressEvent {
+            public Diagnostic {
+                Objects.requireNonNull(category);
+                Objects.requireNonNull(message);
             }
         }
     }

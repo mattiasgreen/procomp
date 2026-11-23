@@ -535,9 +535,11 @@ public final class ApiRouter {
             }
             Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-            ProcompRuntime streamRuntime = runtime.withObserver(event ->
-                sink.send("progress", Json.stringify(DomainJson.progressEvent(event)))
-            );
+            ProcompRuntime streamRuntime = runtime.withObserver(event -> {
+                if (event instanceof ProgressEvent.StatusMessage) {
+                    sink.send("progress", Json.stringify(DomainJson.progressEvent(event)));
+                }
+            });
             Result<ProcessShell, DomainError> shellRes = streamRuntime.processShell();
             if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
                 sendSseError(sink, err, cliCommand);

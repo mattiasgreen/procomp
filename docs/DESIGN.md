@@ -94,7 +94,7 @@ Uptime is displayed alongside `Health State` so a human can tell whether a `STAR
 
 ## 5. v1 CLI Contract
 
-All CLI flags use standard `--kebab-case`. All read commands (`status`, `route`, `profile list`, `gateway status`, `inspect`) support `--json` for scripting/piping.
+All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`/`--verbose`, `-h`/`--help`) are accepted anywhere on the command line; `-v`/`--verbose` emits elapsed-time diagnostics (`[+0.124s] [<category>] <message>`) strictly to `stderr` without polluting `stdout` or printing `env` secret values. All read commands (`status`, `route`, `profile list`, `gateway status`, `inspect`) support `--json` for scripting/piping.
 
 ### Process Lifecycle
 

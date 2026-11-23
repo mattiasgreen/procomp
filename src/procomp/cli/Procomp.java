@@ -63,19 +63,21 @@ public final class Procomp {
         }
         CliCommand cliCommand = ((Result.Ok<CliCommand, String>) commandRes).value();
 
+        CliRuntime effectiveRuntime = parsed.verbose() ? runtime.withVerbose() : runtime;
+
         if (cliCommand instanceof CliCommand.Ui(UiCli.Options options)) {
-            return UiCli.execute(options, parsed.configOverride(), runtime);
+            return UiCli.execute(options, parsed.configOverride(), effectiveRuntime);
         }
 
-        Result<Project, DomainError> projRes = runtime.projectLoader()
+        Result<Project, DomainError> projRes = effectiveRuntime.projectLoader()
             .flatMap(loader -> loader.load(parsed.configOverride()));
         if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
-            runtime.err().println("Error: " + error.format());
+            effectiveRuntime.err().println("Error: " + error.format());
             return 1;
         }
         Project project = ((Result.Ok<Project, DomainError>) projRes).value();
 
-        return executeCommand(cliCommand, project, runtime);
+        return executeCommand(cliCommand, project, effectiveRuntime);
     }
 
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
@@ -103,6 +105,7 @@ public final class Procomp {
 
     private static Result<ParsedArgs, String> parseArgs(String[] args) {
         boolean help = false;
+        boolean verbose = false;
         Optional<Path> configOverride = Optional.empty();
         List<String> commandArgs = new ArrayList<>();
         boolean seenCommand = false;
@@ -111,6 +114,10 @@ public final class Procomp {
             String arg = args[i];
             if ("--help".equals(arg) || "-h".equals(arg)) {
                 help = true;
+                continue;
+            }
+            if ("--verbose".equals(arg) || "-v".equals(arg)) {
+                verbose = true;
                 continue;
             }
             if ("--config".equals(arg)) {
@@ -144,15 +151,16 @@ public final class Procomp {
             commandArgs.add(arg);
         }
 
-        return Result.ok(new ParsedArgs(help, configOverride, commandArgs));
+        return Result.ok(new ParsedArgs(help, verbose, configOverride, commandArgs));
     }
 
     private static void printUsage(PrintWriter out) {
         out.println("""
-            Usage: procomp [--config <path>] <command> [args...]
+            Usage: procomp [--config <path>] [-v|--verbose] <command> [args...]
 
             Global options:
               -h, --help          Show this help message
+              -v, --verbose       Emit detailed elapsed-time diagnostics to stderr (never prints secrets)
                   --config <path> Use explicit procomp.json path (overrides PROCOMP_CONFIG and walk-up)
 
             Commands:
@@ -168,5 +176,5 @@ public final class Procomp {
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 
-    private record ParsedArgs(boolean help, Optional<Path> configOverride, List<String> commandArgs) {}
+    private record ParsedArgs(boolean help, boolean verbose, Optional<Path> configOverride, List<String> commandArgs) {}
 }

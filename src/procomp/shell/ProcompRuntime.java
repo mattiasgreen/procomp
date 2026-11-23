@@ -84,12 +84,16 @@ public final class ProcompRuntime {
         return observer;
     }
 
+    public Optional<Clock> clock() {
+        return clock;
+    }
+
     public synchronized Result<ProjectLoader, DomainError> projectLoader() {
         if (configSource.isEmpty()) {
             return Result.err(missingPorts("ProjectLoader", List.of("ConfigSource")));
         }
         if (projectLoader.isEmpty()) {
-            projectLoader = Optional.of(new ProjectLoader(configSource.get()));
+            projectLoader = Optional.of(new ProjectLoader(configSource.get(), observer));
         }
         return Result.ok(projectLoader.get());
     }

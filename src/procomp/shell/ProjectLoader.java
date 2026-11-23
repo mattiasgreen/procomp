@@ -5,6 +5,8 @@ import procomp.core.common.Result;
 import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.ProgressObserver;
+import procomp.shell.ports.ProgressObserver.DiagnosticCategory;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -37,9 +39,15 @@ public final class ProjectLoader {
     }
 
     private final ConfigSource configSource;
+    private final ProgressObserver observer;
 
     public ProjectLoader(ConfigSource configSource) {
+        this(configSource, ProgressObserver.noop());
+    }
+
+    public ProjectLoader(ConfigSource configSource, ProgressObserver observer) {
         this.configSource = Objects.requireNonNull(configSource, "configSource must not be null");
+        this.observer = Objects.requireNonNull(observer, "observer must not be null");
     }
 
     public Result<Project, DomainError> load(Optional<Path> configOverride) {
@@ -53,6 +61,7 @@ public final class ProjectLoader {
             return pathRes.castError();
         }
         Path configPath = okVal(pathRes);
+        observer.diagnostic(DiagnosticCategory.CONFIG, "Loading procomp.json: " + configPath);
 
         Result<String, DomainError> rawJsonRes = configSource.readFile(configPath);
         if (rawJsonRes.isErr()) {
@@ -69,13 +78,21 @@ public final class ProjectLoader {
                 return readOptionalFile(path);
             },
             configSource.allEnvVars()
-        ).map(project -> new LoadedProject(configPath, project, new ArrayList<>(watched)));
+        ).map(project -> {
+            observer.diagnostic(
+                DiagnosticCategory.CONFIG,
+                "Resolved Project '" + project.name() + "' (" + project.services().size()
+                    + " service(s), gateway=" + (project.gateway().isPresent() ? "configured" : "none") + ")"
+            );
+            return new LoadedProject(configPath, project, new ArrayList<>(watched));
+        });
     }
 
     private Result<Optional<String>, DomainError> readOptionalFile(Path path) {
         if (!configSource.isRegularFile(path)) {
             return Result.ok(Optional.empty());
         }
+        observer.diagnostic(DiagnosticCategory.CONFIG, "Reading referenced file: " + path);
         return configSource.readFile(path).map(Optional::of);
     }
 
