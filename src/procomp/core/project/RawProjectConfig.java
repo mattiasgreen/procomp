@@ -74,6 +74,11 @@ record RawProjectConfig(
         }
     }
 
+    record RawFallbackRemoteConfig(
+        String targetUrl,
+        Optional<String> stripPrefix
+    ) {}
+
     record RawGatewayConfig(
         String type,
         int port,
@@ -81,7 +86,8 @@ record RawProjectConfig(
         List<String> command,
         Optional<String> workingDir,
         Map<String, String> env,
-        Map<String, String> proxyHeaders
+        Map<String, String> proxyHeaders,
+        Optional<RawFallbackRemoteConfig> fallbackRemote
     ) {
         RawGatewayConfig {
             command = List.copyOf(command);

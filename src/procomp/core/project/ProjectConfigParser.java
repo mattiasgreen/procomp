@@ -33,7 +33,10 @@ final class ProjectConfigParser {
         "command", "healthPath", "artifactGlob", "artifactExclude", "workingDir", "env"
     );
     private static final Set<String> GATEWAY_KEYS = Set.of(
-        "type", "port", "healthPath", "command", "workingDir", "env", "proxyHeaders"
+        "type", "port", "healthPath", "command", "workingDir", "env", "proxyHeaders", "fallbackRemote"
+    );
+    private static final Set<String> FALLBACK_REMOTE_KEYS = Set.of(
+        "targetUrl", "stripPrefix"
     );
     private static final Set<String> CATALOG_KEYS = Set.of("path", "itemsPath", "map");
     private static final Set<String> CATALOG_MAP_SCALAR_TARGETS = Set.of(
@@ -318,8 +321,28 @@ final class ProjectConfigParser {
             }
         }
 
+        Optional<RawProjectConfig.RawFallbackRemoteConfig> fallbackRemote = Optional.empty();
+        Optional<JsonValue> rawFallback = obj.get("fallbackRemote");
+        if (rawFallback.isPresent()) {
+            Result<JsonValue.JsonObject, DomainError> fbObjRes = asObject(rawFallback.get(), "gateway.fallbackRemote");
+            if (fbObjRes.isErr()) return fbObjRes.castError();
+            JsonValue.JsonObject fbObj = okVal(fbObjRes);
+            Result<procomp.core.common.Unit, DomainError> fbUnknown =
+                rejectUnknownKeys(fbObj, FALLBACK_REMOTE_KEYS, "gateway.fallbackRemote");
+            if (fbUnknown.isErr()) return fbUnknown.castError();
+            Result<String, DomainError> targetUrlRes = requireNonBlankString(fbObj, "targetUrl", "gateway.fallbackRemote");
+            if (targetUrlRes.isErr()) return targetUrlRes.castError();
+            Result<Optional<String>, DomainError> stripPrefixRes =
+                optionalNonBlankString(fbObj, "stripPrefix", "gateway.fallbackRemote");
+            if (stripPrefixRes.isErr()) return stripPrefixRes.castError();
+            fallbackRemote = Optional.of(new RawProjectConfig.RawFallbackRemoteConfig(
+                okVal(targetUrlRes), okVal(stripPrefixRes)
+            ));
+        }
+
         return Result.ok(Optional.of(new RawProjectConfig.RawGatewayConfig(
-            type, okVal(portRes), okVal(healthPath), okVal(command), okVal(workingDir), okVal(env), okVal(proxyHeaders)
+            type, okVal(portRes), okVal(healthPath), okVal(command), okVal(workingDir),
+            okVal(env), okVal(proxyHeaders), fallbackRemote
         )));
     }
 

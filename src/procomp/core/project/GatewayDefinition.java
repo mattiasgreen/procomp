@@ -18,7 +18,8 @@ public record GatewayDefinition(
     List<String> command,
     Optional<Path> workingDir,
     SecretEnv env,
-    Map<String, String> proxyHeaders
+    Map<String, String> proxyHeaders,
+    Optional<FallbackRemote> fallbackRemote
 ) {
     public GatewayDefinition(
         String type,
@@ -28,7 +29,7 @@ public record GatewayDefinition(
         Optional<Path> workingDir,
         SecretEnv env
     ) {
-        this(type, port, healthPath, command, workingDir, env, Map.of());
+        this(type, port, healthPath, command, workingDir, env, Map.of(), Optional.empty());
     }
 
     public GatewayDefinition {
@@ -44,6 +45,7 @@ public record GatewayDefinition(
         Objects.requireNonNull(env);
         Objects.requireNonNull(proxyHeaders);
         proxyHeaders = Collections.unmodifiableMap(new LinkedHashMap<>(proxyHeaders));
+        Objects.requireNonNull(fallbackRemote);
     }
 
     public String adminUrl() {

@@ -900,6 +900,52 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testResolvesGatewayFallbackRemoteAndRejectsInvalidFields() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "fallbackRemote": {
+                  "targetUrl": "${env:SHARED_DEV_URL}",
+                  "stripPrefix": "/some-prefix"
+                }
+              },
+              "services": {
+                "orders": { "port": 9001, "runtime": "java", "workingDir": "." }
+              }
+            }
+            """;
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of("SHARED_DEV_URL", "http://shared-dev-env")),
+            "resolve gateway.fallbackRemote"
+        );
+        FallbackRemote fb = project.gateway().orElseThrow().fallbackRemote().orElseThrow();
+        Assert.assertEquals("http://shared-dev-env", fb.targetUrl(), "fallbackRemote targetUrl");
+        Assert.assertEquals(Optional.of("/some-prefix"), fb.stripPrefix(), "fallbackRemote stripPrefix");
+
+        // Rejects unknown field in fallbackRemote
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"gateway":{"type":"wiremock","port":8080,"fallbackRemote":{"targetUrl":"http://dev","bogus":1}}}
+            """,
+            "CONFIG_UNRECOGNIZED_FIELD"
+        );
+        // Rejects missing targetUrl
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"gateway":{"type":"wiremock","port":8080,"fallbackRemote":{"stripPrefix":"/api"}}}
+            """,
+            "CONFIG_MISSING_FIELD"
+        );
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),

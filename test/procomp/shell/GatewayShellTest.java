@@ -280,6 +280,79 @@ public final class GatewayShellTest {
         Assert.assertEquals(GatewaySyncStatus.IN_SYNC, Assert.assertOk(shell.status(project), "status after fallback").drift().syncStatus(), "status confirms IN_SYNC");
     }
 
+    public static void testReconcileWithFallbackRemoteDeletesOldLocalMappingOnFlipToRemote() {
+        Path root = Path.of("C:/work/fb").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(root)
+            .withUser("mattias")
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "fb",
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+                  "gateway": {
+                    "type": "wiremock",
+                    "port": 8080,
+                    "healthPath": "/__admin/health",
+                    "proxyHeaders": { "USER": "{{user}}" },
+                    "fallbackRemote": { "targetUrl": "http://shared-dev-env", "stripPrefix": "/api" }
+                  },
+                  "services": {
+                    "orders": { "port": 9001, "runtime": "java", "workingDir": ".", "proxyPath": "/orders" },
+                    "billing": { "port": 9002, "runtime": "java", "workingDir": ".", "proxyPath": "/billing" }
+                  }
+                }
+                """);
+        Project project = Assert.assertOk(new ProjectLoader(configSource).load(Optional.empty()), "project loads");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-23T10:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner().bind(8080, 7200L);
+        processRunner.registerProcess(new ObservedProcess(
+            7200L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        var httpClient = new FakeHttpClient();
+        httpClient.stub("GET", URI.create("http://127.0.0.1:8080/__admin/health"),
+            _ -> Result.ok(new HttpResponseData(200, Map.of(), "{\"status\":\"healthy\"}")));
+
+        Map<String, JsonValue.JsonObject> live = new LinkedHashMap<>();
+        httpClient.stub("GET", URI.create("http://127.0.0.1:8080/__admin/mappings"),
+            _ -> Result.ok(new HttpResponseData(200, Map.of(),
+                Json.stringify(Json.obj(Map.of("mappings", Json.arr(new ArrayList<>(live.values()))))))));
+        httpClient.stub("POST", URI.create("http://127.0.0.1:8080/__admin/mappings/import"), req -> {
+            JsonValue.JsonObject payload = (JsonValue.JsonObject) Assert.assertOk(Json.parse(req.body()), "import json");
+            JsonValue.JsonArray arr = (JsonValue.JsonArray) payload.get("mappings").orElseThrow();
+            for (JsonValue el : arr.elements()) {
+                JsonValue.JsonObject m = (JsonValue.JsonObject) el;
+                String id = ((JsonValue.JsonString) m.get("id").orElseThrow()).value();
+                live.put(id, m);
+                httpClient.stub("DELETE", URI.create("http://127.0.0.1:8080/__admin/mappings/" + id), _ -> {
+                    live.remove(id);
+                    return Result.ok(new HttpResponseData(200, Map.of(), "{}"));
+                });
+            }
+            return Result.ok(new HttpResponseData(200, Map.of(), "{}"));
+        });
+
+        var routingShell = new RoutingShell(stateStore);
+        var shell = new GatewayShell(
+            stateStore, processRunner, portScanner, httpClient, new FakeProjectFiles(), clock,
+            procomp.shell.ports.ProgressObserver.noop()
+        );
+
+        // Start with orders=LOCAL, billing=REMOTE -> reconcile produces 2 mappings (orders + fallback-remote)
+        Assert.assertOk(routingShell.updateRoutes(project, List.of("orders"), Route.LOCAL), "orders LOCAL");
+        GatewayShell.GatewayReconcileResult first = Assert.assertOk(shell.reconcile(project), "first reconcile");
+        Assert.assertEquals(GatewaySyncStatus.IN_SYNC, first.drift().syncStatus(), "IN_SYNC after first reconcile");
+        Assert.assertEquals(2, live.size(), "only orders LOCAL and fallback-remote mappings exist");
+
+        // Flip orders back to REMOTE -> reconcile deletes orders priority-5 mapping, keeps only fallback-remote (1 mapping)
+        Assert.assertOk(routingShell.updateRoutes(project, List.of("orders"), Route.REMOTE), "orders REMOTE");
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, Assert.assertOk(shell.status(project), "status drifted").drift().syncStatus(), "DRIFTED after flip");
+        GatewayShell.GatewayReconcileResult second = Assert.assertOk(shell.reconcile(project), "second reconcile");
+        Assert.assertEquals(GatewaySyncStatus.IN_SYNC, second.drift().syncStatus(), "IN_SYNC after second reconcile");
+        Assert.assertEquals(1, live.size(), "only fallback-remote catch-all mapping remains");
+    }
+
     public static void testReconcileFailsFastOnMissingServiceTargetBeforeMutatingGateway() {
         Path root = Path.of("C:/work/broken").toAbsolutePath().normalize();
         var configSource = new InMemoryConfigSource(root)

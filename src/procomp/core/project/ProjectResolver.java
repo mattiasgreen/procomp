@@ -663,6 +663,36 @@ public final class ProjectResolver {
             resolvedProxyHeaders.put(entry.getKey(), okVal(hostExpanded));
         }
 
+        Optional<FallbackRemote> resolvedFallbackRemote = Optional.empty();
+        if (gw.fallbackRemote().isPresent()) {
+            RawProjectConfig.RawFallbackRemoteConfig rawFb = gw.fallbackRemote().get();
+            Result<String, DomainError> targetRes = expandScalarAndHostEnv(
+                rawFb.targetUrl(), gwVars, hostEnv, "gateway.fallbackRemote.targetUrl"
+            );
+            if (targetRes.isErr()) return targetRes.castError();
+            String targetUrl = okVal(targetRes).trim();
+            if (targetUrl.isBlank()) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Resolved gateway.fallbackRemote.targetUrl must not be blank",
+                    Map.of("field", "gateway.fallbackRemote.targetUrl")
+                ));
+            }
+
+            Optional<String> stripPrefix = Optional.empty();
+            if (rawFb.stripPrefix().isPresent()) {
+                Result<String, DomainError> stripRes = expandScalarAndHostEnv(
+                    rawFb.stripPrefix().get(), gwVars, hostEnv, "gateway.fallbackRemote.stripPrefix"
+                );
+                if (stripRes.isErr()) return stripRes.castError();
+                String trimmedStrip = okVal(stripRes).trim();
+                if (!trimmedStrip.isEmpty()) {
+                    stripPrefix = Optional.of(trimmedStrip);
+                }
+            }
+            resolvedFallbackRemote = Optional.of(new FallbackRemote(targetUrl, stripPrefix));
+        }
+
         return Result.ok(Optional.of(new GatewayDefinition(
             gw.type(),
             gw.port(),
@@ -670,7 +700,8 @@ public final class ProjectResolver {
             okVal(cmdRes),
             workingDir,
             SecretEnv.of(gwEnv),
-            resolvedProxyHeaders
+            resolvedProxyHeaders,
+            resolvedFallbackRemote
         )));
     }
 
@@ -1031,6 +1062,17 @@ public final class ProjectResolver {
 
     private static Optional<String> normalizeHealthPath(Optional<String> raw) {
         return raw.map(String::trim).filter(s -> !s.isEmpty());
+    }
+
+    private static Result<String, DomainError> expandScalarAndHostEnv(
+        String raw,
+        Map<String, VarValue> vars,
+        Map<String, String> hostEnv,
+        String context
+    ) {
+        Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(raw, vars, Set.of(), context);
+        if (tplExpanded.isErr()) return tplExpanded.castError();
+        return EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, context);
     }
 
     private static Result<Optional<String>, DomainError> expandOptionalScalar(

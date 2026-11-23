@@ -4,6 +4,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
+import procomp.core.project.FallbackRemote;
 import procomp.core.project.GatewayDefinition;
 import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
@@ -12,11 +13,15 @@ import procomp.core.routing.RoutingTable;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -25,6 +30,8 @@ import java.util.UUID;
 public final class GatewayEngine {
 
     public static final int DEFAULT_MAPPING_PRIORITY = 5;
+    public static final int FALLBACK_REMOTE_PRIORITY = 10;
+    public static final String FALLBACK_REMOTE_ROLE = "fallback-remote";
     private static final String REGEX_META_CHARS = "\\.+*?^$()[]{}|";
 
     private GatewayEngine() {}
@@ -32,7 +39,7 @@ public final class GatewayEngine {
     /**
      * Builds the desired {@link GatewayPlan} for all Services in {@code project} according to {@code routing}.
      * Fails fast with zero silent fallback if a {@code LOCAL} Service lacks {@code port}
-     * or a {@code REMOTE} Service lacks {@code remoteUrl}.
+     * or a {@code REMOTE} Service lacks both {@code remoteUrl} and {@code gateway.fallbackRemote}.
      */
     public static Result<GatewayPlan, DomainError> buildPlan(Project project, RoutingTable routing) {
         Objects.requireNonNull(project, "project must not be null");
@@ -41,10 +48,16 @@ public final class GatewayEngine {
         Map<String, String> proxyHeaders = project.gateway()
             .map(GatewayDefinition::proxyHeaders)
             .orElse(Map.of());
+        List<String> removeHeaders = deriveRemoveProxyRequestHeaders(proxyHeaders);
+        Optional<FallbackRemote> fallbackRemote = project.gateway().flatMap(GatewayDefinition::fallbackRemote);
 
-        List<WireMockMapping> mappings = new ArrayList<>(project.services().size());
+        List<WireMockMapping> mappings = new ArrayList<>();
         for (ServiceDefinition service : project.services().values()) {
             Route route = routing.routeOf(service.name()).orElse(Route.REMOTE);
+            if (route == Route.REMOTE && service.remoteUrl().isEmpty() && fallbackRemote.isPresent()) {
+                // Covered by the priority-10 catch-all fallbackRemote mapping
+                continue;
+            }
             Result<String, DomainError> targetRes = resolveTargetUrl(service, route);
             if (targetRes instanceof Result.Err<String, DomainError>(DomainError err)) {
                 return Result.err(err);
@@ -64,9 +77,33 @@ public final class GatewayEngine {
                 urlPathPattern,
                 targetUrl,
                 prefixToRemove,
-                proxyHeaders
+                proxyHeaders,
+                removeHeaders,
+                false
             ));
         }
+
+        if (fallbackRemote.isPresent()) {
+            FallbackRemote fb = fallbackRemote.get();
+            Optional<String> stripPrefix = fb.stripPrefix()
+                .map(GatewayEngine::normalizePrefix)
+                .filter(p -> !"/".equals(p));
+            mappings.add(new WireMockMapping(
+                deterministicFallbackMappingId(project.name()),
+                "procomp-" + project.name() + "-" + FALLBACK_REMOTE_ROLE,
+                FALLBACK_REMOTE_PRIORITY,
+                project.name(),
+                FALLBACK_REMOTE_ROLE,
+                Route.REMOTE,
+                "/.*",
+                normalizeTargetUrl(fb.targetUrl()),
+                stripPrefix,
+                proxyHeaders,
+                removeHeaders,
+                true
+            ));
+        }
+
         return Result.ok(new GatewayPlan(project.name(), mappings));
     }
 
@@ -90,11 +127,22 @@ public final class GatewayEngine {
             }
             response.put("additionalProxyRequestHeaders", Json.obj(headerNodes));
         }
+        if (!mapping.removeProxyRequestHeaders().isEmpty()) {
+            List<JsonValue> removeNodes = new ArrayList<>(mapping.removeProxyRequestHeaders().size());
+            for (String header : mapping.removeProxyRequestHeaders()) {
+                removeNodes.add(Json.str(header));
+            }
+            response.put("removeProxyRequestHeaders", Json.arr(removeNodes));
+        }
 
         Map<String, JsonValue> metadata = new LinkedHashMap<>();
         metadata.put("procomp", Json.bool(true));
         metadata.put("procompProject", Json.str(mapping.projectName()));
-        metadata.put("service", Json.str(mapping.service()));
+        if (mapping.fallbackRemote()) {
+            metadata.put("role", Json.str(FALLBACK_REMOTE_ROLE));
+        } else {
+            metadata.put("service", Json.str(mapping.service()));
+        }
         metadata.put("route", Json.str(mapping.route().name()));
 
         Map<String, JsonValue> root = new LinkedHashMap<>();
@@ -179,9 +227,28 @@ public final class GatewayEngine {
         }
         List<ManagedLiveMapping> liveMappings = ((Result.Ok<List<ManagedLiveMapping>, DomainError>) liveRes).value();
 
+        Optional<WireMockMapping> desiredFallback = plan.mappings().stream()
+            .filter(WireMockMapping::fallbackRemote)
+            .findFirst();
+        Map<String, WireMockMapping> desiredByService = new LinkedHashMap<>();
+        for (WireMockMapping m : plan.mappings()) {
+            if (!m.fallbackRemote()) {
+                desiredByService.put(m.service(), m);
+            }
+        }
+
         Map<String, List<ManagedLiveMapping>> byService = new LinkedHashMap<>();
+        List<ManagedLiveMapping> liveFallbacks = new ArrayList<>();
         List<StaleManagedMapping> staleMappings = new ArrayList<>();
         for (ManagedLiveMapping live : liveMappings) {
+            if (live.fallbackRemote()) {
+                if (desiredFallback.isPresent()) {
+                    liveFallbacks.add(live);
+                } else {
+                    staleMappings.add(new StaleManagedMapping(live.id(), Optional.of(FALLBACK_REMOTE_ROLE), live.proxyBaseUrl()));
+                }
+                continue;
+            }
             Optional<String> svcOpt = live.service();
             if (svcOpt.isEmpty() || project.service(svcOpt.get()).isEmpty()) {
                 staleMappings.add(new StaleManagedMapping(live.id(), svcOpt, live.proxyBaseUrl()));
@@ -193,16 +260,51 @@ public final class GatewayEngine {
         Map<String, String> proxyHeaders = project.gateway()
             .map(GatewayDefinition::proxyHeaders)
             .orElse(Map.of());
+        List<String> removeHeaders = deriveRemoveProxyRequestHeaders(proxyHeaders);
 
         List<RouteDrift> drifted = new ArrayList<>();
+        boolean fallbackInSync = true;
+        if (desiredFallback.isPresent()) {
+            WireMockMapping fb = desiredFallback.get();
+            if (liveFallbacks.size() != 1
+                || !matchesMappingSpec(
+                    liveFallbacks.get(0),
+                    fb.priority(),
+                    fb.urlPathPattern(),
+                    fb.targetUrl(),
+                    fb.proxyUrlPrefixToRemove(),
+                    Route.REMOTE,
+                    fb.additionalProxyRequestHeaders(),
+                    fb.removeProxyRequestHeaders()
+                )) {
+                fallbackInSync = false;
+                String liveFbState = liveFallbacks.isEmpty() ? "UNSET" : "MISMATCH";
+                drifted.add(new RouteDrift(FALLBACK_REMOTE_ROLE, Route.REMOTE, liveFbState));
+            }
+        }
+
         Map<String, String> liveRoutes = new LinkedHashMap<>();
-        for (WireMockMapping desired : plan.mappings()) {
-            ServiceDefinition svc = project.service(desired.service()).orElseThrow();
-            List<ManagedLiveMapping> actuals = byService.getOrDefault(desired.service(), List.of());
-            String liveState = classifyServiceLiveState(svc, desired, actuals, proxyHeaders);
-            liveRoutes.put(desired.service(), liveState);
-            if (!desired.route().name().equals(liveState)) {
-                drifted.add(new RouteDrift(desired.service(), desired.route(), liveState));
+        for (ServiceDefinition svc : project.services().values()) {
+            Route desiredRoute = routing.routeOf(svc.name()).orElse(Route.REMOTE);
+            List<ManagedLiveMapping> actuals = byService.getOrDefault(svc.name(), List.of());
+            WireMockMapping desired = desiredByService.get(svc.name());
+            if (desired != null) {
+                String liveState = classifyServiceLiveState(svc, desired, actuals, proxyHeaders, removeHeaders);
+                liveRoutes.put(svc.name(), liveState);
+                if (!desired.route().name().equals(liveState)) {
+                    drifted.add(new RouteDrift(svc.name(), desired.route(), liveState));
+                }
+            } else {
+                // REMOTE Service covered by gateway.fallbackRemote (no per-service mapping should exist)
+                if (!actuals.isEmpty()) {
+                    String liveState = classifyLingeringPerServiceMapping(svc, actuals, proxyHeaders, removeHeaders);
+                    liveRoutes.put(svc.name(), liveState);
+                    drifted.add(new RouteDrift(svc.name(), desiredRoute, liveState));
+                } else if (!fallbackInSync) {
+                    liveRoutes.put(svc.name(), liveFallbacks.isEmpty() ? "UNSET" : "MISMATCH");
+                } else {
+                    liveRoutes.put(svc.name(), Route.REMOTE.name());
+                }
             }
         }
 
@@ -212,11 +314,41 @@ public final class GatewayEngine {
         return Result.ok(new GatewayDriftReport(status, drifted, staleMappings, liveRoutes));
     }
 
+    private static String classifyLingeringPerServiceMapping(
+        ServiceDefinition svc,
+        List<ManagedLiveMapping> actuals,
+        Map<String, String> proxyHeaders,
+        List<String> removeHeaders
+    ) {
+        if (actuals.size() > 1) {
+            return "MISMATCH";
+        }
+        String prefix = normalizePrefix(svc.proxyPath());
+        String urlPathPattern = toUrlPathPattern(prefix);
+        Optional<String> prefixToRemove = "/".equals(prefix) ? Optional.empty() : Optional.of(prefix);
+        Result<String, DomainError> localTargetRes = resolveTargetUrl(svc, Route.LOCAL);
+        if (localTargetRes instanceof Result.Ok<String, DomainError>(String localTarget)
+            && matchesMappingSpec(
+                actuals.get(0),
+                DEFAULT_MAPPING_PRIORITY,
+                urlPathPattern,
+                localTarget,
+                prefixToRemove,
+                Route.LOCAL,
+                proxyHeaders,
+                removeHeaders
+            )) {
+            return Route.LOCAL.name();
+        }
+        return "MISMATCH";
+    }
+
     private static String classifyServiceLiveState(
         ServiceDefinition svc,
         WireMockMapping desired,
         List<ManagedLiveMapping> actuals,
-        Map<String, String> localProxyHeaders
+        Map<String, String> proxyHeaders,
+        List<String> removeHeaders
     ) {
         if (actuals.isEmpty()) {
             return "UNSET";
@@ -227,11 +359,13 @@ public final class GatewayEngine {
         ManagedLiveMapping actual = actuals.get(0);
         if (matchesMappingSpec(
             actual,
+            desired.priority(),
             desired.urlPathPattern(),
             desired.targetUrl(),
             desired.proxyUrlPrefixToRemove(),
             desired.route(),
-            desired.additionalProxyRequestHeaders()
+            desired.additionalProxyRequestHeaders(),
+            desired.removeProxyRequestHeaders()
         )) {
             return desired.route().name();
         }
@@ -240,11 +374,13 @@ public final class GatewayEngine {
         if (altTargetRes instanceof Result.Ok<String, DomainError>(String altTarget)
             && matchesMappingSpec(
                 actual,
+                DEFAULT_MAPPING_PRIORITY,
                 desired.urlPathPattern(),
                 altTarget,
                 desired.proxyUrlPrefixToRemove(),
                 alternate,
-                localProxyHeaders
+                proxyHeaders,
+                removeHeaders
             )) {
             return alternate.name();
         }
@@ -253,12 +389,17 @@ public final class GatewayEngine {
 
     private static boolean matchesMappingSpec(
         ManagedLiveMapping actual,
+        int expectedPriority,
         String expectedUrlPathPattern,
         String expectedTargetUrl,
         Optional<String> expectedPrefixToRemove,
         Route expectedRoute,
-        Map<String, String> expectedHeaders
+        Map<String, String> expectedHeaders,
+        List<String> expectedRemoveHeaders
     ) {
+        if (actual.priority().orElse(DEFAULT_MAPPING_PRIORITY) != expectedPriority) {
+            return false;
+        }
         if (actual.method().isPresent() && !"ANY".equalsIgnoreCase(actual.method().get())) {
             return false;
         }
@@ -275,6 +416,9 @@ public final class GatewayEngine {
             return false;
         }
         if (!expectedHeaders.equals(actual.additionalProxyRequestHeaders())) {
+            return false;
+        }
+        if (!expectedRemoveHeaders.equals(actual.removeProxyRequestHeaders())) {
             return false;
         }
         return true;
@@ -314,6 +458,7 @@ public final class GatewayEngine {
         for (String svcName : project.services().keySet()) {
             serviceByDeterministicId.put(deterministicMappingId(project.name(), svcName), svcName);
         }
+        String fallbackId = deterministicFallbackMappingId(project.name());
 
         List<ManagedLiveMapping> out = new ArrayList<>();
         for (int i = 0; i < elements.size(); i++) {
@@ -330,14 +475,27 @@ public final class GatewayEngine {
                 .map(JsonValue.JsonObject.class::cast)
                 .map(JsonObjectView::new);
 
+            boolean isFallbackById = id.map(fallbackId::equals).orElse(false);
+            boolean isFallbackByMeta = metaOpt.flatMap(m -> m.nonBlankString("role"))
+                .map(FALLBACK_REMOTE_ROLE::equals)
+                .orElse(false);
+            boolean isFallback = isFallbackById || isFallbackByMeta;
+
             Optional<String> matchedByIdService = id.map(serviceByDeterministicId::get);
-            boolean isManagedForProject = isManagedMappingForProject(project.name(), metaOpt, matchedByIdService);
+            boolean isManagedForProject = isManagedMappingForProject(project.name(), metaOpt, matchedByIdService, isFallbackById);
             if (!isManagedForProject) {
                 continue;
             }
 
-            Optional<String> svcName = metaOpt.flatMap(m -> m.nonBlankString("service")).or(() -> matchedByIdService);
+            Optional<String> svcName = isFallback
+                ? Optional.empty()
+                : metaOpt.flatMap(m -> m.nonBlankString("service")).or(() -> matchedByIdService);
             Optional<String> metaRoute = metaOpt.flatMap(m -> m.nonBlankString("route"));
+            Optional<Integer> priority = mObj.get("priority")
+                .filter(JsonValue.JsonNumber.class::isInstance)
+                .map(JsonValue.JsonNumber.class::cast)
+                .filter(JsonValue.JsonNumber::isInteger)
+                .flatMap(n -> n.asInt().isPresent() ? Optional.of(n.asInt().getAsInt()) : Optional.empty());
 
             Optional<JsonValue.JsonObject> reqObj = mObj.get("request")
                 .filter(JsonValue.JsonObject.class::isInstance)
@@ -355,16 +513,22 @@ public final class GatewayEngine {
             Map<String, String> additionalHeaders = respObj
                 .map(GatewayEngine::parseAdditionalProxyRequestHeaders)
                 .orElse(Map.of());
+            List<String> removeHeaders = respObj
+                .map(GatewayEngine::parseRemoveProxyRequestHeaders)
+                .orElse(List.of());
 
             out.add(new ManagedLiveMapping(
                 id,
                 svcName,
+                isFallback,
+                priority,
                 metaRoute,
                 method,
                 urlPathPattern,
                 proxyBaseUrl,
                 proxyUrlPrefixToRemove,
-                additionalHeaders
+                additionalHeaders,
+                removeHeaders
             ));
         }
         return Result.ok(out);
@@ -373,7 +537,8 @@ public final class GatewayEngine {
     private static boolean isManagedMappingForProject(
         String projectName,
         Optional<JsonObjectView> metaOpt,
-        Optional<String> matchedByIdService
+        Optional<String> matchedByIdService,
+        boolean isFallbackById
     ) {
         if (metaOpt.isPresent()) {
             JsonObjectView meta = metaOpt.get();
@@ -386,10 +551,13 @@ public final class GatewayEngine {
                 if (metaProj.isPresent()) {
                     return projectName.equals(metaProj.get());
                 }
-                return meta.nonBlankString("service").isPresent() || matchedByIdService.isPresent();
+                return isFallbackById
+                    || meta.nonBlankString("role").map(FALLBACK_REMOTE_ROLE::equals).orElse(false)
+                    || meta.nonBlankString("service").isPresent()
+                    || matchedByIdService.isPresent();
             }
         }
-        return matchedByIdService.isPresent();
+        return isFallbackById || matchedByIdService.isPresent();
     }
 
     private static Optional<String> nonBlankString(JsonValue.JsonObject obj, String key) {
@@ -411,6 +579,32 @@ public final class GatewayEngine {
         }
     }
 
+    private static List<String> deriveRemoveProxyRequestHeaders(Map<String, String> proxyHeaders) {
+        if (proxyHeaders.isEmpty()) {
+            return List.of();
+        }
+        Set<String> names = new LinkedHashSet<>();
+        for (String header : proxyHeaders.keySet()) {
+            names.add(header);
+            names.add(header.toLowerCase(Locale.ROOT));
+        }
+        return List.copyOf(names);
+    }
+
+    private static List<String> parseRemoveProxyRequestHeaders(JsonValue.JsonObject respObj) {
+        Optional<JsonValue> raw = respObj.get("removeProxyRequestHeaders");
+        if (raw.isEmpty() || !(raw.get() instanceof JsonValue.JsonArray(List<JsonValue> elements))) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>(elements.size());
+        for (JsonValue el : elements) {
+            if (el instanceof JsonValue.JsonString(String val)) {
+                out.add(val);
+            }
+        }
+        return List.copyOf(out);
+    }
+
     private static Map<String, String> parseAdditionalProxyRequestHeaders(JsonValue.JsonObject respObj) {
         Optional<JsonValue> raw = respObj.get("additionalProxyRequestHeaders");
         if (raw.isEmpty() || !(raw.get() instanceof JsonValue.JsonObject obj)) {
@@ -422,23 +616,32 @@ public final class GatewayEngine {
                 headers.put(entry.getKey(), val);
             }
         }
-        return java.util.Collections.unmodifiableMap(headers);
+        return Collections.unmodifiableMap(headers);
     }
 
     private record ManagedLiveMapping(
         Optional<String> id,
         Optional<String> service,
+        boolean fallbackRemote,
+        Optional<Integer> priority,
         Optional<String> metadataRoute,
         Optional<String> method,
         Optional<String> urlPathPattern,
         Optional<String> proxyBaseUrl,
         Optional<String> proxyUrlPrefixToRemove,
-        Map<String, String> additionalProxyRequestHeaders
+        Map<String, String> additionalProxyRequestHeaders,
+        List<String> removeProxyRequestHeaders
     ) {}
 
     static String deterministicMappingId(String projectName, String serviceName) {
         return UUID.nameUUIDFromBytes(
             ("procomp:" + projectName + ":" + serviceName).getBytes(StandardCharsets.UTF_8)
+        ).toString();
+    }
+
+    static String deterministicFallbackMappingId(String projectName) {
+        return UUID.nameUUIDFromBytes(
+            ("procomp:" + projectName + ":__" + FALLBACK_REMOTE_ROLE + "__").getBytes(StandardCharsets.UTF_8)
         ).toString();
     }
 
