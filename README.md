@@ -32,17 +32,18 @@ We are deliberately building **`procomp` as a focused CLI first** to nail the do
 
 | Command | Purpose |
 | :--- | :--- |
+| `procomp build [service...]` | Run tracked in-place `Build Run`(s) sequentially using each Service's configured `Builder` (`--force`, `--cancel`, `--timeout <sec>`, `--json`). Bare `build` builds all `LOCAL`-routed services with a `Builder`. |
 | `procomp start [service...]` | Run pre-start `Discovery` (reusing `Managed`/`Unmanaged` processes, failing fast on `Conflict`), start `Managed` local processes, and wait for `HEALTHY` (`-d` to detach). Bare `start` starts all `LOCAL`-routed services. |
 | `procomp stop [service...]` | Stop `Managed` service processes cleanly (never killing `Unmanaged` processes; leaves `Gateway` running unless `--all`). |
-| `procomp status` | Show a concise snapshot (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `PORT`, `PID`, `UPTIME`, `STALE`) plus `Gateway` summary (`--json` supported). |
-| `procomp inspect <service>` | Deep read-only `Inspection` of a service's local process (PID, command line, parent chain, RAM, health, log paths). |
+| `procomp status` | Show a concise snapshot (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `PORT`, `PID`, `UPTIME`, `STALE`) plus `Gateway` summary (`--json` supported). |
+| `procomp inspect <service>` | Deep read-only `Inspection` of a service's local process and latest `Build Run` (PID, command line, parent chain, RAM, health, build state, log paths). |
 | `procomp route [service... <local\|remote>]` | Show or update the Project's declarative `Routing Table` (never starts/stops processes or touches the `Gateway`). |
 | `procomp profile <list\|use <name>>` | List or apply named routing `Profile`s to the `Routing Table`. |
-| `procomp gateway <start\|stop\|status\|reconcile>` | Manage the local `Gateway` process and explicitly reconcile live proxy mappings to the `Routing Table`. |
-| `procomp logs <service>` | Minimal raw log reader (`-n`, `-f`, `--err`, `--path`) for `<service>.out.log` / `<service>.err.log`. |
-| `procomp ui [--port <n>] [--open]` | Start the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. |
+| `procomp gateway <start\|stop\|status\|reconcile\|logs>` | Manage the local `Gateway` process, view its logs, and explicitly reconcile live proxy mappings to the `Routing Table`. |
+| `procomp logs <service>` | Minimal raw log reader (`-n`, `-f`, `--err`, `--build`, `--path`) for `<service>.out.log` / `<service>.err.log` (or `<service>.build.out.log` / `<service>.build.err.log` with `--build`). |
+| `procomp ui [--port <n>] [--open]` | Start the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime (estate status, routing, process lifecycle, `Build` / `Cancel Build` / `Force Build` controls, inspection, and live Service/Build/Gateway logs). |
 
-*(Phase 2 will add `procomp build`, `procomp sync`, and `procomp doctor`.)*
+*(Phase 2 will add `procomp sync` and `procomp doctor`.)*
 
 ---
 

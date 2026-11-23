@@ -23,6 +23,11 @@ const state = {
   estate: null,
   profiles: [],
   configPath: '',
+  view: 'services',
+  servicesFilter: {
+    query: '',
+    localOnly: false,
+  },
   pollTimer: null,
   statusInFlightCount: 0,
   statusSeq: 0,
@@ -37,16 +42,21 @@ const state = {
   pendingProfiles: new Set(),
   drawer: {
     open: false,
-    targetType: 'service',
     service: null,
-    tab: 'inspect',
   },
   logs: {
+    targetType: null,
+    targetService: null,
     err: false,
     build: false,
     autoScroll: true,
-    lineCount: 0,
+    wrap: false,
+    sidebarQuery: '',
+    filterQuery: '',
+    entries: [],
+    matchedCount: 0,
     stream: null,
+    streamSeq: 0,
   },
   activeStarts: new Map(),
   startSeq: 0,
@@ -54,12 +64,19 @@ const state = {
 };
 
 const dom = {
+  appShell: document.getElementById('app-shell'),
   projectName: document.getElementById('project-name'),
   configPath: document.getElementById('config-path'),
+  navTabServices: document.getElementById('nav-tab-services'),
+  navTabLogs: document.getElementById('nav-tab-logs'),
+  navTabLogsTarget: document.getElementById('nav-tab-logs-target'),
   pollIndicator: document.getElementById('poll-indicator'),
   pollLabel: document.getElementById('poll-label'),
   lastUpdated: document.getElementById('last-updated'),
   btnRefresh: document.getElementById('btn-refresh'),
+
+  viewServices: document.getElementById('view-services'),
+  viewLogs: document.getElementById('view-logs'),
 
   errorBanner: document.getElementById('error-banner'),
   errorCode: document.getElementById('error-code'),
@@ -93,20 +110,23 @@ const dom = {
   btnStopManaged: document.getElementById('btn-stop-managed'),
 
   servicesSummary: document.getElementById('services-summary'),
+  servicesFilterInput: document.getElementById('services-filter-input'),
+  btnServicesLocalOnly: document.getElementById('btn-services-local-only'),
   servicesTbody: document.getElementById('services-tbody'),
 
   detailDrawer: document.getElementById('detail-drawer'),
   drawerTargetLabel: document.getElementById('drawer-target-label'),
   drawerServiceName: document.getElementById('drawer-service-name'),
-  tabInspect: document.getElementById('tab-inspect'),
-  tabLogs: document.getElementById('tab-logs'),
   btnDrawerClose: document.getElementById('btn-drawer-close'),
   panelInspect: document.getElementById('panel-inspect'),
   inspectStatusNote: document.getElementById('inspect-status-note'),
   btnInspectRefresh: document.getElementById('btn-inspect-refresh'),
   inspectContent: document.getElementById('inspect-content'),
 
-  panelLogs: document.getElementById('panel-logs'),
+  logsSidebarFilter: document.getElementById('logs-sidebar-filter'),
+  logsTargetList: document.getElementById('logs-target-list'),
+  logsTargetKind: document.getElementById('logs-target-kind'),
+  logsTargetName: document.getElementById('logs-target-name'),
   logsSourceGroup: document.getElementById('logs-source-group'),
   btnLogsSourceService: document.getElementById('btn-logs-source-service'),
   btnLogsSourceBuild: document.getElementById('btn-logs-source-build'),
@@ -114,6 +134,8 @@ const dom = {
   btnLogsStderr: document.getElementById('btn-logs-stderr'),
   logsStreamStatus: document.getElementById('logs-stream-status'),
   logsLineCount: document.getElementById('logs-line-count'),
+  logsFilterInput: document.getElementById('logs-filter-input'),
+  chkLogsWrap: document.getElementById('chk-logs-wrap'),
   chkLogsAutoscroll: document.getElementById('chk-logs-autoscroll'),
   btnLogsClear: document.getElementById('btn-logs-clear'),
   btnLogsReconnect: document.getElementById('btn-logs-reconnect'),
@@ -245,6 +267,63 @@ function syncBadgeClass(syncStatus) {
 
 function formatClockTime(date) {
   return date.toLocaleTimeString([], { hour12: false });
+}
+
+function parseOrTerms(query) {
+  const raw = (query || '').trim();
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split('|')
+    .map((term) => term.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function matchesOrQuery(text, query) {
+  const terms = parseOrTerms(query);
+  if (terms.length === 0) {
+    return true;
+  }
+  const haystack = String(text ?? '').toLowerCase();
+  return terms.some((term) => haystack.includes(term));
+}
+
+function isPriorityService(row) {
+  return (
+    row.route === 'LOCAL' ||
+    (Boolean(row.owner) && row.owner !== 'NONE') ||
+    row.buildRun?.displayState === 'RUNNING'
+  );
+}
+
+function sortServicesLocalFirst(services) {
+  return services
+    .map((row, idx) => ({ row, idx, priority: isPriorityService(row) ? 0 : 1 }))
+    .sort((a, b) => a.priority - b.priority || a.idx - b.idx)
+    .map((item) => item.row);
+}
+
+function targetDotClass(health) {
+  switch (health) {
+    case 'HEALTHY':
+      return 'target-dot-healthy';
+    case 'STARTING':
+      return 'target-dot-starting';
+    case 'CRASHED':
+      return 'target-dot-crashed';
+    default:
+      return 'target-dot-stopped';
+  }
+}
+
+function hasBuildRunLogs(displayState) {
+  return (
+    displayState === 'RUNNING' ||
+    displayState === 'SUCCEEDED' ||
+    displayState === 'FAILED' ||
+    displayState === 'UNKNOWN'
+  );
 }
 
 /* ---------- CLI Command Echo, History & Error Banner ---------- */
@@ -516,18 +595,46 @@ function renderServices() {
 
   const localCount = services.filter((s) => s.route === 'LOCAL').length;
   const healthyCount = services.filter((s) => s.health === 'HEALTHY').length;
-  dom.servicesSummary.textContent = `${services.length} total · ${localCount} LOCAL · ${healthyCount} HEALTHY`;
+
+  const sorted = sortServicesLocalFirst(services);
+  const query = state.servicesFilter.query;
+  const localOnly = state.servicesFilter.localOnly;
+  const filtered = sorted.filter((row) => {
+    if (localOnly && row.route !== 'LOCAL') {
+      return false;
+    }
+    return matchesOrQuery(row.service, query);
+  });
+
+  const isFiltered = localOnly || parseOrTerms(query).length > 0;
+  if (isFiltered) {
+    dom.servicesSummary.textContent = `${filtered.length} of ${services.length} services · ${localCount} LOCAL · ${healthyCount} HEALTHY`;
+  } else {
+    dom.servicesSummary.textContent = `${services.length} total · ${localCount} LOCAL · ${healthyCount} HEALTHY`;
+  }
+
+  dom.btnServicesLocalOnly.classList.toggle('active', localOnly);
+  dom.btnServicesLocalOnly.setAttribute('aria-pressed', String(localOnly));
 
   if (services.length === 0) {
     const tr = el('tr');
     const td = el('td', 'empty-cell', 'No Services defined in this Project.');
-    td.colSpan = 9;
+    td.colSpan = 10;
     tr.append(td);
     dom.servicesTbody.append(tr);
     return;
   }
 
-  for (const row of services) {
+  if (filtered.length === 0) {
+    const tr = el('tr');
+    const td = el('td', 'empty-cell', 'No Services match the current filter.');
+    td.colSpan = 10;
+    tr.append(td);
+    dom.servicesTbody.append(tr);
+    return;
+  }
+
+  for (const row of filtered) {
     const tr = el('tr');
     if (state.drawer.open && state.drawer.service === row.service) {
       tr.classList.add('row-selected');
@@ -591,12 +698,26 @@ function renderServices() {
 
     // BUILD
     const tdBuild = el('td');
-    const buildState = row.buildRun?.displayState || 'NO_BUILDER';
-    const buildBadge = el('span', `badge ${buildBadgeClass(buildState)}`, buildState);
-    if (row.buildRun?.reason) {
-      buildBadge.title = row.buildRun.reason;
+    const buildRunState = row.buildRun?.displayState || 'NO_BUILDER';
+    if (hasBuildRunLogs(buildRunState)) {
+      const buildBtn = el('button', `badge badge-clickable ${buildBadgeClass(buildRunState)}`, buildRunState);
+      buildBtn.type = 'button';
+      buildBtn.dataset.service = row.service;
+      buildBtn.dataset.action = 'build-logs';
+      buildBtn.title = row.buildRun?.reason
+        ? `${row.buildRun.reason} — Click to view Build logs`
+        : `View Build logs for ${row.service}`;
+      buildBtn.addEventListener('click', () =>
+        openLogsView('service', row.service, { build: true, err: false }),
+      );
+      tdBuild.append(buildBtn);
+    } else {
+      const buildBadge = el('span', `badge ${buildBadgeClass(buildRunState)}`, buildRunState);
+      if (row.buildRun?.reason) {
+        buildBadge.title = row.buildRun.reason;
+      }
+      tdBuild.append(buildBadge);
     }
-    tdBuild.append(buildBadge);
 
     // PORT, PID, UPTIME
     const tdPort = el('td', 'mono', row.port ?? '—');
@@ -617,7 +738,7 @@ function renderServices() {
     const tdActions = el('td', 'col-actions');
     const actionsWrap = el('div', 'row-actions');
 
-    if (buildState === 'RUNNING') {
+    if (buildRunState === 'RUNNING') {
       const btnCancelBuild = el('button', 'btn btn-danger btn-xs', 'Cancel Build');
       btnCancelBuild.type = 'button';
       btnCancelBuild.dataset.service = row.service;
@@ -625,7 +746,7 @@ function renderServices() {
       btnCancelBuild.title = `Cancel active Build Run for ${row.service}`;
       btnCancelBuild.addEventListener('click', () => handleCancelBuild(row.service, btnCancelBuild));
       actionsWrap.append(btnCancelBuild);
-    } else if (buildState === 'UNKNOWN') {
+    } else if (buildRunState === 'UNKNOWN') {
       const btnForceBuild = el('button', 'btn btn-secondary btn-xs', 'Force Build');
       btnForceBuild.type = 'button';
       btnForceBuild.dataset.service = row.service;
@@ -633,7 +754,7 @@ function renderServices() {
       btnForceBuild.title = `Clear UNKNOWN Build Run and rebuild ${row.service}`;
       btnForceBuild.addEventListener('click', () => handleBuildService(row.service, true, btnForceBuild));
       actionsWrap.append(btnForceBuild);
-    } else if (buildState !== 'NO_BUILDER') {
+    } else if (buildRunState !== 'NO_BUILDER') {
       const btnBuild = el('button', 'btn btn-secondary btn-xs', 'Build');
       btnBuild.type = 'button';
       btnBuild.dataset.service = row.service;
@@ -686,7 +807,7 @@ function renderServices() {
     btnInspect.dataset.service = row.service;
     btnInspect.dataset.action = 'inspect';
     btnInspect.title = `Inspect ${row.service}`;
-    btnInspect.addEventListener('click', () => openDrawer(row.service, 'inspect'));
+    btnInspect.addEventListener('click', () => openInspectDrawer(row.service));
     actionsWrap.append(btnInspect);
 
     const btnLogs = el('button', 'btn btn-secondary btn-xs', 'Logs');
@@ -694,7 +815,7 @@ function renderServices() {
     btnLogs.dataset.service = row.service;
     btnLogs.dataset.action = 'logs';
     btnLogs.title = `Stream live Logs for ${row.service}`;
-    btnLogs.addEventListener('click', () => openDrawer(row.service, 'logs'));
+    btnLogs.addEventListener('click', () => openLogsView('service', row.service, { build: false }));
     actionsWrap.append(btnLogs);
 
     tdActions.append(actionsWrap);
@@ -760,17 +881,42 @@ async function refreshStatus({ explicit = false } = {}) {
       activeEl.dataset.action
         ? { service: activeEl.dataset.service, action: activeEl.dataset.action }
         : null;
+    const sidebarFocusKey =
+      activeEl instanceof HTMLElement &&
+      dom.logsTargetList.contains(activeEl) &&
+      activeEl.dataset.targetType
+        ? { targetType: activeEl.dataset.targetType, service: activeEl.dataset.service || '' }
+        : null;
 
     renderHeader();
     renderGateway();
     renderProfiles();
     renderServices();
+    renderLogsSidebar();
+
+    if (state.view === 'logs' && !state.logs.targetType) {
+      if (ensureLogsTargetSelected()) {
+        renderViewTabs();
+        renderLogsHeader();
+        renderLogsSidebar();
+        startActiveLogStream();
+      }
+    }
 
     if (focusKey) {
       const targetBtn = Array.from(dom.servicesTbody.querySelectorAll('button')).find(
         (b) => b.dataset.service === focusKey.service && b.dataset.action === focusKey.action,
       );
       if (targetBtn && !targetBtn.disabled) {
+        targetBtn.focus({ preventScroll: true });
+      }
+    } else if (sidebarFocusKey) {
+      const targetBtn = Array.from(dom.logsTargetList.querySelectorAll('button')).find(
+        (b) =>
+          b.dataset.targetType === sidebarFocusKey.targetType &&
+          (b.dataset.service || '') === sidebarFocusKey.service,
+      );
+      if (targetBtn) {
         targetBtn.focus({ preventScroll: true });
       }
     }
@@ -932,96 +1078,233 @@ function handleGatewayAction(actionFn, triggerBtn) {
   return runAction([triggerBtn], actionFn);
 }
 
-/* ---------- Detail Drawer: Inspect & Live SSE Logs ---------- */
+/* ---------- Top-Level Views: Services & Fullscreen Logs ---------- */
 
-function openDrawer(serviceName, tab = 'inspect') {
-  const targetChanged = state.drawer.targetType !== 'service' || state.drawer.service !== serviceName;
-  state.drawer.open = true;
-  state.drawer.targetType = 'service';
-  state.drawer.service = serviceName;
-  state.drawer.tab = tab;
+function renderViewTabs() {
+  const isLogs = state.view === 'logs';
+  dom.appShell.classList.toggle('mode-logs', isLogs);
 
-  dom.drawerTargetLabel.textContent = 'Service';
-  dom.drawerServiceName.textContent = serviceName;
-  dom.tabInspect.hidden = false;
-  dom.logsSourceGroup.hidden = false;
-  dom.detailDrawer.hidden = false;
+  dom.navTabServices.classList.toggle('active', !isLogs);
+  dom.navTabServices.setAttribute('aria-selected', String(!isLogs));
+  dom.navTabLogs.classList.toggle('active', isLogs);
+  dom.navTabLogs.setAttribute('aria-selected', String(isLogs));
 
-  updateDrawerTabs();
-  renderServices();
+  dom.viewServices.hidden = isLogs;
+  dom.viewLogs.hidden = !isLogs;
 
-  if (tab === 'inspect') {
-    closeLogStream();
-    loadInspection(serviceName);
+  if (state.logs.targetType === 'gateway') {
+    dom.navTabLogsTarget.textContent = '· gateway';
+    dom.navTabLogsTarget.hidden = false;
+  } else if (state.logs.targetType === 'service' && state.logs.targetService) {
+    dom.navTabLogsTarget.textContent = `· ${state.logs.targetService}`;
+    dom.navTabLogsTarget.hidden = false;
   } else {
-    if (targetChanged || !state.logs.stream) {
-      startActiveLogStream();
+    dom.navTabLogsTarget.textContent = '';
+    dom.navTabLogsTarget.hidden = true;
+  }
+}
+
+function ensureLogsTargetSelected() {
+  const services = state.estate?.services || [];
+  const gatewayConfigured = Boolean(state.estate?.gateway?.configured);
+
+  if (state.logs.targetType === 'gateway' && gatewayConfigured) {
+    return true;
+  }
+  if (state.logs.targetType === 'service' && state.logs.targetService) {
+    if (services.length === 0 || services.some((s) => s.service === state.logs.targetService)) {
+      return true;
     }
   }
 
-  dom.detailDrawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  const sorted = sortServicesLocalFirst(services);
+  const firstPriority = sorted.find(isPriorityService);
+  if (firstPriority) {
+    state.logs.targetType = 'service';
+    state.logs.targetService = firstPriority.service;
+    return true;
+  }
+  if (gatewayConfigured) {
+    state.logs.targetType = 'gateway';
+    state.logs.targetService = null;
+    state.logs.build = false;
+    return true;
+  }
+  if (sorted.length > 0) {
+    state.logs.targetType = 'service';
+    state.logs.targetService = sorted[0].service;
+    return true;
+  }
+  return false;
 }
 
-function openGatewayLogsDrawer() {
-  const targetChanged = state.drawer.targetType !== 'gateway';
-  state.drawer.open = true;
-  state.drawer.targetType = 'gateway';
-  state.drawer.service = null;
-  state.drawer.tab = 'logs';
+function switchAppView(view) {
+  if (view !== 'services' && view !== 'logs') {
+    return;
+  }
+  if (state.view === view) {
+    return;
+  }
 
-  dom.drawerTargetLabel.textContent = 'Gateway';
-  dom.drawerServiceName.textContent = 'gateway';
-  dom.tabInspect.hidden = true;
-  dom.logsSourceGroup.hidden = true;
-  dom.detailDrawer.hidden = false;
+  if (state.view === 'logs') {
+    closeLogStream();
+  }
 
-  updateDrawerTabs();
-  renderServices();
+  state.view = view;
+  if (view === 'logs') {
+    ensureLogsTargetSelected();
+    renderViewTabs();
+    renderLogsHeader();
+    renderLogsSidebar();
+    startActiveLogStream();
+  } else {
+    renderViewTabs();
+  }
+}
 
-  if (targetChanged || !state.logs.stream) {
+function openLogsView(targetType, serviceName = null, { build = null, err = null } = {}) {
+  const prevTargetType = state.logs.targetType;
+  const prevTargetService = state.logs.targetService;
+  const prevBuild = state.logs.build;
+  const prevErr = state.logs.err;
+
+  state.logs.targetType = targetType;
+  state.logs.targetService = targetType === 'service' ? serviceName : null;
+
+  if (targetType === 'gateway') {
+    state.logs.build = false;
+  } else if (build !== null) {
+    state.logs.build = Boolean(build);
+  }
+  if (err !== null) {
+    state.logs.err = Boolean(err);
+  }
+
+  const wasLogs = state.view === 'logs';
+  state.view = 'logs';
+
+  renderViewTabs();
+  renderLogsHeader();
+  renderLogsSidebar();
+
+  const changed =
+    !wasLogs ||
+    prevTargetType !== state.logs.targetType ||
+    prevTargetService !== state.logs.targetService ||
+    prevBuild !== state.logs.build ||
+    prevErr !== state.logs.err ||
+    !state.logs.stream;
+
+  if (changed) {
     startActiveLogStream();
   }
+}
+
+function renderLogsHeader() {
+  const isGateway = state.logs.targetType === 'gateway';
+  dom.logsTargetKind.textContent = isGateway ? 'Gateway' : 'Service';
+  dom.logsTargetName.textContent = isGateway ? 'gateway' : (state.logs.targetService || '—');
+  dom.logsSourceGroup.hidden = isGateway;
+
+  dom.btnLogsSourceService.classList.toggle('active', !state.logs.build);
+  dom.btnLogsSourceService.setAttribute('aria-pressed', String(!state.logs.build));
+  dom.btnLogsSourceBuild.classList.toggle('active', state.logs.build);
+  dom.btnLogsSourceBuild.setAttribute('aria-pressed', String(state.logs.build));
+  dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
+  dom.btnLogsStdout.setAttribute('aria-pressed', String(!state.logs.err));
+  dom.btnLogsStderr.classList.toggle('active', state.logs.err);
+  dom.btnLogsStderr.setAttribute('aria-pressed', String(state.logs.err));
+}
+
+function renderLogsSidebar() {
+  dom.logsTargetList.replaceChildren();
+  const query = state.logs.sidebarQuery;
+  const gw = state.estate?.gateway;
+  const services = sortServicesLocalFirst(state.estate?.services || []);
+
+  let itemCount = 0;
+
+  if (gw && gw.configured && matchesOrQuery('gateway', query)) {
+    const isActive = state.logs.targetType === 'gateway';
+    const item = el('button', `logs-target-item${isActive ? ' active' : ''}`);
+    item.type = 'button';
+    if (isActive) {
+      item.setAttribute('aria-current', 'true');
+    }
+    item.dataset.targetType = 'gateway';
+
+    const left = el('span', 'logs-target-item-left');
+    left.append(
+      el('span', `target-dot ${targetDotClass(gw.health)}`),
+      el('span', 'logs-target-item-name', 'gateway'),
+    );
+    item.append(left);
+    item.addEventListener('click', () => openLogsView('gateway', null));
+    dom.logsTargetList.append(item);
+    itemCount += 1;
+  }
+
+  const filteredServices = services.filter((row) => matchesOrQuery(row.service, query));
+  if (filteredServices.length > 0 && gw && gw.configured) {
+    dom.logsTargetList.append(el('div', 'logs-target-group-label', 'Services'));
+  }
+
+  for (const row of filteredServices) {
+    const isActive = state.logs.targetType === 'service' && state.logs.targetService === row.service;
+    const item = el('button', `logs-target-item${isActive ? ' active' : ''}`);
+    item.type = 'button';
+    if (isActive) {
+      item.setAttribute('aria-current', 'true');
+    }
+    item.dataset.targetType = 'service';
+    item.dataset.service = row.service;
+
+    const left = el('span', 'logs-target-item-left');
+    left.append(
+      el('span', `target-dot ${targetDotClass(row.health)}`),
+      el('span', 'logs-target-item-name', row.service),
+    );
+    item.append(left);
+
+    if (row.buildRun?.displayState === 'RUNNING') {
+      item.append(el('span', 'logs-target-tag logs-target-tag-building', 'BUILD'));
+    } else if (row.route === 'LOCAL') {
+      item.append(el('span', 'logs-target-tag logs-target-tag-local', 'LOCAL'));
+    }
+
+    item.addEventListener('click', () => openLogsView('service', row.service));
+    dom.logsTargetList.append(item);
+    itemCount += 1;
+  }
+
+  if (itemCount === 0) {
+    dom.logsTargetList.append(
+      el('div', 'logs-sidebar-empty', query.trim() ? 'No matching targets.' : 'No targets available.'),
+    );
+  }
+}
+
+/* ---------- Detail Drawer: Inspect ---------- */
+
+function openInspectDrawer(serviceName) {
+  state.drawer.open = true;
+  state.drawer.service = serviceName;
+
+  dom.drawerTargetLabel.textContent = 'Inspect';
+  dom.drawerServiceName.textContent = serviceName;
+  dom.detailDrawer.hidden = false;
+
+  renderServices();
+  loadInspection(serviceName);
 
   dom.detailDrawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function closeDrawer() {
-  closeLogStream();
   state.drawer.open = false;
-  state.drawer.targetType = 'service';
   state.drawer.service = null;
   dom.detailDrawer.hidden = true;
   renderServices();
-}
-
-function switchDrawerTab(tab) {
-  if (!state.drawer.open) {
-    return;
-  }
-  if (state.drawer.targetType === 'gateway' && tab === 'inspect') {
-    return;
-  }
-  if (state.drawer.targetType === 'service' && !state.drawer.service) {
-    return;
-  }
-  state.drawer.tab = tab;
-  updateDrawerTabs();
-  if (tab === 'inspect') {
-    closeLogStream();
-    loadInspection(state.drawer.service);
-  } else {
-    startActiveLogStream();
-  }
-}
-
-function updateDrawerTabs() {
-  const isInspect = state.drawer.tab === 'inspect';
-  dom.tabInspect.classList.toggle('active', isInspect);
-  dom.tabInspect.setAttribute('aria-selected', String(isInspect));
-  dom.tabLogs.classList.toggle('active', !isInspect);
-  dom.tabLogs.setAttribute('aria-selected', String(!isInspect));
-  dom.panelInspect.hidden = !isInspect;
-  dom.panelLogs.hidden = isInspect;
 }
 
 async function loadInspection(serviceName) {
@@ -1148,36 +1431,98 @@ function setLogsStreamBadge(text, badgeClass) {
   dom.logsStreamStatus.className = `badge ${badgeClass}`;
 }
 
+function hasActiveLogFilter() {
+  return parseOrTerms(state.logs.filterQuery).length > 0;
+}
+
+function updateLogsLineCount() {
+  const total = state.logs.entries.length;
+  if (hasActiveLogFilter()) {
+    dom.logsLineCount.textContent = `${state.logs.matchedCount} / ${total} ${total === 1 ? 'line' : 'lines'}`;
+  } else {
+    dom.logsLineCount.textContent = `${total} ${total === 1 ? 'line' : 'lines'}`;
+  }
+}
+
 function clearLogsOutput() {
-  state.logs.lineCount = 0;
-  dom.logsLineCount.textContent = '0 lines';
+  state.logs.entries = [];
+  state.logs.matchedCount = 0;
+  updateLogsLineCount();
   dom.logsOutput.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
 }
 
-function appendLogLine(line, isStderr) {
-  if (state.logs.lineCount === 0) {
-    dom.logsOutput.replaceChildren();
-  }
-  const lineEl = el('div', isStderr ? 'log-line log-line-err' : 'log-line', line);
-  dom.logsOutput.append(lineEl);
-  state.logs.lineCount += 1;
+function renderFilteredLogs() {
+  const query = state.logs.filterQuery;
+  const total = state.logs.entries.length;
 
-  while (dom.logsOutput.childElementCount > MAX_LOG_LINES) {
-    dom.logsOutput.firstElementChild.remove();
+  if (total === 0) {
+    state.logs.matchedCount = 0;
+    updateLogsLineCount();
+    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
+    return;
   }
 
-  dom.logsLineCount.textContent = `${state.logs.lineCount} ${state.logs.lineCount === 1 ? 'line' : 'lines'}`;
+  const fragment = document.createDocumentFragment();
+  let matched = 0;
+  for (const entry of state.logs.entries) {
+    if (matchesOrQuery(entry.line, query)) {
+      fragment.append(el('div', entry.stderr ? 'log-line log-line-err' : 'log-line', entry.line));
+      matched += 1;
+    }
+  }
+
+  state.logs.matchedCount = matched;
+  updateLogsLineCount();
+
+  if (matched === 0) {
+    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+  } else {
+    dom.logsOutput.replaceChildren(fragment);
+  }
 
   if (state.logs.autoScroll) {
     dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
   }
 }
 
+function appendLogLine(line, isStderr) {
+  const entry = { line, stderr: isStderr };
+  state.logs.entries.push(entry);
+
+  if (state.logs.entries.length > MAX_LOG_LINES) {
+    const evicted = state.logs.entries.shift();
+    if (evicted && matchesOrQuery(evicted.line, state.logs.filterQuery) && state.logs.matchedCount > 0) {
+      if (dom.logsOutput.firstElementChild) {
+        dom.logsOutput.firstElementChild.remove();
+      }
+      state.logs.matchedCount = Math.max(0, state.logs.matchedCount - 1);
+    }
+  }
+
+  if (matchesOrQuery(line, state.logs.filterQuery)) {
+    if (state.logs.matchedCount === 0) {
+      dom.logsOutput.replaceChildren();
+    }
+    dom.logsOutput.append(el('div', isStderr ? 'log-line log-line-err' : 'log-line', line));
+    state.logs.matchedCount += 1;
+
+    if (state.logs.autoScroll) {
+      dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
+    }
+  } else if (state.logs.matchedCount === 0) {
+    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+  }
+
+  updateLogsLineCount();
+}
+
 function closeLogStream() {
+  state.logs.streamSeq += 1;
   if (state.logs.stream) {
     state.logs.stream.close();
     state.logs.stream = null;
   }
+  dom.btnLogsReconnect.hidden = true;
   setLogsStreamBadge('Disconnected', 'badge-neutral');
 }
 
@@ -1205,17 +1550,15 @@ function handleCancelBuild(serviceName, button) {
 }
 
 function startActiveLogStream() {
-  if (!state.drawer.open || state.drawer.tab !== 'logs') {
+  if (state.view !== 'logs' || !state.logs.targetType) {
     return;
   }
   closeLogStream();
+  const seq = ++state.logs.streamSeq;
   clearLogsOutput();
+  renderLogsHeader();
+  dom.btnLogsReconnect.hidden = true;
   setLogsStreamBadge('Connecting…', 'badge-starting');
-
-  dom.btnLogsSourceService.classList.toggle('active', !state.logs.build);
-  dom.btnLogsSourceBuild.classList.toggle('active', state.logs.build);
-  dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
-  dom.btnLogsStderr.classList.toggle('active', state.logs.err);
 
   let logHistoryEntry = null;
   const handlers = {
@@ -1223,10 +1566,16 @@ function startActiveLogStream() {
     err: state.logs.err,
     build: state.logs.build,
     onOpen() {
+      if (seq !== state.logs.streamSeq) {
+        return;
+      }
       dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
     },
     onMeta(payload) {
+      if (seq !== state.logs.streamSeq) {
+        return;
+      }
       if (payload.cliCommand) {
         logHistoryEntry = setCliCommand(payload.cliCommand, { explicit: true });
       }
@@ -1234,9 +1583,15 @@ function startActiveLogStream() {
       setLogsStreamBadge('Streaming', 'badge-healthy');
     },
     onLog(payload) {
+      if (seq !== state.logs.streamSeq) {
+        return;
+      }
       appendLogLine(payload.line ?? '', Boolean(payload.stderr));
     },
     onError(err) {
+      if (seq !== state.logs.streamSeq) {
+        return;
+      }
       state.logs.stream = null;
       dom.btnLogsReconnect.hidden = false;
       if (err) {
@@ -1254,10 +1609,10 @@ function startActiveLogStream() {
     },
   };
 
-  if (state.drawer.targetType === 'gateway') {
+  if (state.logs.targetType === 'gateway') {
     state.logs.stream = streamGatewayLogs(handlers);
-  } else if (state.drawer.service) {
-    state.logs.stream = streamServiceLogs(state.drawer.service, handlers);
+  } else if (state.logs.targetService) {
+    state.logs.stream = streamServiceLogs(state.logs.targetService, handlers);
   }
 }
 
@@ -1389,7 +1744,101 @@ function closeAllStreams() {
   state.activeStarts.clear();
 }
 
+function isEditableTarget(target) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  const tag = target.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') {
+    return true;
+  }
+  if (tag === 'INPUT') {
+    const type = (target.getAttribute('type') || 'text').toLowerCase();
+    return type !== 'checkbox' && type !== 'radio' && type !== 'button' && type !== 'submit' && type !== 'reset';
+  }
+  return false;
+}
+
+function handleGlobalKeydown(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return;
+  }
+  if (dom.conflictDialog.open) {
+    return;
+  }
+
+  const target = event.target;
+  if (isEditableTarget(target)) {
+    if (event.key === 'Escape') {
+      if (target === dom.servicesFilterInput) {
+        if (dom.servicesFilterInput.value) {
+          dom.servicesFilterInput.value = '';
+          state.servicesFilter.query = '';
+          renderServices();
+        } else {
+          dom.servicesFilterInput.blur();
+        }
+        event.preventDefault();
+      } else if (target === dom.logsSidebarFilter) {
+        if (dom.logsSidebarFilter.value) {
+          dom.logsSidebarFilter.value = '';
+          state.logs.sidebarQuery = '';
+          renderLogsSidebar();
+        } else {
+          dom.logsSidebarFilter.blur();
+        }
+        event.preventDefault();
+      } else if (target === dom.logsFilterInput) {
+        if (dom.logsFilterInput.value) {
+          dom.logsFilterInput.value = '';
+          state.logs.filterQuery = '';
+          renderFilteredLogs();
+        } else {
+          dom.logsFilterInput.blur();
+        }
+        event.preventDefault();
+      }
+    }
+    return;
+  }
+
+  if (event.key === '1') {
+    event.preventDefault();
+    switchAppView('services');
+  } else if (event.key === '2') {
+    event.preventDefault();
+    switchAppView('logs');
+  } else if (event.key === '/') {
+    event.preventDefault();
+    const input = state.view === 'logs' ? dom.logsFilterInput : dom.servicesFilterInput;
+    input.focus();
+    input.select();
+  } else if (event.key === 'Escape') {
+    if (state.view === 'logs') {
+      if (state.logs.filterQuery) {
+        dom.logsFilterInput.value = '';
+        state.logs.filterQuery = '';
+        renderFilteredLogs();
+      } else {
+        switchAppView('services');
+      }
+    } else if (state.servicesFilter.query) {
+      dom.servicesFilterInput.value = '';
+      state.servicesFilter.query = '';
+      renderServices();
+    } else if (state.drawer.open) {
+      closeDrawer();
+    }
+  }
+}
+
 function init() {
+  dom.navTabServices.addEventListener('click', () => switchAppView('services'));
+  dom.navTabLogs.addEventListener('click', () => switchAppView('logs'));
+
   dom.btnRefresh.addEventListener('click', () => refreshStatus({ explicit: true }));
   dom.btnDismissError.addEventListener('click', clearError);
 
@@ -1405,18 +1854,41 @@ function init() {
   dom.btnGatewayStop.addEventListener('click', () =>
     handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
   );
-  dom.btnGatewayLogs.addEventListener('click', () => openGatewayLogsDrawer());
+  dom.btnGatewayLogs.addEventListener('click', () => openLogsView('gateway', null));
 
   dom.btnStartLocal.addEventListener('click', () => handleStartServices([]));
   dom.btnStopManaged.addEventListener('click', () => handleStopServices([], dom.btnStopManaged));
 
-  dom.tabInspect.addEventListener('click', () => switchDrawerTab('inspect'));
-  dom.tabLogs.addEventListener('click', () => switchDrawerTab('logs'));
+  dom.servicesFilterInput.addEventListener('input', () => {
+    state.servicesFilter.query = dom.servicesFilterInput.value;
+    renderServices();
+  });
+
+  dom.btnServicesLocalOnly.addEventListener('click', () => {
+    state.servicesFilter.localOnly = !state.servicesFilter.localOnly;
+    renderServices();
+  });
+
   dom.btnDrawerClose.addEventListener('click', closeDrawer);
   dom.btnInspectRefresh.addEventListener('click', () => {
     if (state.drawer.service) {
       loadInspection(state.drawer.service);
     }
+  });
+
+  dom.logsSidebarFilter.addEventListener('input', () => {
+    state.logs.sidebarQuery = dom.logsSidebarFilter.value;
+    renderLogsSidebar();
+  });
+
+  dom.logsFilterInput.addEventListener('input', () => {
+    state.logs.filterQuery = dom.logsFilterInput.value;
+    renderFilteredLogs();
+  });
+
+  dom.chkLogsWrap.addEventListener('change', () => {
+    state.logs.wrap = dom.chkLogsWrap.checked;
+    dom.logsOutput.classList.toggle('no-wrap', !state.logs.wrap);
   });
 
   dom.btnLogsSourceService.addEventListener('click', () => {
@@ -1487,6 +1959,8 @@ function init() {
     state.conflictService = null;
   });
 
+  document.addEventListener('keydown', handleGlobalKeydown);
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       refreshStatus({ explicit: false });
@@ -1500,6 +1974,7 @@ function init() {
   window.addEventListener('pagehide', closeAllStreams);
   window.addEventListener('beforeunload', closeAllStreams);
 
+  renderViewTabs();
   renderCliHistory();
   refreshStatus({ explicit: false });
   startPolling();

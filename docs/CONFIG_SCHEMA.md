@@ -23,6 +23,7 @@
     { "path": ".env.local", "optional": true }
   ],
   "defaults": {
+    "builder": "gradle",
     "proxyPathTemplate": "/{{service}}",
     "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
     "vars": {
@@ -31,6 +32,11 @@
     "env": {
       "SPRING_PROFILES_ACTIVE": "local",
       "DB_PASSWORD": "${env:ACME_DB_PASSWORD}"
+    }
+  },
+  "builders": {
+    "gradle": {
+      "command": ["./gradlew", ":{{subproject}}:bootJar"]
     }
   },
   "runtimes": {
@@ -93,7 +99,7 @@
 
 ## 3. Commands (`argv` Arrays) & Template Variables
 
-All launch commands (`runtimes.<name>.command` and `gateway.command`) are **structured `argv` arrays** executed directly without a shell wrapper.
+All commands (`builders.<name>.command`, `runtimes.<name>.command`, and `gateway.command`) are **structured `argv` arrays** executed directly without a shell wrapper.
 
 ### Built-In Template Variables (`{{var}}`)
 
@@ -182,5 +188,5 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `proxyPath` | `string` | No | Gateway path prefix (defaults to `defaults.proxyPathTemplate` or `"/{{service}}"`). |
 | `remoteUrl` | `string` | No | Upstream URL when routed `REMOTE` (defaults to `defaults.remoteUrlTemplate`). |
 | `vars` | `map<string, string \| string[]>` | No | Custom template variables (merged over `defaults.vars`). |
-| `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env`). |
+| `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env` for runtimes and `builder.env` for builds). |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Additional service-specific `.env` files. |

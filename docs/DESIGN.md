@@ -23,10 +23,10 @@ See [GLOSSARY.md](../GLOSSARY.md) for exact definitions.
 Project
  ├── Repositories[] (optional Git checkouts; 1 Repository → 1..N Services)
  ├── Services[]
- │    ├── Config (identity, optional Repository, runtime, localport, proxyPath, remoteUrl)
+ │    ├── Config (identity, optional Repository, optional Builder, runtime, localport, proxyPath, remoteUrl)
  │    ├── Route (LOCAL | REMOTE — stored in Routing Table; defaults to REMOTE)
  │    ├── Process? (0..1 active local Process: Managed | Unmanaged | Conflict)
- │    └── Build Runs[] (tracked build executions — Phase 2)
+ │    └── Build Runs[] (tracked build executions)
  ├── Profiles[] (named Route presets)
  └── Gateway (local reverse-proxy router, optionally backed by its own Process)
 ```
@@ -127,6 +127,12 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp gateway reconcile` | Converges the live `Gateway` mappings to match the Project's `Routing Table`. |
 | `procomp gateway logs` | Minimal raw log reader for `gateway.out.log` (or `gateway.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. |
 
+### Web UI
+
+| Command | Behavior |
+| :--- | :--- |
+| `procomp ui [--port <n>] [--open]` | Starts the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. Displays the estate table (including `BUILD` display state), per-Service `Build` / `Cancel Build` / `Force Build` controls (for configured `Builder`s), `Build Run` details in the Inspect drawer, and a `Service` / `Build` source toggle in the live SSE Logs drawer, echoing verbatim `procomp` CLI commands on every action. |
+
 ---
 
 ## 6. Explicitly Deferred (Post-v1)
@@ -136,7 +142,7 @@ The following areas are intentionally deferred until v1 core functionality is so
 - **Implementation language & runtime selection** (to be chosen next).
 - **Scaling & performance optimizations:** Batch OS snapshots, parallel worker pools, WireMock batch-import tuning, etc.
 - **Rich log viewing:** JSON normalization, `logMapping`, multi-service chronological merging, level filtering, stack-trace folding (to be designed in a dedicated session).
-- **Phase 2 commands:** `procomp build` (tracked `Build Run`s + auto-build options), `procomp sync` (safe Git updates and explicit-demand `Repository` cloning — never auto-cloning), and `procomp doctor` (preflight checks).
+- **Phase 2 commands:** auto-build options (e.g., `procomp start --build`), `procomp sync` (safe Git updates and explicit-demand `Repository` cloning — never auto-cloning), and `procomp doctor` (preflight checks).
 - **Rich `inspect` diagnostics:** Runtime-specific diagnostics (e.g., JVM JFR, Prometheus metrics).
 - **Gateway auto-reconciliation:** Having the `Gateway` watch/poll the `Routing Table` for changes rather than coupling `route` to `gateway`.
 - **Supervisor / interactive mode:** A `tmux`-style per-project supervisor and optional TUI layered on top of the CLI.
