@@ -80,11 +80,13 @@ record RawProjectConfig(
         Optional<String> healthPath,
         List<String> command,
         Optional<String> workingDir,
-        Map<String, String> env
+        Map<String, String> env,
+        Map<String, String> proxyHeaders
     ) {
         RawGatewayConfig {
             command = List.copyOf(command);
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
+            proxyHeaders = Collections.unmodifiableMap(new LinkedHashMap<>(proxyHeaders));
         }
     }
 

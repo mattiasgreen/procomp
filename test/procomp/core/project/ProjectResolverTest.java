@@ -852,6 +852,54 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testResolvesGatewayProxyHeadersWithUserAndHostEnv() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "proxyHeaders": {
+                  "USERNAME": "{{user}}",
+                  "X-TEAM": "${env:ACME_TEAM}"
+                }
+              },
+              "services": {
+                "orders": { "port": 9001, "runtime": "java", "workingDir": "." }
+              }
+            }
+            """;
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of("ACME_TEAM", "checkout"), Optional.of("mattias")),
+            "resolve gateway proxyHeaders"
+        );
+        GatewayDefinition gw = project.gateway().orElseThrow();
+        Assert.assertEquals(
+            Map.of("USERNAME", "mattias", "X-TEAM", "checkout"),
+            gw.proxyHeaders(),
+            "resolved proxyHeaders"
+        );
+
+        // Fails fast when {{user}} is unavailable
+        DomainError missingUser = Assert.assertErr(
+            ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of("ACME_TEAM", "checkout"), Optional.empty()),
+            "missing user must fail fast"
+        );
+        Assert.assertEquals("CONFIG_UNDEFINED_TEMPLATE_VAR", missingUser.code(), "missing {{user}} code");
+
+        // Fails fast when header name is blank
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"gateway":{"type":"wiremock","port":8080,"proxyHeaders":{" ":"x"}}}
+            """,
+            "CONFIG_INVALID_VALUE"
+        );
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),

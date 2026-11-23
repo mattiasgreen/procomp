@@ -4,6 +4,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
+import procomp.core.project.GatewayDefinition;
 import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
@@ -37,6 +38,10 @@ public final class GatewayEngine {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(routing, "routing must not be null");
 
+        Map<String, String> localProxyHeaders = project.gateway()
+            .map(GatewayDefinition::proxyHeaders)
+            .orElse(Map.of());
+
         List<WireMockMapping> mappings = new ArrayList<>(project.services().size());
         for (ServiceDefinition service : project.services().values()) {
             Route route = routing.routeOf(service.name()).orElse(Route.REMOTE);
@@ -48,6 +53,7 @@ public final class GatewayEngine {
             String prefix = normalizePrefix(service.proxyPath());
             String urlPathPattern = toUrlPathPattern(prefix);
             Optional<String> prefixToRemove = "/".equals(prefix) ? Optional.empty() : Optional.of(prefix);
+            Map<String, String> headers = route == Route.LOCAL ? localProxyHeaders : Map.of();
 
             mappings.add(new WireMockMapping(
                 deterministicMappingId(project.name(), service.name()),
@@ -58,7 +64,8 @@ public final class GatewayEngine {
                 route,
                 urlPathPattern,
                 targetUrl,
-                prefixToRemove
+                prefixToRemove,
+                headers
             ));
         }
         return Result.ok(new GatewayPlan(project.name(), mappings));
@@ -77,6 +84,13 @@ public final class GatewayEngine {
         Map<String, JsonValue> response = new LinkedHashMap<>();
         response.put("proxyBaseUrl", Json.str(mapping.targetUrl()));
         mapping.proxyUrlPrefixToRemove().ifPresent(p -> response.put("proxyUrlPrefixToRemove", Json.str(p)));
+        if (!mapping.additionalProxyRequestHeaders().isEmpty()) {
+            Map<String, JsonValue> headerNodes = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : mapping.additionalProxyRequestHeaders().entrySet()) {
+                headerNodes.put(entry.getKey(), Json.str(entry.getValue()));
+            }
+            response.put("additionalProxyRequestHeaders", Json.obj(headerNodes));
+        }
 
         Map<String, JsonValue> metadata = new LinkedHashMap<>();
         metadata.put("procomp", Json.bool(true));
@@ -177,12 +191,16 @@ public final class GatewayEngine {
             }
         }
 
+        Map<String, String> localProxyHeaders = project.gateway()
+            .map(GatewayDefinition::proxyHeaders)
+            .orElse(Map.of());
+
         List<RouteDrift> drifted = new ArrayList<>();
         Map<String, String> liveRoutes = new LinkedHashMap<>();
         for (WireMockMapping desired : plan.mappings()) {
             ServiceDefinition svc = project.service(desired.service()).orElseThrow();
             List<ManagedLiveMapping> actuals = byService.getOrDefault(desired.service(), List.of());
-            String liveState = classifyServiceLiveState(svc, desired, actuals);
+            String liveState = classifyServiceLiveState(svc, desired, actuals, localProxyHeaders);
             liveRoutes.put(desired.service(), liveState);
             if (!desired.route().name().equals(liveState)) {
                 drifted.add(new RouteDrift(desired.service(), desired.route(), liveState));
@@ -198,7 +216,8 @@ public final class GatewayEngine {
     private static String classifyServiceLiveState(
         ServiceDefinition svc,
         WireMockMapping desired,
-        List<ManagedLiveMapping> actuals
+        List<ManagedLiveMapping> actuals,
+        Map<String, String> localProxyHeaders
     ) {
         if (actuals.isEmpty()) {
             return "UNSET";
@@ -212,11 +231,13 @@ public final class GatewayEngine {
             desired.urlPathPattern(),
             desired.targetUrl(),
             desired.proxyUrlPrefixToRemove(),
-            desired.route()
+            desired.route(),
+            desired.additionalProxyRequestHeaders()
         )) {
             return desired.route().name();
         }
         Route alternate = desired.route() == Route.LOCAL ? Route.REMOTE : Route.LOCAL;
+        Map<String, String> altHeaders = alternate == Route.LOCAL ? localProxyHeaders : Map.of();
         Result<String, DomainError> altTargetRes = resolveTargetUrl(svc, alternate);
         if (altTargetRes instanceof Result.Ok<String, DomainError>(String altTarget)
             && matchesMappingSpec(
@@ -224,7 +245,8 @@ public final class GatewayEngine {
                 desired.urlPathPattern(),
                 altTarget,
                 desired.proxyUrlPrefixToRemove(),
-                alternate
+                alternate,
+                altHeaders
             )) {
             return alternate.name();
         }
@@ -236,7 +258,8 @@ public final class GatewayEngine {
         String expectedUrlPathPattern,
         String expectedTargetUrl,
         Optional<String> expectedPrefixToRemove,
-        Route expectedRoute
+        Route expectedRoute,
+        Map<String, String> expectedHeaders
     ) {
         if (actual.method().isPresent() && !"ANY".equalsIgnoreCase(actual.method().get())) {
             return false;
@@ -251,6 +274,9 @@ public final class GatewayEngine {
             return false;
         }
         if (actual.metadataRoute().isPresent() && !expectedRoute.name().equalsIgnoreCase(actual.metadataRoute().get())) {
+            return false;
+        }
+        if (!expectedHeaders.equals(actual.additionalProxyRequestHeaders())) {
             return false;
         }
         return true;
@@ -328,6 +354,9 @@ public final class GatewayEngine {
                 .map(GatewayEngine::normalizeTargetUrl);
             Optional<String> proxyUrlPrefixToRemove = respObj.flatMap(r -> nonBlankString(r, "proxyUrlPrefixToRemove"))
                 .map(GatewayEngine::normalizePrefix);
+            Map<String, String> additionalHeaders = respObj
+                .map(GatewayEngine::parseAdditionalProxyRequestHeaders)
+                .orElse(Map.of());
 
             out.add(new ManagedLiveMapping(
                 id,
@@ -336,7 +365,8 @@ public final class GatewayEngine {
                 method,
                 urlPathPattern,
                 proxyBaseUrl,
-                proxyUrlPrefixToRemove
+                proxyUrlPrefixToRemove,
+                additionalHeaders
             ));
         }
         return Result.ok(out);
@@ -383,6 +413,20 @@ public final class GatewayEngine {
         }
     }
 
+    private static Map<String, String> parseAdditionalProxyRequestHeaders(JsonValue.JsonObject respObj) {
+        Optional<JsonValue> raw = respObj.get("additionalProxyRequestHeaders");
+        if (raw.isEmpty() || !(raw.get() instanceof JsonValue.JsonObject obj)) {
+            return Map.of();
+        }
+        Map<String, String> headers = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonValue> entry : obj.fields().entrySet()) {
+            if (entry.getValue() instanceof JsonValue.JsonString(String val)) {
+                headers.put(entry.getKey(), val);
+            }
+        }
+        return java.util.Collections.unmodifiableMap(headers);
+    }
+
     private record ManagedLiveMapping(
         Optional<String> id,
         Optional<String> service,
@@ -390,7 +434,8 @@ public final class GatewayEngine {
         Optional<String> method,
         Optional<String> urlPathPattern,
         Optional<String> proxyBaseUrl,
-        Optional<String> proxyUrlPrefixToRemove
+        Optional<String> proxyUrlPrefixToRemove,
+        Map<String, String> additionalProxyRequestHeaders
     ) {}
 
     static String deterministicMappingId(String projectName, String serviceName) {

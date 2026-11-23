@@ -42,6 +42,7 @@ public final class ProjectResolver {
         Path configPath,
         Path configDir,
         Optional<Path> repositoriesRoot,
+        Optional<String> currentUser,
         RawProjectConfig rawConfig,
         Map<String, VarValue> expandedDefaultsVars,
         List<EnvFileTarget> topEnvFiles,
@@ -64,6 +65,17 @@ public final class ProjectResolver {
         FileLookup fileLookup,
         Map<String, String> hostEnv
     ) {
+        return resolve(configPath, rawConfigJson, fileLookup, hostEnv, Optional.empty());
+    }
+
+    public static Result<Project, DomainError> resolve(
+        Path configPath,
+        String rawConfigJson,
+        FileLookup fileLookup,
+        Map<String, String> hostEnv,
+        Optional<String> currentUser
+    ) {
+        Objects.requireNonNull(currentUser, "currentUser must not be null");
         Result<RawProjectConfig, DomainError> rawCfgRes = ProjectConfigParser.parse(rawConfigJson);
         if (rawCfgRes.isErr()) {
             return rawCfgRes.castError();
@@ -83,7 +95,7 @@ public final class ProjectResolver {
         }
 
         Result<ResolutionPlan, DomainError> planRes =
-            planResolution(normalizedConfigPath, configDir, rawConfig, okVal(catalogRes), hostEnv);
+            planResolution(normalizedConfigPath, configDir, rawConfig, okVal(catalogRes), hostEnv, currentUser);
         if (planRes.isErr()) {
             return planRes.castError();
         }
@@ -153,7 +165,8 @@ public final class ProjectResolver {
         Path configDir,
         RawProjectConfig rawConfig,
         Map<String, RawProjectConfig.RawServiceConfig> catalogServices,
-        Map<String, String> hostEnv
+        Map<String, String> hostEnv,
+        Optional<String> currentUser
     ) {
         Result<Optional<Path>, DomainError> reposRootRes = resolveRepositoriesRoot(configDir, rawConfig);
         if (reposRootRes.isErr()) return reposRootRes.castError();
@@ -167,6 +180,7 @@ public final class ProjectResolver {
         Map<String, VarValue> baseVars = new LinkedHashMap<>(expandedDefaultsVars);
         baseVars.put("configDir", new VarValue.Scalar(configDir.toString()));
         reposRoot.ifPresent(p -> baseVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        currentUser.filter(s -> !s.isBlank()).ifPresent(u -> baseVars.put("user", new VarValue.Scalar(u)));
 
         List<EnvFileTarget> topEnvTargets = new ArrayList<>();
         for (int i = 0; i < rawConfig.envFiles().size(); i++) {
@@ -211,6 +225,7 @@ public final class ProjectResolver {
             effectiveVars.putAll(okVal(svcVarsRes));
             effectiveVars.put("configDir", new VarValue.Scalar(configDir.toString()));
             reposRoot.ifPresent(p -> effectiveVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+            currentUser.filter(s -> !s.isBlank()).ifPresent(u -> effectiveVars.put("user", new VarValue.Scalar(u)));
             effectiveVars.put("service", new VarValue.Scalar(svcName));
             svc.port().ifPresent(p -> effectiveVars.put("port", new VarValue.Scalar(Integer.toString(p))));
 
@@ -240,7 +255,7 @@ public final class ProjectResolver {
         }
 
         return Result.ok(new ResolutionPlan(
-            normalizedConfigPath, configDir, reposRoot, rawConfig, expandedDefaultsVars, topEnvTargets, drafts
+            normalizedConfigPath, configDir, reposRoot, currentUser, rawConfig, expandedDefaultsVars, topEnvTargets, drafts
         ));
     }
 
@@ -596,6 +611,7 @@ public final class ProjectResolver {
         Map<String, VarValue> gwVars = new LinkedHashMap<>(plan.expandedDefaultsVars());
         gwVars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
         plan.repositoriesRoot().ifPresent(p -> gwVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> gwVars.put("user", new VarValue.Scalar(u)));
         gwVars.put("port", new VarValue.Scalar(Integer.toString(gw.port())));
 
         Result<List<String>, DomainError> hostExpandedGwCmd = expandHostEnvInArgv(
@@ -637,13 +653,24 @@ public final class ProjectResolver {
             gwEnv.put(entry.getKey(), okVal(hostExpanded));
         }
 
+        Map<String, String> resolvedProxyHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : gw.proxyHeaders().entrySet()) {
+            String ctx = "gateway.proxyHeaders." + entry.getKey();
+            Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(entry.getValue(), gwVars, Set.of(), ctx);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
+            Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, ctx);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
+            resolvedProxyHeaders.put(entry.getKey(), okVal(hostExpanded));
+        }
+
         return Result.ok(Optional.of(new GatewayDefinition(
             gw.type(),
             gw.port(),
             normalizeHealthPath(okVal(healthRes)),
             okVal(cmdRes),
             workingDir,
-            SecretEnv.of(gwEnv)
+            SecretEnv.of(gwEnv),
+            resolvedProxyHeaders
         )));
     }
 
@@ -840,6 +867,7 @@ public final class ProjectResolver {
         }
         vars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
         plan.repositoriesRoot().ifPresent(p -> vars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> vars.put("user", new VarValue.Scalar(u)));
         vars.put("service", new VarValue.Scalar("service"));
         vars.put("port", new VarValue.Scalar("0"));
         vars.put("repository", new VarValue.Scalar(plan.configDir().toString()));
