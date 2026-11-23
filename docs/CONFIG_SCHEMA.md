@@ -157,7 +157,8 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `command` | `string[]` | No | Launch `argv` array (required only if `procomp gateway start` launches a `Managed` `Gateway`). |
 | `workingDir` | `string` | No | Working directory for a `Managed` `Gateway`. |
 | `env` | `map<string, string>` | No | Environment variables for a `Managed` `Gateway`. |
-| `proxyHeaders` | `map<string, string>` | No | Extra HTTP request headers injected onto all proxied requests (`LOCAL` and `REMOTE`, via WireMock `additionalProxyRequestHeaders`). Supports `{{var}}` (including `{{user}}`) and `${env:VAR}` expansion. |
+| `proxyHeaders` | `map<string, string>` | No | Extra HTTP request headers injected onto all proxied requests (`LOCAL` and `REMOTE`, via WireMock `additionalProxyRequestHeaders`). Automatically emits matching `removeProxyRequestHeaders` (exact and lowercase header names) so incoming headers are cleanly overwritten. Supports `{{var}}` (including `{{user}}`) and `${env:VAR}` expansion. |
+| `fallbackRemote` | `{ targetUrl, stripPrefix? }` | No | Optional catch-all `REMOTE` fallback rule (WireMock `priority: 10`). When set, `REMOTE`-routed `Service`s without an explicit `remoteUrl` omit individual `priority: 5` rules and fall through to `fallbackRemote`, while `LOCAL` `Service`s keep their fail-fast `priority: 5` rules. Both fields support `{{var}}` and `${env:VAR}` expansion. |
 
 ### `catalog`
 

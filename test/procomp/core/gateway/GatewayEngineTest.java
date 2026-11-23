@@ -282,9 +282,16 @@ public final class GatewayEngineTest {
 
         String ordersJson = GatewayEngine.toMappingJson(ordersMap);
         String billingJson = GatewayEngine.toMappingJson(billingMap);
+        Assert.assertEquals(
+            List.of("USERNAME", "username", "X-GATEWAY", "x-gateway"),
+            ordersMap.removeProxyRequestHeaders(),
+            "removeProxyRequestHeaders includes exact and lowercase variants"
+        );
         Assert.assertContains(ordersJson, "\"additionalProxyRequestHeaders\"", "LOCAL JSON emits additionalProxyRequestHeaders");
+        Assert.assertContains(ordersJson, "\"removeProxyRequestHeaders\":[\"USERNAME\",\"username\",\"X-GATEWAY\",\"x-gateway\"]", "LOCAL JSON emits removeProxyRequestHeaders");
         Assert.assertContains(ordersJson, "\"USERNAME\":\"alice\"", "LOCAL JSON contains resolved USERNAME");
         Assert.assertContains(billingJson, "\"additionalProxyRequestHeaders\"", "REMOTE JSON also emits additionalProxyRequestHeaders");
+        Assert.assertContains(billingJson, "\"removeProxyRequestHeaders\"", "REMOTE JSON also emits removeProxyRequestHeaders");
         Assert.assertContains(billingJson, "\"USERNAME\":\"alice\"", "REMOTE JSON contains resolved USERNAME");
 
         // Live mappings matching plan -> IN_SYNC
@@ -305,6 +312,120 @@ public final class GatewayEngineTest {
         Assert.assertEquals(2, drifted.drifted().size(), "both LOCAL and REMOTE drifted");
         Assert.assertEquals("MISMATCH", drifted.drifted().get(0).live(), "LOCAL header diff reports MISMATCH");
         Assert.assertEquals("MISMATCH", drifted.drifted().get(1).live(), "REMOTE header diff reports MISMATCH");
+    }
+
+    public static void testFallbackRemoteEmitsSingleCatchAllAndDetectsLingeringLocalMappings() {
+        Path configPath = Path.of("C:/work/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "proxyHeaders": {
+                  "ORIGINATOR": "PROJ",
+                  "USER": "{{user}}"
+                },
+                "fallbackRemote": {
+                  "targetUrl": "http://shared-dev-env",
+                  "stripPrefix": "/some-prefix"
+                }
+              },
+              "services": {
+                "orders": { "port": 9001, "runtime": "java", "workingDir": ".", "proxyPath": "/orders" },
+                "billing": { "port": 9002, "runtime": "java", "workingDir": ".", "proxyPath": "/billing" },
+                "custom-remote": { "port": 9003, "runtime": "java", "workingDir": ".", "proxyPath": "/custom", "remoteUrl": "https://other-env.corp/custom" }
+              }
+            }
+            """;
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, _ -> Result.ok(Optional.empty()), Map.of(), Optional.of("mattias")),
+            "resolve project with fallbackRemote"
+        );
+        // orders=LOCAL, billing=REMOTE (no remoteUrl -> covered by fallbackRemote), custom-remote=REMOTE (explicit remoteUrl)
+        RoutingTable routing = new RoutingTable(Map.of(
+            "orders", Route.LOCAL,
+            "billing", Route.REMOTE,
+            "custom-remote", Route.REMOTE
+        ));
+
+        GatewayPlan plan = Assert.assertOk(GatewayEngine.buildPlan(project, routing), "buildPlan with fallbackRemote");
+        // Expect 3 mappings: orders (priority 5), custom-remote (priority 5), fallback-remote (priority 10) — NOT billing!
+        Assert.assertEquals(3, plan.mappings().size(), "only LOCAL, explicit remoteUrl, and 1 fallback-remote mapping");
+        WireMockMapping ordersMap = plan.mappings().get(0);
+        WireMockMapping customMap = plan.mappings().get(1);
+        WireMockMapping fallbackMap = plan.mappings().get(2);
+
+        Assert.assertEquals(5, ordersMap.priority(), "orders priority 5");
+        Assert.assertEquals(5, customMap.priority(), "custom-remote priority 5");
+        Assert.assertEquals(10, fallbackMap.priority(), "fallback-remote priority 10");
+        Assert.assertTrue(fallbackMap.fallbackRemote(), "fallback flag true");
+        Assert.assertEquals("/.*", fallbackMap.urlPathPattern(), "catch-all urlPathPattern");
+        Assert.assertEquals("http://shared-dev-env", fallbackMap.targetUrl(), "fallback targetUrl");
+        Assert.assertEquals(Optional.of("/some-prefix"), fallbackMap.proxyUrlPrefixToRemove(), "fallback stripPrefix");
+        Assert.assertEquals(
+            List.of("ORIGINATOR", "originator", "USER", "user"),
+            fallbackMap.removeProxyRequestHeaders(),
+            "fallback removeProxyRequestHeaders"
+        );
+
+        String syncedLive = "{\"mappings\":["
+            + GatewayEngine.toMappingJson(ordersMap) + ","
+            + GatewayEngine.toMappingJson(customMap) + ","
+            + GatewayEngine.toMappingJson(fallbackMap)
+            + "]}";
+        GatewayDriftReport inSync = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, syncedLive),
+            "in sync with fallbackRemote"
+        );
+        Assert.assertEquals(GatewaySyncStatus.IN_SYNC, inSync.syncStatus(), "should be IN_SYNC");
+        Assert.assertEquals("REMOTE", inSync.liveRoutes().get("billing"), "billing live route reported as REMOTE via fallback");
+
+        // Now switch orders to REMOTE while old orders LOCAL mapping still lingers in WireMock -> DRIFTED
+        RoutingTable allRemote = new RoutingTable(Map.of(
+            "orders", Route.REMOTE,
+            "billing", Route.REMOTE,
+            "custom-remote", Route.REMOTE
+        ));
+        GatewayDriftReport drifted = Assert.assertOk(
+            GatewayEngine.computeDrift(project, allRemote, true, syncedLive),
+            "lingering local mapping must drift"
+        );
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, drifted.syncStatus(), "lingering local mapping is DRIFTED");
+        Assert.assertEquals(1, drifted.drifted().size(), "orders drifted");
+        Assert.assertEquals("orders", drifted.drifted().get(0).service(), "orders drifted");
+        Assert.assertEquals("LOCAL", drifted.drifted().get(0).live(), "lingering local reported as LOCAL");
+
+        // Missing fallback-remote mapping -> DRIFTED
+        String missingFallback = "{\"mappings\":["
+            + GatewayEngine.toMappingJson(ordersMap) + ","
+            + GatewayEngine.toMappingJson(customMap)
+            + "]}";
+        GatewayDriftReport fbMissing = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, missingFallback),
+            "missing fallback must drift"
+        );
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, fbMissing.syncStatus(), "missing fallback is DRIFTED");
+        Assert.assertEquals("fallback-remote", fbMissing.drifted().get(0).service(), "fallback-remote reported in drift");
+
+        // Modified fallback-remote priority (omitted -> defaults to 5 instead of 10) -> DRIFTED
+        String wrongPriorityFb = syncedLive.replace("\"priority\":10,", "");
+        GatewayDriftReport fbWrongPriority = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, wrongPriorityFb),
+            "fallback with omitted priority must drift"
+        );
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, fbWrongPriority.syncStatus(), "omitted priority must be DRIFTED");
+
+        // Missing removeProxyRequestHeaders -> DRIFTED
+        String missingRemoveHeaders = syncedLive.replace(
+            ",\"removeProxyRequestHeaders\":[\"ORIGINATOR\",\"originator\",\"USER\",\"user\"]", ""
+        );
+        GatewayDriftReport removedDrift = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, missingRemoveHeaders),
+            "missing removeProxyRequestHeaders must drift"
+        );
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, removedDrift.syncStatus(), "missing removeProxyRequestHeaders is DRIFTED");
     }
 
     public static void testGatewayCoreHasZeroDependencyOnProcessOrShellPackages() {
