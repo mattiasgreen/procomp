@@ -239,6 +239,73 @@ public final class GatewayEngineTest {
         Assert.assertEquals("GATEWAY_INVALID_MAPPINGS", badJsonErr.code(), "invalid mappings error code");
     }
 
+    public static void testGatewayProxyHeadersApplyToLocalOnlyAndDetectDrift() {
+        Path configPath = Path.of("C:/work/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "proxyHeaders": {
+                  "USERNAME": "{{user}}",
+                  "X-GATEWAY": "local-procomp"
+                }
+              },
+              "services": {
+                "orders": { "port": 9001, "runtime": "java", "workingDir": ".", "proxyPath": "/orders", "remoteUrl": "https://dev.corp/orders" },
+                "billing": { "port": 9002, "runtime": "java", "workingDir": ".", "proxyPath": "/billing", "remoteUrl": "https://dev.corp/billing" }
+              }
+            }
+            """;
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, _ -> Result.ok(Optional.empty()), Map.of(), Optional.of("alice")),
+            "resolve project"
+        );
+        RoutingTable routing = new RoutingTable(Map.of("orders", Route.LOCAL, "billing", Route.REMOTE));
+
+        GatewayPlan plan = Assert.assertOk(GatewayEngine.buildPlan(project, routing), "build plan");
+        WireMockMapping ordersMap = plan.mappings().get(0);
+        WireMockMapping billingMap = plan.mappings().get(1);
+
+        Assert.assertEquals(
+            Map.of("USERNAME", "alice", "X-GATEWAY", "local-procomp"),
+            ordersMap.additionalProxyRequestHeaders(),
+            "LOCAL service receives gateway.proxyHeaders"
+        );
+        Assert.assertEquals(
+            Map.of(),
+            billingMap.additionalProxyRequestHeaders(),
+            "REMOTE service does not receive gateway.proxyHeaders"
+        );
+
+        String ordersJson = GatewayEngine.toMappingJson(ordersMap);
+        String billingJson = GatewayEngine.toMappingJson(billingMap);
+        Assert.assertContains(ordersJson, "\"additionalProxyRequestHeaders\"", "LOCAL JSON emits additionalProxyRequestHeaders");
+        Assert.assertContains(ordersJson, "\"USERNAME\":\"alice\"", "LOCAL JSON contains resolved USERNAME");
+        Assert.assertFalse(billingJson.contains("additionalProxyRequestHeaders"), "REMOTE JSON omits additionalProxyRequestHeaders");
+
+        // Live mappings matching plan -> IN_SYNC
+        String syncedLive = "{\"mappings\":[" + ordersJson + "," + billingJson + "]}";
+        GatewayDriftReport inSync = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, syncedLive),
+            "computeDrift in sync"
+        );
+        Assert.assertEquals(GatewaySyncStatus.IN_SYNC, inSync.syncStatus(), "should be IN_SYNC");
+
+        // Changing USERNAME in live WireMock mapping -> DRIFTED (MISMATCH)
+        String driftedLive = syncedLive.replace("\"USERNAME\":\"alice\"", "\"USERNAME\":\"bob\"");
+        GatewayDriftReport drifted = Assert.assertOk(
+            GatewayEngine.computeDrift(project, routing, true, driftedLive),
+            "computeDrift header mismatch"
+        );
+        Assert.assertEquals(GatewaySyncStatus.DRIFTED, drifted.syncStatus(), "header change must be detected as DRIFTED");
+        Assert.assertEquals(1, drifted.drifted().size(), "one drifted route");
+        Assert.assertEquals("orders", drifted.drifted().get(0).service(), "orders drifted");
+        Assert.assertEquals("MISMATCH", drifted.drifted().get(0).live(), "header diff reports MISMATCH");
+    }
+
     public static void testGatewayCoreHasZeroDependencyOnProcessOrShellPackages() {
         for (Class<?> c : List.of(
             GatewayEngine.class, GatewayPlan.class, WireMockMapping.class,

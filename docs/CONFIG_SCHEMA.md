@@ -103,6 +103,7 @@ Supported in `command` elements, `workingDir`, `artifactGlob`, `proxyPathTemplat
 | :--- | :--- |
 | `{{configDir}}` | Directory containing `procomp.json`. |
 | `{{repositoriesRoot}}` | Resolved `repositoriesRoot` directory (requires `repositoriesRoot` to be configured). |
+| `{{user}}` | Current OS username (cross-platform, from `user.name`). |
 | `{{service}}` | `Service` name (map key). |
 | `{{port}}` | `Service` local port (integer). |
 | `{{repository}}` | Resolved local `Repository` Git root (explicit `repository` or `<repositoriesRoot>/<basename>` derived from `repositoryUrl`). Checked lazily when a local action requires the checkout; missing checkouts never block `REMOTE` `Service`s. |
@@ -156,6 +157,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `command` | `string[]` | No | Launch `argv` array (required only if `procomp gateway start` launches a `Managed` `Gateway`). |
 | `workingDir` | `string` | No | Working directory for a `Managed` `Gateway`. |
 | `env` | `map<string, string>` | No | Environment variables for a `Managed` `Gateway`. |
+| `proxyHeaders` | `map<string, string>` | No | Extra HTTP request headers injected onto `LOCAL`-routed proxied requests (WireMock `additionalProxyRequestHeaders`). Supports `{{var}}` (including `{{user}}`) and `${env:VAR}` expansion. |
 
 ### `catalog`
 

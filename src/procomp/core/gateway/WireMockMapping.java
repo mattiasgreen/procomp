@@ -2,6 +2,9 @@ package procomp.core.gateway;
 
 import procomp.core.routing.Route;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -17,7 +20,8 @@ public record WireMockMapping(
     Route route,
     String urlPathPattern,
     String targetUrl,
-    Optional<String> proxyUrlPrefixToRemove
+    Optional<String> proxyUrlPrefixToRemove,
+    Map<String, String> additionalProxyRequestHeaders
 ) {
     public WireMockMapping {
         if (id == null || id.isBlank()) {
@@ -40,5 +44,7 @@ public record WireMockMapping(
             throw new IllegalArgumentException("WireMockMapping targetUrl must be non-blank");
         }
         Objects.requireNonNull(proxyUrlPrefixToRemove, "proxyUrlPrefixToRemove must not be null");
+        Objects.requireNonNull(additionalProxyRequestHeaders, "additionalProxyRequestHeaders must not be null");
+        additionalProxyRequestHeaders = Collections.unmodifiableMap(new LinkedHashMap<>(additionalProxyRequestHeaders));
     }
 }

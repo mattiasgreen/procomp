@@ -33,7 +33,7 @@ final class ProjectConfigParser {
         "command", "healthPath", "artifactGlob", "artifactExclude", "workingDir", "env"
     );
     private static final Set<String> GATEWAY_KEYS = Set.of(
-        "type", "port", "healthPath", "command", "workingDir", "env"
+        "type", "port", "healthPath", "command", "workingDir", "env", "proxyHeaders"
     );
     private static final Set<String> CATALOG_KEYS = Set.of("path", "itemsPath", "map");
     private static final Set<String> CATALOG_MAP_SCALAR_TARGETS = Set.of(
@@ -305,9 +305,21 @@ final class ProjectConfigParser {
         if (workingDir.isErr()) return workingDir.castError();
         Result<Map<String, String>, DomainError> env = parseOptionalStringMap(obj, "env", "gateway.env");
         if (env.isErr()) return env.castError();
+        Result<Map<String, String>, DomainError> proxyHeaders =
+            parseOptionalStringMap(obj, "proxyHeaders", "gateway.proxyHeaders");
+        if (proxyHeaders.isErr()) return proxyHeaders.castError();
+        for (String headerName : okVal(proxyHeaders).keySet()) {
+            if (headerName.isBlank()) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Header name in 'gateway.proxyHeaders' must not be blank",
+                    Map.of("field", "gateway.proxyHeaders")
+                ));
+            }
+        }
 
         return Result.ok(Optional.of(new RawProjectConfig.RawGatewayConfig(
-            type, okVal(portRes), okVal(healthPath), okVal(command), okVal(workingDir), okVal(env)
+            type, okVal(portRes), okVal(healthPath), okVal(command), okVal(workingDir), okVal(env), okVal(proxyHeaders)
         )));
     }
 

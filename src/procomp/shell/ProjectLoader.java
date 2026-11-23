@@ -77,7 +77,8 @@ public final class ProjectLoader {
                 watched.add(path.normalize());
                 return readOptionalFile(path);
             },
-            configSource.allEnvVars()
+            configSource.allEnvVars(),
+            configSource.currentUser()
         ).map(project -> {
             observer.diagnostic(
                 DiagnosticCategory.CONFIG,

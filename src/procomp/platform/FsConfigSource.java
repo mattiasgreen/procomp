@@ -32,6 +32,12 @@ public final class FsConfigSource implements ConfigSource {
     }
 
     @Override
+    public Optional<String> currentUser() {
+        String user = System.getProperty("user.name");
+        return (user != null && !user.isBlank()) ? Optional.of(user) : Optional.empty();
+    }
+
+    @Override
     public boolean isRegularFile(Path path) {
         return Files.isRegularFile(path);
     }
