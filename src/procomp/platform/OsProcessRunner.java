@@ -246,20 +246,25 @@ public final class OsProcessRunner implements ProcessRunner {
         return rawExe;
     }
 
-    private static Optional<Path> resolveWindowsExt(Path base, boolean isWindows) {
-        if (Files.isRegularFile(base)) {
+    static Optional<Path> resolveWindowsExt(Path base, boolean isWindows) {
+        if (!isWindows) {
+            return Files.isRegularFile(base) ? Optional.of(base) : Optional.empty();
+        }
+        String fileName = base.getFileName() != null ? base.getFileName().toString().toLowerCase(Locale.ROOT) : "";
+        boolean hasWinExecExt = fileName.endsWith(".exe") || fileName.endsWith(".cmd")
+            || fileName.endsWith(".bat") || fileName.endsWith(".com");
+        if (hasWinExecExt && Files.isRegularFile(base)) {
             return Optional.of(base);
         }
-        if (!isWindows) {
-            return Optional.empty();
-        }
-        for (String ext : List.of(".exe", ".cmd", ".bat")) {
-            Path withExt = base.resolveSibling(base.getFileName() + ext);
-            if (Files.isRegularFile(withExt)) {
-                return Optional.of(withExt);
+        if (!hasWinExecExt) {
+            for (String ext : List.of(".exe", ".cmd", ".bat", ".com")) {
+                Path withExt = base.resolveSibling(base.getFileName() + ext);
+                if (Files.isRegularFile(withExt)) {
+                    return Optional.of(withExt);
+                }
             }
         }
-        return Optional.empty();
+        return Files.isRegularFile(base) ? Optional.of(base) : Optional.empty();
     }
 
     private static void ensureParentDir(Path file) throws IOException {

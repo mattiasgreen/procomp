@@ -222,6 +222,34 @@ public final class ProcessPlatformIntegrationTest {
         }
     }
 
+    public static void testResolveWindowsExtPrefersBatchAndCmdOverExtensionlessShellScript() throws Exception {
+        Path tmp = Files.createTempDirectory("procomp-win-ext");
+        try {
+            Path gradlew = tmp.resolve("gradlew");
+            Path gradlewBat = tmp.resolve("gradlew.bat");
+            Files.writeString(gradlew, "#!/bin/sh\necho posix\n", StandardCharsets.UTF_8);
+            Files.writeString(gradlewBat, "@echo off\r\necho win\r\n", StandardCharsets.UTF_8);
+
+            Assert.assertEquals(
+                java.util.Optional.of(gradlewBat),
+                OsProcessRunner.resolveWindowsExt(gradlew, true),
+                "Windows resolves extensionless gradlew to sibling gradlew.bat"
+            );
+            Assert.assertEquals(
+                java.util.Optional.of(gradlew),
+                OsProcessRunner.resolveWindowsExt(gradlew, false),
+                "POSIX resolves gradlew directly"
+            );
+            Assert.assertEquals(
+                java.util.Optional.of(gradlewBat),
+                OsProcessRunner.resolveWindowsExt(gradlewBat, true),
+                "Explicit .bat extension resolves directly on Windows"
+            );
+        } finally {
+            deleteRecursively(tmp);
+        }
+    }
+
     private static void waitForFileContent(Path file, String expectedSubstring, Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
