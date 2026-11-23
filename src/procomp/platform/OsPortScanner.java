@@ -12,8 +12,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -62,58 +65,85 @@ public final class OsPortScanner implements PortScanner {
     @Override
     public Result<Optional<PortBinding>, DomainError> findListener(int port) {
         validatePort(port);
+        return findListeners(Set.of(port)).map(map -> Optional.ofNullable(map.get(port)));
+    }
+
+    @Override
+    public Result<Map<Integer, PortBinding>, DomainError> findListeners(Set<Integer> ports) {
+        Objects.requireNonNull(ports, "ports must not be null");
+        if (ports.isEmpty()) {
+            return Result.ok(Map.of());
+        }
+        for (int port : ports) {
+            validatePort(port);
+        }
+
         String os = osName.toLowerCase(Locale.ROOT);
-        Optional<PortBinding> found = Optional.empty();
+        Map<Integer, PortBinding> found = new LinkedHashMap<>();
+        boolean osSnapshotSucceeded = false;
 
         if (os.contains("win")) {
-            Optional<String> tcp4 = runCommandQuiet(List.of("netstat", "-ano", "-p", "tcp"));
+            java.util.concurrent.CompletableFuture<Optional<String>> tcp4Future =
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> runCommandQuiet(List.of("netstat", "-ano", "-p", "tcp")));
+            java.util.concurrent.CompletableFuture<Optional<String>> tcp6Future =
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> runCommandQuiet(List.of("netstat", "-ano", "-p", "tcpv6")));
+            Optional<String> tcp4 = tcp4Future.join();
+            Optional<String> tcp6 = tcp6Future.join();
             if (tcp4.isPresent()) {
-                found = parseWindowsNetstat(tcp4.get(), port);
+                osSnapshotSucceeded = true;
+                parseWindowsNetstatBatch(tcp4.get(), ports, found);
             }
-            if (found.isEmpty()) {
-                Optional<String> tcp6 = runCommandQuiet(List.of("netstat", "-ano", "-p", "tcpv6"));
-                if (tcp6.isPresent()) {
-                    found = parseWindowsNetstat(tcp6.get(), port);
-                }
+            if (tcp6.isPresent()) {
+                osSnapshotSucceeded = true;
+                parseWindowsNetstatBatch(tcp6.get(), ports, found);
             }
         } else if (os.contains("mac") || os.contains("darwin")) {
-            Optional<String> lsof = runCommandQuiet(List.of("lsof", "-nP", "-iTCP:" + port, "-sTCP:LISTEN"));
+            Optional<String> lsof = runCommandQuiet(List.of("lsof", "-nP", "-iTCP", "-sTCP:LISTEN"));
             if (lsof.isPresent()) {
-                found = parsePosixLsof(lsof.get(), port);
-            }
-            if (found.isEmpty()) {
+                osSnapshotSucceeded = true;
+                parsePosixLsofBatch(lsof.get(), ports, found);
+            } else {
                 Optional<String> ss = runCommandQuiet(List.of("ss", "-tlnp"));
                 if (ss.isPresent()) {
-                    found = parseLinuxSs(ss.get(), port);
+                    osSnapshotSucceeded = true;
+                    parseLinuxSsBatch(ss.get(), ports, found);
                 }
             }
         } else {
             Optional<String> ss = runCommandQuiet(List.of("ss", "-tlnp"));
             if (ss.isPresent()) {
-                found = parseLinuxSs(ss.get(), port);
-            }
-            if (found.isEmpty()) {
-                Optional<String> lsof = runCommandQuiet(List.of("lsof", "-nP", "-iTCP:" + port, "-sTCP:LISTEN"));
+                osSnapshotSucceeded = true;
+                parseLinuxSsBatch(ss.get(), ports, found);
+            } else {
+                Optional<String> lsof = runCommandQuiet(List.of("lsof", "-nP", "-iTCP", "-sTCP:LISTEN"));
                 if (lsof.isPresent()) {
-                    found = parsePosixLsof(lsof.get(), port);
+                    osSnapshotSucceeded = true;
+                    parsePosixLsofBatch(lsof.get(), ports, found);
                 }
             }
         }
 
-        if (found.isPresent()) {
-            return Result.ok(found);
+        // Only fall back to TCP connect probes when the OS port-listing command failed/was unavailable.
+        if (!osSnapshotSucceeded) {
+            for (int port : ports) {
+                if (!found.containsKey(port) && isTcpListening(port, Duration.ofMillis(200))) {
+                    found.put(port, new PortBinding(port, Optional.empty(), "127.0.0.1:" + port));
+                }
+            }
         }
-        if (isTcpListening(port, Duration.ofMillis(200))) {
-            return Result.ok(Optional.of(new PortBinding(port, Optional.empty(), "127.0.0.1:" + port)));
-        }
-        return Result.ok(Optional.empty());
+        return Result.ok(Collections.unmodifiableMap(found));
     }
 
     public static Optional<PortBinding> parseWindowsNetstat(String output, int targetPort) {
+        Map<Integer, PortBinding> out = new LinkedHashMap<>();
+        parseWindowsNetstatBatch(output, Set.of(targetPort), out);
+        return Optional.ofNullable(out.get(targetPort));
+    }
+
+    private static void parseWindowsNetstatBatch(String output, Set<Integer> targetPorts, Map<Integer, PortBinding> out) {
         if (output == null || output.isBlank()) {
-            return Optional.empty();
+            return;
         }
-        Optional<PortBinding> best = Optional.empty();
         for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (!trimmed.startsWith("TCP")) {
@@ -128,19 +158,28 @@ public final class OsPortScanner implements PortScanner {
             String state = cols[3].toUpperCase(Locale.ROOT);
             boolean isListening = "LISTENING".equals(state)
                 || (("0.0.0.0:0".equals(foreignAddr) || "[::]:0".equals(foreignAddr)) && !NON_LISTEN_STATES.contains(state));
-            if (!isListening || !matchesLoopbackOrWildcardPort(localAddr, targetPort)) {
+            if (!isListening) {
                 continue;
             }
-            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, parsePositivePid(cols[4]), localAddr)));
+            int parsedPort = extractLoopbackOrWildcardPort(localAddr);
+            if (parsedPort < 0 || !targetPorts.contains(parsedPort)) {
+                continue;
+            }
+            PortBinding candidate = new PortBinding(parsedPort, parsePositivePid(cols[4]), localAddr);
+            out.put(parsedPort, pickBetterListener(Optional.ofNullable(out.get(parsedPort)), candidate));
         }
-        return best;
     }
 
     public static Optional<PortBinding> parseLinuxSs(String output, int targetPort) {
+        Map<Integer, PortBinding> out = new LinkedHashMap<>();
+        parseLinuxSsBatch(output, Set.of(targetPort), out);
+        return Optional.ofNullable(out.get(targetPort));
+    }
+
+    private static void parseLinuxSsBatch(String output, Set<Integer> targetPorts, Map<Integer, PortBinding> out) {
         if (output == null || output.isBlank()) {
-            return Optional.empty();
+            return;
         }
-        Optional<PortBinding> best = Optional.empty();
         for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("State") || trimmed.startsWith("Netid")) {
@@ -155,7 +194,8 @@ public final class OsPortScanner implements PortScanner {
                 continue;
             }
             String localAddr = cols[localIdx];
-            if (!matchesLoopbackOrWildcardPort(localAddr, targetPort)) {
+            int parsedPort = extractLoopbackOrWildcardPort(localAddr);
+            if (parsedPort < 0 || !targetPorts.contains(parsedPort)) {
                 continue;
             }
             Optional<Long> pid = Optional.empty();
@@ -163,16 +203,21 @@ public final class OsPortScanner implements PortScanner {
             if (m.find()) {
                 pid = parsePositivePid(m.group(1));
             }
-            best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, localAddr)));
+            PortBinding candidate = new PortBinding(parsedPort, pid, localAddr);
+            out.put(parsedPort, pickBetterListener(Optional.ofNullable(out.get(parsedPort)), candidate));
         }
-        return best;
     }
 
     public static Optional<PortBinding> parsePosixLsof(String output, int targetPort) {
+        Map<Integer, PortBinding> out = new LinkedHashMap<>();
+        parsePosixLsofBatch(output, Set.of(targetPort), out);
+        return Optional.ofNullable(out.get(targetPort));
+    }
+
+    private static void parsePosixLsofBatch(String output, Set<Integer> targetPorts, Map<Integer, PortBinding> out) {
         if (output == null || output.isBlank()) {
-            return Optional.empty();
+            return;
         }
-        Optional<PortBinding> best = Optional.empty();
         for (String line : output.lines().toList()) {
             String trimmed = line.trim();
             if (trimmed.isEmpty() || trimmed.startsWith("COMMAND")) {
@@ -184,12 +229,13 @@ public final class OsPortScanner implements PortScanner {
             }
             Optional<Long> pid = parsePositivePid(cols[1]);
             for (int i = 7; i < cols.length; i++) {
-                if (matchesLoopbackOrWildcardPort(cols[i], targetPort)) {
-                    best = Optional.of(pickBetterListener(best, new PortBinding(targetPort, pid, cols[i])));
+                int parsedPort = extractLoopbackOrWildcardPort(cols[i]);
+                if (parsedPort > 0 && targetPorts.contains(parsedPort)) {
+                    PortBinding candidate = new PortBinding(parsedPort, pid, cols[i]);
+                    out.put(parsedPort, pickBetterListener(Optional.ofNullable(out.get(parsedPort)), candidate));
                 }
             }
         }
-        return best;
     }
 
     private static PortBinding pickBetterListener(Optional<PortBinding> currentOpt, PortBinding candidate) {
@@ -246,25 +292,26 @@ public final class OsPortScanner implements PortScanner {
         }
     }
 
-    private static boolean matchesLoopbackOrWildcardPort(String localAddr, int targetPort) {
+    private static int extractLoopbackOrWildcardPort(String localAddr) {
         int colon = localAddr.lastIndexOf(':');
         if (colon <= 0 || colon >= localAddr.length() - 1) {
-            return false;
+            return -1;
         }
         int parsedPort;
         try {
             parsedPort = Integer.parseInt(localAddr.substring(colon + 1));
         } catch (NumberFormatException e) {
-            return false;
+            return -1;
         }
-        if (parsedPort != targetPort) {
-            return false;
+        if (parsedPort < 1 || parsedPort > 65535) {
+            return -1;
         }
         String host = stripInterfaceScope(localAddr.substring(0, colon)).toLowerCase(Locale.ROOT);
-        return switch (host) {
+        boolean ok = switch (host) {
             case "127.0.0.1", "0.0.0.0", "[::1]", "[::]", "::1", "::", "*", "[::ffff:127.0.0.1]", "::ffff:127.0.0.1" -> true;
             default -> false;
         };
+        return ok ? parsedPort : -1;
     }
 
     private static boolean isExplicitLoopback(String localAddr) {

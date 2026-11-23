@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -101,9 +102,21 @@ final class ProcessLifecycle {
             .orElseGet(() -> new ProcessTarget("gateway", Optional.empty(), Optional.empty(), outLog, errLog));
     }
 
+    Result<Map<Integer, PortBinding>, DomainError> snapshotPorts(Set<Integer> ports) {
+        return portScanner.findListeners(ports);
+    }
+
     Result<DiscoveryContext, DomainError> discoverService(String projectName, ServiceDefinition service) {
+        return discoverService(projectName, service, Optional.empty());
+    }
+
+    Result<DiscoveryContext, DomainError> discoverService(
+        String projectName,
+        ServiceDefinition service,
+        Optional<Map<Integer, PortBinding>> portSnapshot
+    ) {
         ProcessTarget target = targetForService(projectName, service);
-        return discoverTarget(projectName, ProcessKey.service(service.name()), target, Optional.of(service));
+        return discoverTarget(projectName, ProcessKey.service(service.name()), target, Optional.of(service), portSnapshot);
     }
 
     Result<DiscoveryContext, DomainError> discoverGateway(String projectName, GatewayDefinition gateway) {
@@ -112,7 +125,7 @@ final class ProcessLifecycle {
 
     Result<DiscoveryContext, DomainError> discoverGateway(String projectName, Optional<GatewayDefinition> gateway) {
         ProcessTarget target = targetForGateway(projectName, gateway);
-        return discoverTarget(projectName, ProcessKey.gateway(), target, Optional.empty());
+        return discoverTarget(projectName, ProcessKey.gateway(), target, Optional.empty(), Optional.empty());
     }
 
     Result<DiscoveryContext, DomainError> discoverTarget(
@@ -120,6 +133,16 @@ final class ProcessLifecycle {
         ProcessKey key,
         ProcessTarget target,
         Optional<ServiceDefinition> serviceOpt
+    ) {
+        return discoverTarget(projectName, key, target, serviceOpt, Optional.empty());
+    }
+
+    Result<DiscoveryContext, DomainError> discoverTarget(
+        String projectName,
+        ProcessKey key,
+        ProcessTarget target,
+        Optional<ServiceDefinition> serviceOpt,
+        Optional<Map<Integer, PortBinding>> portSnapshot
     ) {
         Result<Optional<ManagedProcessRecord>, DomainError> recRes =
             stateStore.readManagedProcess(projectName, key);
@@ -172,11 +195,15 @@ final class ProcessLifecycle {
 
         if (target.port().isPresent()) {
             int port = target.port().get();
-            Result<Optional<PortBinding>, DomainError> listenerRes = portScanner.findListener(port);
-            if (listenerRes instanceof Result.Err<Optional<PortBinding>, DomainError>(DomainError err)) {
-                return Result.err(err);
+            if (portSnapshot.isPresent()) {
+                portBinding = Optional.ofNullable(portSnapshot.get().get(port));
+            } else {
+                Result<Optional<PortBinding>, DomainError> listenerRes = portScanner.findListener(port);
+                if (listenerRes instanceof Result.Err<Optional<PortBinding>, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+                portBinding = ((Result.Ok<Optional<PortBinding>, DomainError>) listenerRes).value();
             }
-            portBinding = ((Result.Ok<Optional<PortBinding>, DomainError>) listenerRes).value();
             if (portBinding.isPresent()) {
                 PortBinding listener = portBinding.get();
                 observer.diagnostic(

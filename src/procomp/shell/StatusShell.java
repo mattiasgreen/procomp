@@ -7,6 +7,7 @@ import procomp.core.common.Result;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.Ownership;
+import procomp.core.process.PortBinding;
 import procomp.core.project.Project;
 import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
@@ -24,8 +25,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Modality-agnostic orchestrator for read-only unified estate status.
@@ -142,48 +148,55 @@ public final class StatusShell {
         }
         RoutingTable routing = ((Result.Ok<RoutingTable, DomainError>) routingRes).value();
 
+        Result<Map<Integer, PortBinding>, DomainError> portSnapRes = processShell.snapshotServicePorts(project);
+        if (portSnapRes.isErr()) {
+            return portSnapRes.castError();
+        }
+        Map<Integer, PortBinding> portSnapshot = ((Result.Ok<Map<Integer, PortBinding>, DomainError>) portSnapRes).value();
+
         Instant now = clock.now();
-        List<ServiceStatusRow> rows = new ArrayList<>(project.services().size());
-        for (ServiceDefinition service : project.services().values()) {
-            Result<DiscoveryResult, DomainError> discRes = processShell.discoverService(project, service.name());
-            if (discRes instanceof Result.Err<DiscoveryResult, DomainError>(DomainError err)) {
-                return Result.err(err);
-            }
-            DiscoveryResult disc = ((Result.Ok<DiscoveryResult, DomainError>) discRes).value();
-            Route route = routing.routeOf(service.name()).orElse(Route.REMOTE);
-            Optional<String> healthNote = disc.healthResponse().isBlank()
-                ? Optional.empty()
-                : Optional.of(disc.healthResponse());
-
-            ObservedBuildRun buildRun;
-            if (buildShell.isPresent()) {
-                Result<ObservedBuildRun, DomainError> bRes = buildShell.get().inspectBuild(project, service);
-                if (bRes instanceof Result.Err<ObservedBuildRun, DomainError>(DomainError err)) {
-                    return Result.err(err);
+        List<ServiceDefinition> serviceList = List.copyOf(project.services().values());
+        List<ServiceStatusRow> rows = new ArrayList<>(serviceList.size());
+        if (serviceList.size() <= 1) {
+            for (ServiceDefinition service : serviceList) {
+                Result<ServiceStatusRow, DomainError> rowRes =
+                    discoverServiceRow(project, service, routing, portSnapshot, now);
+                if (rowRes.isErr()) {
+                    return rowRes.castError();
                 }
-                buildRun = ((Result.Ok<ObservedBuildRun, DomainError>) bRes).value();
-            } else {
-                BuildDisplayState fallback = service.buildConfig().isPresent()
-                    ? BuildDisplayState.NOT_BUILT
-                    : BuildDisplayState.NO_BUILDER;
-                buildRun = new ObservedBuildRun(fallback, Optional.empty(), Optional.empty());
+                rows.add(((Result.Ok<ServiceStatusRow, DomainError>) rowRes).value());
             }
-
-            rows.add(new ServiceStatusRow(
-                service.name(),
-                route,
-                disc.ownership(),
-                disc.provenance(),
-                disc.health(),
-                service.port(),
-                disc.pid(),
-                disc.startedAt(),
-                disc.uptime(now),
-                disc.stale(),
-                disc.healthEndpoint(),
-                healthNote,
-                buildRun
-            ));
+        } else {
+            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                List<Future<Result<ServiceStatusRow, DomainError>>> futures = new ArrayList<>(serviceList.size());
+                for (ServiceDefinition service : serviceList) {
+                    futures.add(executor.submit(() ->
+                        discoverServiceRow(project, service, routing, portSnapshot, now)
+                    ));
+                }
+                for (Future<Result<ServiceStatusRow, DomainError>> future : futures) {
+                    Result<ServiceStatusRow, DomainError> rowRes = future.get();
+                    if (rowRes.isErr()) {
+                        return rowRes.castError();
+                    }
+                    rows.add(((Result.Ok<ServiceStatusRow, DomainError>) rowRes).value());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Result.err(DomainError.of("STATUS_INTERRUPTED", "Interrupted while collecting service status"));
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException re) {
+                    throw re;
+                }
+                if (cause instanceof Error err) {
+                    throw err;
+                }
+                return Result.err(DomainError.of(
+                    "STATUS_ERROR",
+                    "Failed to collect service status: " + (cause != null ? cause.getMessage() : e.getMessage())
+                ));
+            }
         }
 
         GatewaySummary gatewaySummary = GatewaySummary.notConfigured();
@@ -196,6 +209,54 @@ public final class StatusShell {
         }
 
         return Result.ok(new EstateStatus(project.name(), gatewaySummary, rows));
+    }
+
+    private Result<ServiceStatusRow, DomainError> discoverServiceRow(
+        Project project,
+        ServiceDefinition service,
+        RoutingTable routing,
+        Map<Integer, PortBinding> portSnapshot,
+        Instant now
+    ) {
+        Result<DiscoveryResult, DomainError> discRes = processShell.discoverService(project, service.name(), portSnapshot);
+        if (discRes.isErr()) {
+            return discRes.castError();
+        }
+        DiscoveryResult disc = ((Result.Ok<DiscoveryResult, DomainError>) discRes).value();
+        Route route = routing.routeOf(service.name()).orElse(Route.REMOTE);
+        Optional<String> healthNote = disc.healthResponse().isBlank()
+            ? Optional.empty()
+            : Optional.of(disc.healthResponse());
+
+        ObservedBuildRun buildRun;
+        if (buildShell.isPresent()) {
+            Result<ObservedBuildRun, DomainError> bRes = buildShell.get().inspectBuild(project, service);
+            if (bRes.isErr()) {
+                return bRes.castError();
+            }
+            buildRun = ((Result.Ok<ObservedBuildRun, DomainError>) bRes).value();
+        } else {
+            BuildDisplayState fallback = service.buildConfig().isPresent()
+                ? BuildDisplayState.NOT_BUILT
+                : BuildDisplayState.NO_BUILDER;
+            buildRun = new ObservedBuildRun(fallback, Optional.empty(), Optional.empty());
+        }
+
+        return Result.ok(new ServiceStatusRow(
+            service.name(),
+            route,
+            disc.ownership(),
+            disc.provenance(),
+            disc.health(),
+            service.port(),
+            disc.pid(),
+            disc.startedAt(),
+            disc.uptime(now),
+            disc.stale(),
+            disc.healthEndpoint(),
+            healthNote,
+            buildRun
+        ));
     }
 
     public record EstateStatus(
