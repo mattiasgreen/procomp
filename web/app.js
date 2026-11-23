@@ -8,6 +8,7 @@ import {
   startGateway,
   stopGateway,
   stopServices,
+  streamGatewayLogs,
   streamServiceLogs,
   streamStartServices,
   updateRoutes,
@@ -31,6 +32,7 @@ const state = {
   pendingProfiles: new Set(),
   drawer: {
     open: false,
+    targetType: 'service',
     service: null,
     tab: 'inspect',
   },
@@ -76,6 +78,7 @@ const dom = {
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
   btnGatewayStart: document.getElementById('btn-gateway-start'),
   btnGatewayStop: document.getElementById('btn-gateway-stop'),
+  btnGatewayLogs: document.getElementById('btn-gateway-logs'),
   gatewayDriftAlert: document.getElementById('gateway-drift-alert'),
   gatewayDriftList: document.getElementById('gateway-drift-list'),
   btnDriftReconcile: document.getElementById('btn-drift-reconcile'),
@@ -88,6 +91,7 @@ const dom = {
   servicesTbody: document.getElementById('services-tbody'),
 
   detailDrawer: document.getElementById('detail-drawer'),
+  drawerTargetLabel: document.getElementById('drawer-target-label'),
   drawerServiceName: document.getElementById('drawer-service-name'),
   tabInspect: document.getElementById('tab-inspect'),
   tabLogs: document.getElementById('tab-logs'),
@@ -98,6 +102,7 @@ const dom = {
   inspectContent: document.getElementById('inspect-content'),
 
   panelLogs: document.getElementById('panel-logs'),
+  logsSourceGroup: document.getElementById('logs-source-group'),
   btnLogsSourceService: document.getElementById('btn-logs-source-service'),
   btnLogsSourceBuild: document.getElementById('btn-logs-source-build'),
   btnLogsStdout: document.getElementById('btn-logs-stdout'),
@@ -818,12 +823,16 @@ function handleGatewayAction(actionFn, triggerBtn) {
 /* ---------- Detail Drawer: Inspect & Live SSE Logs ---------- */
 
 function openDrawer(serviceName, tab = 'inspect') {
-  const serviceChanged = state.drawer.service !== serviceName;
+  const targetChanged = state.drawer.targetType !== 'service' || state.drawer.service !== serviceName;
   state.drawer.open = true;
+  state.drawer.targetType = 'service';
   state.drawer.service = serviceName;
   state.drawer.tab = tab;
 
+  dom.drawerTargetLabel.textContent = 'Service';
   dom.drawerServiceName.textContent = serviceName;
+  dom.tabInspect.hidden = false;
+  dom.logsSourceGroup.hidden = false;
   dom.detailDrawer.hidden = false;
 
   updateDrawerTabs();
@@ -833,9 +842,32 @@ function openDrawer(serviceName, tab = 'inspect') {
     closeLogStream();
     loadInspection(serviceName);
   } else {
-    if (serviceChanged || !state.logs.stream) {
-      startLogStream(serviceName);
+    if (targetChanged || !state.logs.stream) {
+      startActiveLogStream();
     }
+  }
+
+  dom.detailDrawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openGatewayLogsDrawer() {
+  const targetChanged = state.drawer.targetType !== 'gateway';
+  state.drawer.open = true;
+  state.drawer.targetType = 'gateway';
+  state.drawer.service = null;
+  state.drawer.tab = 'logs';
+
+  dom.drawerTargetLabel.textContent = 'Gateway';
+  dom.drawerServiceName.textContent = 'gateway';
+  dom.tabInspect.hidden = true;
+  dom.logsSourceGroup.hidden = true;
+  dom.detailDrawer.hidden = false;
+
+  updateDrawerTabs();
+  renderServices();
+
+  if (targetChanged || !state.logs.stream) {
+    startActiveLogStream();
   }
 
   dom.detailDrawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -844,13 +876,20 @@ function openDrawer(serviceName, tab = 'inspect') {
 function closeDrawer() {
   closeLogStream();
   state.drawer.open = false;
+  state.drawer.targetType = 'service';
   state.drawer.service = null;
   dom.detailDrawer.hidden = true;
   renderServices();
 }
 
 function switchDrawerTab(tab) {
-  if (!state.drawer.open || !state.drawer.service) {
+  if (!state.drawer.open) {
+    return;
+  }
+  if (state.drawer.targetType === 'gateway' && tab === 'inspect') {
+    return;
+  }
+  if (state.drawer.targetType === 'service' && !state.drawer.service) {
     return;
   }
   state.drawer.tab = tab;
@@ -859,7 +898,7 @@ function switchDrawerTab(tab) {
     closeLogStream();
     loadInspection(state.drawer.service);
   } else {
-    startLogStream(state.drawer.service);
+    startActiveLogStream();
   }
 }
 
@@ -1053,7 +1092,10 @@ function handleCancelBuild(serviceName, button) {
   return runAction([button], () => cancelBuild(serviceName));
 }
 
-function startLogStream(serviceName) {
+function startActiveLogStream() {
+  if (!state.drawer.open || state.drawer.tab !== 'logs') {
+    return;
+  }
   closeLogStream();
   clearLogsOutput();
   setLogsStreamBadge('Connecting…', 'badge-starting');
@@ -1063,7 +1105,7 @@ function startLogStream(serviceName) {
   dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
   dom.btnLogsStderr.classList.toggle('active', state.logs.err);
 
-  state.logs.stream = streamServiceLogs(serviceName, {
+  const handlers = {
     lines: 100,
     err: state.logs.err,
     build: state.logs.build,
@@ -1091,7 +1133,13 @@ function startLogStream(serviceName) {
         setLogsStreamBadge('Disconnected', 'badge-neutral');
       }
     },
-  });
+  };
+
+  if (state.drawer.targetType === 'gateway') {
+    state.logs.stream = streamGatewayLogs(handlers);
+  } else if (state.drawer.service) {
+    state.logs.stream = streamServiceLogs(state.drawer.service, handlers);
+  }
 }
 
 /* ---------- Conflict Kill Confirmation <dialog> ---------- */
@@ -1222,6 +1270,7 @@ function init() {
   dom.btnGatewayStop.addEventListener('click', () =>
     handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
   );
+  dom.btnGatewayLogs.addEventListener('click', () => openGatewayLogsDrawer());
 
   dom.btnStartLocal.addEventListener('click', () => handleStartServices([]));
   dom.btnStopManaged.addEventListener('click', () => handleStopServices([], dom.btnStopManaged));
@@ -1238,36 +1287,28 @@ function init() {
   dom.btnLogsSourceService.addEventListener('click', () => {
     if (state.logs.build) {
       state.logs.build = false;
-      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
-        startLogStream(state.drawer.service);
-      }
+      startActiveLogStream();
     }
   });
 
   dom.btnLogsSourceBuild.addEventListener('click', () => {
     if (!state.logs.build) {
       state.logs.build = true;
-      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
-        startLogStream(state.drawer.service);
-      }
+      startActiveLogStream();
     }
   });
 
   dom.btnLogsStdout.addEventListener('click', () => {
     if (state.logs.err) {
       state.logs.err = false;
-      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
-        startLogStream(state.drawer.service);
-      }
+      startActiveLogStream();
     }
   });
 
   dom.btnLogsStderr.addEventListener('click', () => {
     if (!state.logs.err) {
       state.logs.err = true;
-      if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
-        startLogStream(state.drawer.service);
-      }
+      startActiveLogStream();
     }
   });
 
@@ -1289,9 +1330,7 @@ function init() {
 
   dom.btnLogsClear.addEventListener('click', clearLogsOutput);
   dom.btnLogsReconnect.addEventListener('click', () => {
-    if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
-      startLogStream(state.drawer.service);
-    }
+    startActiveLogStream();
   });
 
   dom.btnCopyCli.addEventListener('click', copyCliCommand);

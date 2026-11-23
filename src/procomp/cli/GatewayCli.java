@@ -14,31 +14,37 @@ import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStatusReport;
 import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
+import procomp.shell.LogsShell.GatewayLogsRequest;
+import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.LogsShell.LogsResult;
 
 import java.io.PrintWriter;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * CLI argument parser and text/JSON renderer for {@code procomp gateway <start|stop|status|reconcile>}.
+ * CLI argument parser and text/JSON renderer for {@code procomp gateway <start|stop|status|reconcile|logs>}.
  */
 public final class GatewayCli {
 
-    private static final String USAGE = "Usage: procomp gateway <start [-d|--detach] [--timeout <sec>] | stop | status [--json] | reconcile>";
+    private static final String USAGE =
+        "Usage: procomp gateway <start [-d|--detach] [--timeout <sec>] | stop | status [--json] | reconcile | logs [-n <lines>] [-f] [--err] [--path]>";
 
-    public sealed interface Action permits Action.Start, Action.Stop, Action.Status, Action.Reconcile {
+    public sealed interface Action permits Action.Start, Action.Stop, Action.Status, Action.Reconcile, Action.Logs {
         record Start(boolean detach, Duration timeout) implements Action {}
         record Stop() implements Action {}
         record Status(boolean json) implements Action {}
         record Reconcile() implements Action {}
+        record Logs(GatewayLogsRequest request) implements Action {}
     }
 
     private GatewayCli() {}
 
     public static Result<Action, String> parse(List<String> args) {
         if (args.isEmpty()) {
-            return Result.err("Expected subcommand 'start', 'stop', 'status', or 'reconcile' after 'gateway'. " + USAGE);
+            return Result.err("Expected subcommand 'start', 'stop', 'status', 'reconcile', or 'logs' after 'gateway'. " + USAGE);
         }
         String sub = args.get(0);
         List<String> rest = args.subList(1, args.size());
@@ -51,8 +57,53 @@ public final class GatewayCli {
             case "reconcile" -> rest.isEmpty()
                 ? Result.ok(new Action.Reconcile())
                 : Result.err("Unexpected argument '" + rest.get(0) + "' for 'gateway reconcile'. Usage: procomp gateway reconcile");
+            case "logs" -> parseLogs(rest);
             default -> Result.err("Unknown 'gateway' subcommand '" + sub + "'. " + USAGE);
         };
+    }
+
+    private static Result<Action, String> parseLogs(List<String> args) {
+        boolean stderr = false;
+        boolean pathOnly = false;
+        int lines = LogsRequest.DEFAULT_LINES;
+        boolean follow = false;
+
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--err" -> stderr = true;
+                case "--path" -> pathOnly = true;
+                case "-f", "--follow" -> follow = true;
+                case "-n", "--lines" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '" + arg + "' requires a non-negative integer line count.");
+                    }
+                    Result<Integer, String> parsedLines = LogsCli.parseNonNegativeInt(args.get(++i));
+                    if (parsedLines instanceof Result.Err<Integer, String>(String msg)) {
+                        return Result.err(msg);
+                    }
+                    lines = ((Result.Ok<Integer, String>) parsedLines).value();
+                }
+                default -> {
+                    if (arg.startsWith("--lines=")) {
+                        Result<Integer, String> parsedLines = LogsCli.parseNonNegativeInt(arg.substring("--lines=".length()));
+                        if (parsedLines instanceof Result.Err<Integer, String>(String msg)) {
+                            return Result.err(msg);
+                        }
+                        lines = ((Result.Ok<Integer, String>) parsedLines).value();
+                    } else if (arg.startsWith("-")) {
+                        return Result.err(
+                            "Unknown option '" + arg + "' for 'gateway logs'. Usage: procomp gateway logs [-n <lines>] [-f] [--err] [--path]"
+                        );
+                    } else {
+                        return Result.err(
+                            "Unexpected argument '" + arg + "' for 'gateway logs'. Usage: procomp gateway logs [-n <lines>] [-f] [--err] [--path]"
+                        );
+                    }
+                }
+            }
+        }
+        return Result.ok(new Action.Logs(new GatewayLogsRequest(stderr, pathOnly, lines, follow)));
     }
 
     private static Result<Action, String> parseStart(List<String> args) {
@@ -117,6 +168,19 @@ public final class GatewayCli {
             case Action.Reconcile _ -> runtime.handleResult(
                 runtime.gatewayShell().flatMap(shell -> shell.reconcile(project)),
                 res -> renderReconcile(res, runtime.out())
+            );
+            case Action.Logs(GatewayLogsRequest request) -> runtime.handleResult(
+                runtime.logsShell().flatMap(shell -> shell.runGateway(project, request)),
+                result -> {
+                    switch (result) {
+                        case LogsResult.ResolvedPath(Path path) -> runtime.out().println(path);
+                        case LogsResult.RawTail(_, String text) -> {
+                            runtime.out().print(text);
+                            runtime.out().flush();
+                        }
+                        case LogsResult.Followed _ -> runtime.out().flush();
+                    }
+                }
             );
         };
     }

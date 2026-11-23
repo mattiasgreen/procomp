@@ -157,7 +157,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `command` | `string[]` | No | Launch `argv` array (required only if `procomp gateway start` launches a `Managed` `Gateway`). |
 | `workingDir` | `string` | No | Working directory for a `Managed` `Gateway`. |
 | `env` | `map<string, string>` | No | Environment variables for a `Managed` `Gateway`. |
-| `proxyHeaders` | `map<string, string>` | No | Extra HTTP request headers injected onto `LOCAL`-routed proxied requests (WireMock `additionalProxyRequestHeaders`). Supports `{{var}}` (including `{{user}}`) and `${env:VAR}` expansion. |
+| `proxyHeaders` | `map<string, string>` | No | Extra HTTP request headers injected onto all proxied requests (`LOCAL` and `REMOTE`, via WireMock `additionalProxyRequestHeaders`). Supports `{{var}}` (including `{{user}}`) and `${env:VAR}` expansion. |
 
 ### `catalog`
 

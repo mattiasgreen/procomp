@@ -70,12 +70,50 @@ public final class LogsShell {
                 .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
         }
 
-        return follow(logPath, request, pollInterval, keepFollowing);
+        return follow(logPath, request.serviceName(), request.stderr(), request.lines(), pollInterval, keepFollowing);
+    }
+
+    public Result<LogsResult, DomainError> runGateway(Project project, GatewayLogsRequest request) {
+        return runGateway(project, request, DEFAULT_POLL_INTERVAL, () -> !Thread.currentThread().isInterrupted());
+    }
+
+    public Result<LogsResult, DomainError> runGateway(
+        Project project,
+        GatewayLogsRequest request,
+        Duration pollInterval,
+        BooleanSupplier keepFollowing
+    ) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(pollInterval, "pollInterval must not be null");
+        Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
+
+        if (project.gateway().isEmpty()) {
+            return Result.err(DomainError.of(
+                "GATEWAY_NOT_CONFIGURED",
+                "No Gateway is configured in project '" + project.name() + "'",
+                Map.of("project", project.name())
+            ));
+        }
+
+        Path logPath = stateStore.logPath(project.name(), ProcessKey.gateway(), request.stderr());
+        if (request.pathOnly()) {
+            return Result.ok(new LogsResult.ResolvedPath(logPath));
+        }
+
+        if (!request.follow()) {
+            return stateStore.readLogText(logPath)
+                .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
+        }
+
+        return follow(logPath, "gateway", request.stderr(), request.lines(), pollInterval, keepFollowing);
     }
 
     private Result<LogsResult, DomainError> follow(
         Path logPath,
-        LogsRequest request,
+        String targetName,
+        boolean stderr,
+        int lines,
         Duration pollInterval,
         BooleanSupplier keepFollowing
     ) {
@@ -84,8 +122,8 @@ public final class LogsShell {
             return Result.err(err);
         }
         LogChunk initial = ((Result.Ok<LogChunk, DomainError>) initialRes).value();
-        String initialTail = LogTailer.tailLines(initial.text(), request.lines());
-        emitLines(request.serviceName(), request.stderr(), initialTail);
+        String initialTail = LogTailer.tailLines(initial.text(), lines);
+        emitLines(targetName, stderr, initialTail);
 
         long offset = initial.nextOffset();
         while (keepFollowing.getAsBoolean() && clock.sleep(pollInterval)) {
@@ -95,7 +133,7 @@ public final class LogsShell {
             }
             LogChunk chunk = ((Result.Ok<LogChunk, DomainError>) chunkRes).value();
             if (!chunk.text().isEmpty()) {
-                emitLines(request.serviceName(), request.stderr(), chunk.text());
+                emitLines(targetName, stderr, chunk.text());
             }
             offset = chunk.nextOffset();
         }
@@ -132,6 +170,19 @@ public final class LogsShell {
             if (serviceName == null || serviceName.isBlank()) {
                 throw new IllegalArgumentException("serviceName must be non-blank");
             }
+            if (lines < 0) {
+                throw new IllegalArgumentException("lines must be non-negative: " + lines);
+            }
+        }
+    }
+
+    public record GatewayLogsRequest(
+        boolean stderr,
+        boolean pathOnly,
+        int lines,
+        boolean follow
+    ) {
+        public GatewayLogsRequest {
             if (lines < 0) {
                 throw new IllegalArgumentException("lines must be non-negative: " + lines);
             }

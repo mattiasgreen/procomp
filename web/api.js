@@ -155,6 +155,14 @@ export function fetchServiceLogs(serviceName, { lines = 100, err = false, build 
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/logs?${params.toString()}`);
 }
 
+export function fetchGatewayLogs({ lines = 100, err = false } = {}) {
+  const params = new URLSearchParams({
+    lines: String(lines),
+    err: err ? 'true' : 'false',
+  });
+  return requestJson(`/api/gateway/logs?${params.toString()}`);
+}
+
 /**
  * Opens an SSE stream via `POST /api/services/start/stream` using `fetch()` + `ReadableStream`.
  *
@@ -380,7 +388,21 @@ export function streamServiceLogs(serviceName, handlers = {}) {
     err: handlers.err ? 'true' : 'false',
     build: handlers.build ? 'true' : 'false',
   });
-  const url = `/api/services/${encodeURIComponent(serviceName)}/logs/stream?${params.toString()}`;
+  return openLogEventSource(
+    `/api/services/${encodeURIComponent(serviceName)}/logs/stream?${params.toString()}`,
+    handlers,
+  );
+}
+
+export function streamGatewayLogs(handlers = {}) {
+  const params = new URLSearchParams({
+    lines: String(handlers.lines ?? 100),
+    err: handlers.err ? 'true' : 'false',
+  });
+  return openLogEventSource(`/api/gateway/logs/stream?${params.toString()}`, handlers);
+}
+
+function openLogEventSource(url, handlers = {}) {
   const eventSource = new EventSource(url);
   let closed = false;
 

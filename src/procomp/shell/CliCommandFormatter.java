@@ -216,6 +216,25 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String gatewayLogs(boolean stderr, boolean pathOnly, int lines, boolean follow) {
+        List<String> tokens = base("gateway");
+        tokens.add("logs");
+        if (!pathOnly && lines != LogsRequest.DEFAULT_LINES) {
+            tokens.add("-n");
+            tokens.add(Integer.toString(lines));
+        }
+        if (follow) {
+            tokens.add("-f");
+        }
+        if (stderr) {
+            tokens.add("--err");
+        }
+        if (pathOnly) {
+            tokens.add("--path");
+        }
+        return join(tokens);
+    }
+
     public static String quoteArg(String arg) {
         Objects.requireNonNull(arg, "arg must not be null");
         if (arg.isEmpty()) {

@@ -23,6 +23,7 @@ import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
 import procomp.shell.LogsShell;
+import procomp.shell.LogsShell.GatewayLogsRequest;
 import procomp.shell.LogsShell.LogsRequest;
 import procomp.shell.LogsShell.LogsResult;
 import procomp.shell.ProcessShell;
@@ -130,7 +131,8 @@ public final class ApiRouter {
             return "POST".equalsIgnoreCase(method);
         }
         if ("GET".equalsIgnoreCase(method)) {
-            return extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
+            return "/api/gateway/logs/stream".equals(path)
+                || extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
         }
         return false;
     }
@@ -229,6 +231,17 @@ public final class ApiRouter {
             return handleGatewayReconcile();
         }
 
+        if ("/api/gateway/logs".equals(path)) {
+            if (!"GET".equals(method)) {
+                return methodNotAllowed(method, "GET");
+            }
+            return handleGatewayLogs(request.rawQuery());
+        }
+
+        if ("/api/gateway/logs/stream".equals(path)) {
+            return methodNotAllowed(method, "GET");
+        }
+
         Optional<String> profileUseSegment = extractSegment(path, PROFILES_PREFIX, "/use");
         if (profileUseSegment.isPresent()) {
             if (!"POST".equals(method)) {
@@ -291,6 +304,10 @@ public final class ApiRouter {
         try {
             if ("/api/services/start/stream".equals(path)) {
                 handleStartServicesStream(request, sink);
+                return;
+            }
+            if ("/api/gateway/logs/stream".equals(path)) {
+                handleGatewayLogsStream(request, sink);
                 return;
             }
             Optional<String> logsStreamSegment = extractSegment(path, SERVICES_PREFIX, "/logs/stream");
@@ -973,6 +990,105 @@ public final class ApiRouter {
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
             .run(project, new LogsRequest(serviceName, stderr, false, lines, true, build), logsPollInterval, sink::isOpen);
+        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+        }
+    }
+
+    private ApiResponse handleGatewayLogs(String rawQuery) {
+        Result<Map<String, String>, DomainError> queryRes = parseQuery(rawQuery);
+        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+
+        Result<Integer, DomainError> linesRes = parseOptionalQueryNonNegativeInt(query, "lines", LogsRequest.DEFAULT_LINES);
+        if (linesRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> errFlagRes = parseOptionalQueryBoolean(query, "err", false);
+        if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+
+        int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
+        boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
+        String cliCommand = cli.gatewayLogs(stderr, false, lines, false);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<LogsShell, DomainError> shellRes = runtime.logsShell();
+        if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, false));
+        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        LogsResult result = ((Result.Ok<LogsResult, DomainError>) logsRes).value();
+        if (!(result instanceof LogsResult.RawTail(Path path, String text))) {
+            return errorResponse(
+                500,
+                DomainError.of("LOGS_UNEXPECTED_RESULT", "Unexpected LogsShell result for non-follow request"),
+                cliCommand
+            );
+        }
+
+        Map<String, JsonValue> data = new LinkedHashMap<>();
+        data.put("path", Json.str(path.toString()));
+        data.put("text", Json.str(text));
+        return okEnvelope(Json.obj(data), cliCommand);
+    }
+
+    private void handleGatewayLogsStream(ApiRequest request, SseSink sink) {
+        Result<Map<String, String>, DomainError> queryRes = parseQuery(request.rawQuery());
+        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+
+        Result<Integer, DomainError> linesRes = parseOptionalQueryNonNegativeInt(query, "lines", LogsRequest.DEFAULT_LINES);
+        if (linesRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+        Result<Boolean, DomainError> errFlagRes = parseOptionalQueryBoolean(query, "err", false);
+        if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+
+        int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
+        boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
+        String cliCommand = cli.gatewayLogs(stderr, false, lines, true);
+
+        sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+            return;
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        ProcompRuntime streamRuntime = runtime.withObserver(event -> {
+            if (event instanceof ProgressEvent.LogLine) {
+                sink.send("log", Json.stringify(DomainJson.progressEvent(event)));
+            }
+        });
+        Result<LogsShell, DomainError> shellRes = streamRuntime.logsShell();
+        if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+            return;
+        }
+        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, true), logsPollInterval, sink::isOpen);
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
         }
