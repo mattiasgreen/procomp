@@ -117,7 +117,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 ## 4. Environment Variables & Secrets
 
 1. **Precedence (lowest to highest):** host process environment < `envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
-2. **Host-env pass-through:** Values may reference host variables via `"${env:VAR_NAME}"`. Unset host variables fail fast rather than silently expanding to empty strings.
+2. **Host-env pass-through:** `env` values, `command` elements, `workingDir`, and `vars` (scalar or array) may reference host variables via `"${env:VAR_NAME}"` (for example, `"${env:JAVA_HOME}/bin/java"` in `runtimes.<name>.command`). Unset host variables fail fast rather than silently expanding to empty strings.
 3. **Secret hygiene:** `procomp` never persists resolved `env` values in state files and never prints them in `inspect`, `status --json`, or error logs.
 
 ---

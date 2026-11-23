@@ -560,6 +560,113 @@ public final class ProjectResolverTest {
         assertResolveErr(configPath, traversalJson, "CONFIG_INVALID_VALUE");
     }
 
+    public static void testHostEnvRefsExpandInCommandWorkingDirAndVarsAndFailFastWhenUnset() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String configJson = """
+            {
+              "project": "acme",
+              "defaults": {
+                "vars": {
+                  "javaBin": "${env:JAVA_HOME}/bin/java",
+                  "extraArgs": ["-Djdk.home=${env:JAVA_HOME}"]
+                }
+              },
+              "runtimes": {
+                "java": {
+                  "command": ["${env:JAVA_HOME}/bin/java", "{{extraArgs}}", "-Dserver.port={{port}}", "-jar", "app.jar"],
+                  "workingDir": "${env:SERVICES_ROOT}/{{service}}"
+                },
+                "var-java": {
+                  "command": ["{{javaBin}}", "{{svcFlag}}"]
+                }
+              },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "command": ["${env:JAVA_HOME}/bin/java", "-jar", "wiremock.jar", "--port", "{{port}}"],
+                "workingDir": "${env:SERVICES_ROOT}/wiremock"
+              },
+              "services": {
+                "orders": {
+                  "runtime": "java",
+                  "port": 9001
+                },
+                "billing": {
+                  "runtime": "var-java",
+                  "port": 9002,
+                  "workingDir": ".",
+                  "vars": {
+                    "svcFlag": "-Denv=${env:BILLING_ENV}"
+                  }
+                }
+              }
+            }
+            """;
+
+        Map<String, String> hostEnv = Map.of(
+            "JAVA_HOME", "C:/jdks/jdk-25",
+            "SERVICES_ROOT", "C:/dev/services",
+            "BILLING_ENV", "local-dev"
+        );
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, configJson, emptyFiles(), hostEnv),
+            "host env refs in command, workingDir, and vars resolve"
+        );
+
+        ServiceDefinition orders = project.service("orders").orElseThrow();
+        Assert.assertEquals(
+            List.of("C:/jdks/jdk-25/bin/java", "-Djdk.home=C:/jdks/jdk-25", "-Dserver.port=9001", "-jar", "app.jar"),
+            orders.command(),
+            "service command expands ${env:JAVA_HOME} directly and via array vars"
+        );
+        Assert.assertEquals(
+            Path.of("C:/dev/services/orders").normalize(),
+            orders.workingDir(),
+            "service workingDir expands ${env:SERVICES_ROOT}"
+        );
+
+        ServiceDefinition billing = project.service("billing").orElseThrow();
+        Assert.assertEquals(
+            List.of("C:/jdks/jdk-25/bin/java", "-Denv=local-dev"),
+            billing.command(),
+            "service command expands ${env:...} from defaults.vars and service.vars"
+        );
+
+        GatewayDefinition gw = project.gateway().orElseThrow();
+        Assert.assertEquals(
+            List.of("C:/jdks/jdk-25/bin/java", "-jar", "wiremock.jar", "--port", "8080"),
+            gw.command(),
+            "gateway command expands ${env:JAVA_HOME}"
+        );
+        Assert.assertEquals(
+            Optional.of(Path.of("C:/dev/services/wiremock").normalize()),
+            gw.workingDir(),
+            "gateway workingDir expands ${env:SERVICES_ROOT}"
+        );
+
+        // Fail fast when any referenced host env var is missing (including in command, workingDir, vars, or unused runtime)
+        List<String> missingEnvConfigs = List.of(
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["${env:MISSING_JAVA}/bin/java"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"],"workingDir":"${env:MISSING_DIR}"}},"services":{"s1":{"runtime":"rt"}}}
+            """,
+            """
+            {"project":"acme","defaults":{"vars":{"bin":"${env:MISSING_BIN}"}},"runtimes":{"rt":{"command":["{{bin}}"]}},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"used":{"command":["echo"]},"unused":{"command":["${env:MISSING_UNUSED}/bin/java"]}},"services":{"s1":{"runtime":"used","workingDir":"."}}}
+            """,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"gateway":{"type":"wiremock","port":8080,"command":["${env:MISSING_GW}/bin/java"]},"services":{"s1":{"runtime":"rt","workingDir":"."}}}
+            """
+        );
+        for (String bad : missingEnvConfigs) {
+            assertResolveErr(configPath, bad, "CONFIG_UNSET_ENV_VAR");
+        }
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),
