@@ -1,5 +1,7 @@
 package procomp.cli;
 
+import procomp.core.build.BuildRunRecord;
+import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.Json;
 import procomp.core.common.Result;
 import procomp.core.process.InspectionReport;
@@ -140,10 +142,16 @@ public final class ProcessCli {
             case Action.Inspect(String serviceName, boolean json) -> runtime.handleResult(
                 runtime.processShell().flatMap(shell -> shell.inspect(project, serviceName)),
                 report -> {
+                    Result<ObservedBuildRun, procomp.core.common.DomainError> buildRes =
+                        runtime.buildShell().flatMap(b -> b.inspectBuild(project, serviceName));
+                    java.util.Optional<ObservedBuildRun> buildRun =
+                        buildRes instanceof Result.Ok<ObservedBuildRun, procomp.core.common.DomainError>(ObservedBuildRun obs)
+                            ? java.util.Optional.of(obs)
+                            : java.util.Optional.empty();
                     if (json) {
-                        renderInspectJson(project, report, runtime.out());
+                        renderInspectJson(project, report, buildRun, runtime.out());
                     } else {
-                        renderInspectText(report, runtime.out());
+                        renderInspectText(report, buildRun, runtime.out());
                     }
                 }
             );
@@ -218,6 +226,14 @@ public final class ProcessCli {
     }
 
     static void renderInspectText(InspectionReport report, PrintWriter out) {
+        renderInspectText(report, java.util.Optional.empty(), out);
+    }
+
+    static void renderInspectText(
+        InspectionReport report,
+        java.util.Optional<ObservedBuildRun> buildRun,
+        PrintWriter out
+    ) {
         out.println("Service:         " + report.service());
         out.println("Port:            " + report.port().map(Object::toString).orElse("-"));
         out.println("Desired Route:   " + report.desiredRoute().orElse("-"));
@@ -248,10 +264,40 @@ public final class ProcessCli {
         out.println("Health Response: " + report.healthResponse());
         out.println("Stdout Log:      " + report.outLogPath());
         out.println("Stderr Log:      " + report.errLogPath());
+        if (buildRun.isPresent()) {
+            ObservedBuildRun build = buildRun.get();
+            out.println("Build Run:       " + build.displayState().name());
+            if (build.record().isPresent()) {
+                BuildRunRecord rec = build.record().get();
+                if (rec instanceof BuildRunRecord.Running) {
+                    out.println("Build PID:       " + rec.pid());
+                }
+                out.println("Build Started:   " + rec.startedAt());
+                switch (rec) {
+                    case BuildRunRecord.Running _ -> { }
+                    case BuildRunRecord.Succeeded s -> {
+                        out.println("Build Finished:  " + s.finishedAt());
+                        out.println("Build Exit Code: 0");
+                    }
+                    case BuildRunRecord.Failed f -> {
+                        out.println("Build Finished:  " + f.finishedAt());
+                        f.exitCode().ifPresent(c -> out.println("Build Exit Code: " + c));
+                        out.println("Build Reason:    " + f.reason());
+                    }
+                }
+                out.println("Build Stdout:    " + rec.stdoutLog());
+                out.println("Build Stderr:    " + rec.stderrLog());
+            }
+        }
     }
 
-    private static void renderInspectJson(Project project, InspectionReport report, PrintWriter out) {
-        out.println(Json.stringify(DomainJson.inspectionReport(project, report)));
+    private static void renderInspectJson(
+        Project project,
+        InspectionReport report,
+        java.util.Optional<ObservedBuildRun> buildRun,
+        PrintWriter out
+    ) {
+        out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun)));
     }
 
     private static String formatBytes(long bytes) {

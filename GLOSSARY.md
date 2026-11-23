@@ -23,7 +23,7 @@ An OS process instance (PID, command line, parent chain, port binding, log strea
 _Avoid_: Instance, worker, daemon
 
 **Build Run**:
-A tracked build execution for a Service, recording its Process, status (`RUNNING`, `SUCCEEDED`, `FAILED`), timestamps, exit code, and build log.
+A tracked build execution for a Service, recording its Process, status (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`), timestamps, exit code, and build log.
 _Avoid_: Build state, compile job
 
 **Artifact**:
@@ -33,6 +33,10 @@ _Avoid_: Binary, JAR, bundle
 **Repository**:
 A local Git repository checkout on disk (optionally linked to a remote Git URL) that may be shared by one or more Services; optional for Services that run without a Git checkout.
 _Avoid_: Repo, checkout, source folder
+
+**Builder**:
+A reusable build template defining how a class of Services is compiled or packaged into an Artifact (command `argv`, optional working directory, and default environment).
+_Avoid_: Build tool, build preset, compiler
 
 **Runtime**:
 A reusable execution template defining how a class of Services is launched locally (command `argv`, health check path, optional artifact pattern, and default environment).

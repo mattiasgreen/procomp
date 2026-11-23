@@ -667,6 +667,191 @@ public final class ProjectResolverTest {
         }
     }
 
+    public static void testResolvesBuildersDefaultsCatalogAndEnvPrecedence() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        Path catalogPath = Path.of("C:/dev/acme/catalog.json").toAbsolutePath().normalize();
+        Path envFilePath = Path.of("C:/dev/acme/.env").toAbsolutePath().normalize();
+
+        String configJson = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "../repos",
+              "envFiles": [".env"],
+              "defaults": {
+                "builder": "gradle",
+                "vars": { "gradleFlags": ["--no-daemon", "-q"] },
+                "env": {
+                  "SHARED": "from-defaults",
+                  "FROM_DEFAULT": "yes"
+                }
+              },
+              "builders": {
+                "gradle": {
+                  "command": ["./gradlew", "{{subproject}}:assemble", "{{gradleFlags}}"],
+                  "workingDir": "{{repository}}",
+                  "env": {
+                    "SHARED": "from-builder",
+                    "JAVA_HOME": "${env:JDK_HOME}"
+                  }
+                },
+                "npm": {
+                  "command": ["npm", "run", "build"]
+                }
+              },
+              "runtimes": {
+                "java": {
+                  "command": ["java", "-jar", "{{artifact}}"],
+                  "artifactGlob": "build/libs/*.jar",
+                  "workingDir": "{{repository}}/app",
+                  "env": {
+                    "RUNTIME_ONLY": "must-not-leak",
+                    "SHARED": "from-runtime"
+                  }
+                }
+              },
+              "catalog": {
+                "path": "catalog.json",
+                "map": {
+                  "name": "svc",
+                  "runtime": "rt",
+                  "builder": "bld",
+                  "repositoryUrl": "repoUrl",
+                  "vars.subproject": "sub"
+                }
+              },
+              "services": {
+                "orders": {
+                  "env": { "SVC_FLAG": "1" }
+                },
+                "web": {
+                  "runtime": "java",
+                  "builder": "npm",
+                  "workingDir": "web-dir"
+                }
+              }
+            }
+            """;
+
+        String catalogJson = """
+            [
+              {
+                "svc": "orders",
+                "rt": "java",
+                "repoUrl": "https://git.example/orders-repo.git",
+                "sub": ":orders-api"
+              },
+              {
+                "svc": "billing",
+                "rt": "java",
+                "bld": "npm",
+                "repoUrl": "https://git.example/billing-repo.git",
+                "sub": ":billing-api"
+              }
+            ]
+            """;
+
+        Map<Path, String> files = Map.of(
+            catalogPath, catalogJson,
+            envFilePath, "FROM_ENV_FILE=loaded\nSHARED=from-env-file\n"
+        );
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, configJson, filesOf(files), Map.of("JDK_HOME", "C:/jdks/25")),
+            "resolve with builders"
+        );
+
+        Assert.assertEquals(2, project.builders().size(), "builders map size");
+        Assert.assertTrue(project.builder("gradle").isPresent(), "gradle builder present");
+
+        // orders inherits defaults.builder ("gradle"), uses builder.workingDir ({{repository}}), excludes runtime.env
+        ServiceDefinition orders = project.service("orders").orElseThrow();
+        ServiceBuildConfig ordersBuild = orders.buildConfig().orElseThrow();
+        Assert.assertEquals("gradle", ordersBuild.builder(), "orders builder inherited from defaults");
+        Assert.assertEquals(
+            List.of("./gradlew", ":orders-api:assemble", "--no-daemon", "-q"),
+            ordersBuild.command(),
+            "orders build command expands vars and splices array"
+        );
+        Path expectedOrdersRepo = Path.of("C:/dev/repos/orders-repo").toAbsolutePath().normalize();
+        Assert.assertEquals(expectedOrdersRepo, ordersBuild.workingDir(), "builder.workingDir overrides runtime workingDir");
+        Assert.assertEquals(expectedOrdersRepo.resolve("app"), orders.workingDir(), "runtime workingDir unchanged");
+
+        Map<String, String> buildEnv = ordersBuild.env().asMap();
+        Assert.assertEquals("loaded", buildEnv.get("FROM_ENV_FILE"), "build env includes envFiles");
+        Assert.assertEquals("yes", buildEnv.get("FROM_DEFAULT"), "build env includes defaults.env");
+        Assert.assertEquals("from-builder", buildEnv.get("SHARED"), "builder.env overrides defaults.env and envFiles");
+        Assert.assertEquals("C:/jdks/25", buildEnv.get("JAVA_HOME"), "builder.env expands ${env:...}");
+        Assert.assertEquals("1", buildEnv.get("SVC_FLAG"), "build env includes service.env");
+        Assert.assertFalse(buildEnv.containsKey("RUNTIME_ONLY"), "build env excludes runtime.env");
+
+        // billing gets builder from catalog.map ("npm"), defaults build workingDir to service workingDir
+        ServiceDefinition billing = project.service("billing").orElseThrow();
+        ServiceBuildConfig billingBuild = billing.buildConfig().orElseThrow();
+        Assert.assertEquals("npm", billingBuild.builder(), "billing builder from catalog.map");
+        Assert.assertEquals(billing.workingDir(), billingBuild.workingDir(), "npm builder falls back to service workingDir");
+
+        // Missing artifact hint mentions procomp build <service> when builder is configured
+        DomainError missingArtifact = Assert.assertErr(
+            ProjectResolver.resolveServiceCommand(orders, Optional.empty()),
+            "missing artifact must error"
+        );
+        Assert.assertEquals("ARTIFACT_NOT_FOUND", missingArtifact.code(), "missing artifact code");
+        Assert.assertEquals("gradle", missingArtifact.details().get("builder"), "builder detail present");
+        Assert.assertContains(missingArtifact.message(), "build the Service", "modality-neutral build hint");
+    }
+
+    public static void testRejectsInvalidBuilderConfigs() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+
+        // Unknown field inside builder
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","builders":{"g":{"command":["echo"],"bogus":true}},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_UNRECOGNIZED_FIELD"
+        );
+        // Empty builder command
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","builders":{"g":{"command":[]}},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_INVALID_VALUE"
+        );
+        // Unknown defaults.builder
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","defaults":{"builder":"missing"},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_UNKNOWN_BUILDER"
+        );
+        // Unknown service.builder
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","runtimes":{"rt":{"command":["echo"]}},"services":{"s1":{"runtime":"rt","builder":"missing","workingDir":"."}}}
+            """,
+            "CONFIG_UNKNOWN_BUILDER"
+        );
+        // Undefined {{artifact}} inside builder command
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","builders":{"g":{"command":["echo","{{artifact}}"]}},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_UNDEFINED_TEMPLATE_VAR"
+        );
+        // Unset ${env:...} inside unused builder
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","builders":{"unused":{"command":["${env:NO_SUCH_VAR}/gradlew"]}},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_UNSET_ENV_VAR"
+        );
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),

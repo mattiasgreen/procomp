@@ -68,6 +68,7 @@ public final class StatusCli {
                     row.route().name(),
                     formatOwner(row.ownership(), row.provenance()),
                     row.health().name(),
+                    row.build().displayState().name(),
                     row.port().map(Object::toString).orElse("-"),
                     row.pid().map(Object::toString).orElse("-"),
                     row.uptime().map(CliFormat::formatDuration).orElse("-"),
@@ -76,7 +77,7 @@ public final class StatusCli {
             }
             CliFormat.renderTable(
                 out,
-                List.of("SERVICE", "ROUTE", "OWNER", "HEALTH", "PORT", "PID", "UPTIME", "STALE"),
+                List.of("SERVICE", "ROUTE", "OWNER", "HEALTH", "BUILD", "PORT", "PID", "UPTIME", "STALE"),
                 rows
             );
         }

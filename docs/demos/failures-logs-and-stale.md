@@ -23,11 +23,11 @@ Summary: 3 started, 0 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL   MANAGED  HEALTHY  16161  10001  5s      no
-orders         LOCAL   MANAGED  HEALTHY  18101  10002  5s      no
-pricing        REMOTE  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL   MANAGED  HEALTHY  18103  10003  5s      no
+SERVICE        ROUTE   OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL   MANAGED  HEALTHY  NO_BUILDER  16161  10001  5s      no
+orders         LOCAL   MANAGED  HEALTHY  NO_BUILDER  18101  10002  5s      no
+pricing        REMOTE  NONE     STOPPED  NO_BUILDER  18102  -      -       no
+notifications  LOCAL   MANAGED  HEALTHY  NO_BUILDER  18103  10003  5s      no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```
 
@@ -36,11 +36,11 @@ Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```console
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL   MANAGED  HEALTHY  16161  10001  10s     no
-orders         LOCAL   MANAGED  CRASHED  18101  10002  -       no
-pricing        REMOTE  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL   MANAGED  HEALTHY  18103  10003  10s     no
+SERVICE        ROUTE   OWNER    HEALTH   BUILD       PORT   PID    UPTIME  STALE
+broker         LOCAL   MANAGED  HEALTHY  NO_BUILDER  16161  10001  10s     no
+orders         LOCAL   MANAGED  CRASHED  NO_BUILDER  18101  10002  -       no
+pricing        REMOTE  NONE     STOPPED  NO_BUILDER  18102  -      -       no
+notifications  LOCAL   MANAGED  HEALTHY  NO_BUILDER  18103  10003  10s     no
 Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```
 
@@ -70,6 +70,7 @@ Health Endpoint: http://127.0.0.1:18101/actuator/health
 Health Response: HTTP 200 (GET http://127.0.0.1:18101/actuator/health)
 Stdout Log:      /in-memory-state/procomp-e2e/logs/orders.out.log
 Stderr Log:      /in-memory-state/procomp-e2e/logs/orders.err.log
+Build Run:       NO_BUILDER
 ```
 
 ## Step 4: Raw stdout/stderr log inspection via logs -n, --err, and --path

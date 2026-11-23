@@ -1,5 +1,6 @@
 package procomp.platform;
 
+import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
@@ -188,6 +189,56 @@ public final class FsStateStore implements StateStore {
     }
 
     @Override
+    public Result<Optional<BuildRunRecord>, DomainError> readBuildRun(String project, String serviceName) {
+        Path file = buildRunFilePath(project, serviceName);
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.readLock().lock();
+        try {
+            if (!Files.isRegularFile(file)) {
+                return Result.ok(Optional.empty());
+            }
+            return readBuildRunFile(file).map(Optional::of);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    @Override
+    public Result<Unit, DomainError> writeBuildRun(String project, String serviceName, BuildRunRecord record) {
+        Path file = buildRunFilePath(project, serviceName);
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("pid", Json.num(record.pid()));
+        root.put("startedAt", Json.str(record.startedAt().toString()));
+        switch (record) {
+            case BuildRunRecord.Running _ -> root.put("status", Json.str("RUNNING"));
+            case BuildRunRecord.Succeeded s -> {
+                root.put("status", Json.str("SUCCEEDED"));
+                root.put("finishedAt", Json.str(s.finishedAt().toString()));
+            }
+            case BuildRunRecord.Failed f -> {
+                root.put("status", Json.str("FAILED"));
+                root.put("finishedAt", Json.str(f.finishedAt().toString()));
+                root.put("exitCode", f.exitCode().map(c -> (JsonValue) Json.num(c)).orElse(Json.nil()));
+                root.put("reason", Json.str(f.reason()));
+            }
+        }
+        List<JsonValue> cmdNodes = new ArrayList<>(record.commandSummary().size());
+        for (String arg : record.commandSummary()) {
+            cmdNodes.add(Json.str(arg));
+        }
+        root.put("commandSummary", Json.arr(cmdNodes));
+        root.put("stdoutLog", Json.str(record.stdoutLog().toString()));
+        root.put("stderrLog", Json.str(record.stderrLog().toString()));
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.writeLock().lock();
+        try {
+            return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> {
@@ -195,6 +246,10 @@ public final class FsStateStore implements StateStore {
                 yield svc;
             }
             case ProcessKey.Gateway _ -> "gateway";
+            case ProcessKey.Build(String svc) -> {
+                requireSafeSegment(svc, "service");
+                yield svc + ".build";
+            }
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         Path logsDir = projectStateDir(project).resolve("logs").normalize();
@@ -263,6 +318,12 @@ public final class FsStateStore implements StateStore {
         }
     }
 
+    private Path buildRunFilePath(String project, String serviceName) {
+        requireSafeSegment(serviceName, "service");
+        Path dir = projectStateDir(project).resolve("builds").normalize();
+        return resolveContained(dir, serviceName + ".json", "service");
+    }
+
     private Path processFilePath(String project, ProcessKey key) {
         Path dir = projectStateDir(project);
         return switch (key) {
@@ -271,7 +332,97 @@ public final class FsStateStore implements StateStore {
                 yield resolveContained(dir.resolve("processes").normalize(), svc + ".json", "service");
             }
             case ProcessKey.Gateway _ -> dir.resolve("gateway.json");
+            case ProcessKey.Build _ -> throw new IllegalArgumentException(
+                "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
         };
+    }
+
+    private Result<BuildRunRecord, DomainError> readBuildRunFile(Path file) {
+        return readJsonObject(file).flatMap(obj -> {
+            Optional<JsonValue> pidVal = obj.get("pid");
+            if (pidVal.isEmpty() || !(pidVal.get() instanceof JsonValue.JsonNumber num) || !num.isInteger()) {
+                return Result.err(corruptState(file, "Invalid or missing 'pid'"));
+            }
+            OptionalLong pidOpt = num.asLong();
+            if (pidOpt.isEmpty() || pidOpt.getAsLong() <= 0) {
+                return Result.err(corruptState(file, "Invalid non-positive 'pid'"));
+            }
+
+            Result<String, DomainError> statusRes = requireString(obj, "status", file);
+            if (statusRes.isErr()) return statusRes.castError();
+            String status = okVal(statusRes);
+
+            Result<Instant, DomainError> startedRes = requireInstant(obj, "startedAt", file);
+            if (startedRes.isErr()) return startedRes.castError();
+
+            Optional<JsonValue> cmdVal = obj.get("commandSummary");
+            if (cmdVal.isEmpty() || !(cmdVal.get() instanceof JsonValue.JsonArray(List<JsonValue> elems))) {
+                return Result.err(corruptState(file, "Invalid or missing 'commandSummary'"));
+            }
+            List<String> commandSummary = new ArrayList<>(elems.size());
+            for (JsonValue el : elems) {
+                if (!(el instanceof JsonValue.JsonString(String s))) {
+                    return Result.err(corruptState(file, "Non-string element in 'commandSummary'"));
+                }
+                commandSummary.add(s);
+            }
+
+            Result<String, DomainError> stdoutRes = requireString(obj, "stdoutLog", file);
+            if (stdoutRes.isErr()) return stdoutRes.castError();
+            Result<String, DomainError> stderrRes = requireString(obj, "stderrLog", file);
+            if (stderrRes.isErr()) return stderrRes.castError();
+
+            Path stdoutPath;
+            Path stderrPath;
+            try {
+                stdoutPath = Path.of(okVal(stdoutRes));
+                stderrPath = Path.of(okVal(stderrRes));
+            } catch (InvalidPathException e) {
+                return Result.err(corruptState(file, "Invalid log path: " + e.getMessage()));
+            }
+
+            return switch (status) {
+                case "RUNNING" -> Result.ok(new BuildRunRecord.Running(
+                    pidOpt.getAsLong(), okVal(startedRes), commandSummary, stdoutPath, stderrPath
+                ));
+                case "SUCCEEDED" -> {
+                    Result<Instant, DomainError> finishedRes = requireInstant(obj, "finishedAt", file);
+                    if (finishedRes.isErr()) yield finishedRes.castError();
+                    yield Result.ok(new BuildRunRecord.Succeeded(
+                        pidOpt.getAsLong(), okVal(startedRes), okVal(finishedRes), commandSummary, stdoutPath, stderrPath
+                    ));
+                }
+                case "FAILED" -> {
+                    Result<Instant, DomainError> finishedRes = requireInstant(obj, "finishedAt", file);
+                    if (finishedRes.isErr()) yield finishedRes.castError();
+                    Optional<Integer> exitCode = Optional.empty();
+                    Optional<JsonValue> exitVal = obj.get("exitCode");
+                    if (exitVal.isPresent() && !(exitVal.get() instanceof JsonValue.JsonNull)) {
+                        if (!(exitVal.get() instanceof JsonValue.JsonNumber exitNum) || !exitNum.isInteger() || exitNum.asInt().isEmpty()) {
+                            yield Result.err(corruptState(file, "'exitCode' must be an integer or null"));
+                        }
+                        exitCode = Optional.of(exitNum.asInt().getAsInt());
+                    }
+                    Result<String, DomainError> reasonRes = requireString(obj, "reason", file);
+                    if (reasonRes.isErr()) yield reasonRes.castError();
+                    if (okVal(reasonRes).isBlank()) {
+                        yield Result.err(corruptState(file, "'reason' must not be blank"));
+                    }
+                    yield Result.ok(new BuildRunRecord.Failed(
+                        pidOpt.getAsLong(),
+                        okVal(startedRes),
+                        okVal(finishedRes),
+                        exitCode,
+                        okVal(reasonRes),
+                        commandSummary,
+                        stdoutPath,
+                        stderrPath
+                    ));
+                }
+                default -> Result.err(corruptState(file, "Unknown build run status '" + status + "'"));
+            };
+        });
     }
 
     private Result<ManagedProcessRecord, DomainError> readManagedProcessFile(Path file) {

@@ -40,6 +40,68 @@ public final class OsProcessRunner implements ProcessRunner {
 
     @Override
     public Result<SpawnedProcess, DomainError> spawnDetached(SpawnRequest request) {
+        return startProcess(request).map(started ->
+            new SpawnedProcess(started.process().pid(), started.startedAt(), started.commandLine())
+        );
+    }
+
+    @Override
+    public Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+        return startProcess(request).map(started -> new OsRunningProcess(
+            started.process(), started.startedAt(), started.commandLine()
+        ));
+    }
+
+    private record StartedProcess(Process process, Instant startedAt, String commandLine) {}
+
+    private static final class OsRunningProcess implements RunningProcess {
+        private final Process process;
+        private final Instant startedAt;
+        private final String commandLine;
+
+        OsRunningProcess(Process process, Instant startedAt, String commandLine) {
+            this.process = process;
+            this.startedAt = startedAt;
+            this.commandLine = commandLine;
+        }
+
+        @Override
+        public long pid() {
+            return process.pid();
+        }
+
+        @Override
+        public Instant startedAt() {
+            return startedAt;
+        }
+
+        @Override
+        public String commandLine() {
+            return commandLine;
+        }
+
+        @Override
+        public ExitOutcome awaitExit(Optional<Duration> timeout) {
+            Objects.requireNonNull(timeout, "timeout must not be null");
+            try {
+                if (timeout.isEmpty()) {
+                    int code = process.waitFor();
+                    return new ExitOutcome.Exited(code);
+                }
+                long millis = Math.max(0L, timeout.get().toMillis());
+                boolean exited = process.waitFor(millis, TimeUnit.MILLISECONDS);
+                if (!exited) {
+                    return ExitOutcome.TimedOut.INSTANCE;
+                }
+                return new ExitOutcome.Exited(process.exitValue());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ExitOutcome.Interrupted.INSTANCE;
+            }
+        }
+    }
+
+    private Result<StartedProcess, DomainError> startProcess(SpawnRequest request) {
         Objects.requireNonNull(request, "request must not be null");
         if (!Files.isDirectory(request.workingDir())) {
             return Result.err(DomainError.of(
@@ -69,7 +131,7 @@ public final class OsProcessRunner implements ProcessRunner {
             ProcessHandle.Info info = process.toHandle().info();
             Instant startedAt = info.startInstant().orElseGet(Instant::now);
             String commandLine = info.commandLine().orElseGet(() -> String.join(" ", effectiveCommand));
-            return Result.ok(new SpawnedProcess(process.pid(), startedAt, commandLine));
+            return Result.ok(new StartedProcess(process, startedAt, commandLine));
         } catch (IOException e) {
             return Result.err(DomainError.of(
                 "PROCESS_SPAWN_ERROR",

@@ -121,12 +121,43 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String build(List<String> services, boolean force) {
+        Objects.requireNonNull(services, "services must not be null");
+        List<String> tokens = base("build");
+        for (String svc : services) {
+            tokens.add(quoteArg(svc));
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String buildCancel(String service) {
+        Objects.requireNonNull(service, "service must not be null");
+        List<String> tokens = base("build");
+        tokens.add(quoteArg(service));
+        tokens.add("--cancel");
+        return join(tokens);
+    }
+
     public String logs(
         String service,
         boolean stderr,
         boolean pathOnly,
         int lines,
         boolean follow
+    ) {
+        return logs(service, stderr, pathOnly, lines, follow, false);
+    }
+
+    public String logs(
+        String service,
+        boolean stderr,
+        boolean pathOnly,
+        int lines,
+        boolean follow,
+        boolean build
     ) {
         Objects.requireNonNull(service, "service must not be null");
         List<String> tokens = base("logs");
@@ -143,6 +174,9 @@ public final class CliCommandFormatter {
         }
         if (pathOnly) {
             tokens.add("--path");
+        }
+        if (build) {
+            tokens.add("--build");
         }
         return join(tokens);
     }

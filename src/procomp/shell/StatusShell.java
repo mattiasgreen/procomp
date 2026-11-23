@@ -1,5 +1,7 @@
 package procomp.shell;
 
+import procomp.core.build.BuildDisplayState;
+import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.process.DiscoveryResult;
@@ -34,6 +36,7 @@ public final class StatusShell {
     private final RoutingShell routingShell;
     private final ProcessShell processShell;
     private final GatewayShell gatewayShell;
+    private final Optional<BuildShell> buildShell;
     private final Clock clock;
 
     public StatusShell(
@@ -59,6 +62,7 @@ public final class StatusShell {
         this(
             new RoutingShell(stateStore),
             new ProcessLifecycle(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
+            new BuildShell(stateStore, processRunner, projectFiles, clock, observer),
             httpClient,
             projectFiles,
             clock,
@@ -69,6 +73,7 @@ public final class StatusShell {
     private StatusShell(
         RoutingShell routingShell,
         ProcessLifecycle lifecycle,
+        BuildShell buildShell,
         HttpClient httpClient,
         ProjectFiles projectFiles,
         Clock clock,
@@ -77,6 +82,7 @@ public final class StatusShell {
         this(
             routingShell,
             new GatewayShell(httpClient, projectFiles, clock, observer, routingShell, lifecycle),
+            buildShell,
             projectFiles,
             lifecycle,
             clock
@@ -86,6 +92,7 @@ public final class StatusShell {
     private StatusShell(
         RoutingShell routingShell,
         GatewayShell gatewayShell,
+        BuildShell buildShell,
         ProjectFiles projectFiles,
         ProcessLifecycle lifecycle,
         Clock clock
@@ -94,6 +101,7 @@ public final class StatusShell {
             routingShell,
             new ProcessShell(projectFiles, routingShell, gatewayShell, lifecycle),
             gatewayShell,
+            Optional.of(buildShell),
             clock
         );
     }
@@ -104,9 +112,20 @@ public final class StatusShell {
         GatewayShell gatewayShell,
         Clock clock
     ) {
+        this(routingShell, processShell, gatewayShell, Optional.empty(), clock);
+    }
+
+    private StatusShell(
+        RoutingShell routingShell,
+        ProcessShell processShell,
+        GatewayShell gatewayShell,
+        Optional<BuildShell> buildShell,
+        Clock clock
+    ) {
         this.routingShell = Objects.requireNonNull(routingShell, "routingShell must not be null");
         this.processShell = Objects.requireNonNull(processShell, "processShell must not be null");
         this.gatewayShell = Objects.requireNonNull(gatewayShell, "gatewayShell must not be null");
+        this.buildShell = Objects.requireNonNull(buildShell, "buildShell must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
@@ -136,6 +155,20 @@ public final class StatusShell {
                 ? Optional.empty()
                 : Optional.of(disc.healthResponse());
 
+            ObservedBuildRun buildRun;
+            if (buildShell.isPresent()) {
+                Result<ObservedBuildRun, DomainError> bRes = buildShell.get().inspectBuild(project, service);
+                if (bRes instanceof Result.Err<ObservedBuildRun, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+                buildRun = ((Result.Ok<ObservedBuildRun, DomainError>) bRes).value();
+            } else {
+                BuildDisplayState fallback = service.buildConfig().isPresent()
+                    ? BuildDisplayState.NOT_BUILT
+                    : BuildDisplayState.NO_BUILDER;
+                buildRun = new ObservedBuildRun(fallback, Optional.empty(), Optional.empty());
+            }
+
             rows.add(new ServiceStatusRow(
                 service.name(),
                 route,
@@ -148,7 +181,8 @@ public final class StatusShell {
                 disc.uptime(now),
                 disc.stale(),
                 disc.healthEndpoint(),
-                healthNote
+                healthNote,
+                buildRun
             ));
         }
 
@@ -208,8 +242,30 @@ public final class StatusShell {
         Optional<Duration> uptime,
         boolean stale,
         Optional<String> healthEndpoint,
-        Optional<String> healthNote
+        Optional<String> healthNote,
+        ObservedBuildRun build
     ) {
+        public ServiceStatusRow(
+            String service,
+            Route route,
+            Ownership ownership,
+            Optional<String> provenance,
+            HealthState health,
+            Optional<Integer> port,
+            Optional<Long> pid,
+            Optional<Instant> startedAt,
+            Optional<Duration> uptime,
+            boolean stale,
+            Optional<String> healthEndpoint,
+            Optional<String> healthNote
+        ) {
+            this(
+                service, route, ownership, provenance, health, port, pid, startedAt, uptime, stale,
+                healthEndpoint, healthNote,
+                new ObservedBuildRun(BuildDisplayState.NO_BUILDER, Optional.empty(), Optional.empty())
+            );
+        }
+
         public ServiceStatusRow {
             if (service == null || service.isBlank()) {
                 throw new IllegalArgumentException("service must be non-blank");
@@ -224,6 +280,7 @@ public final class StatusShell {
             Objects.requireNonNull(uptime, "uptime must not be null");
             Objects.requireNonNull(healthEndpoint, "healthEndpoint must not be null");
             Objects.requireNonNull(healthNote, "healthNote must not be null");
+            Objects.requireNonNull(build, "build must not be null");
         }
     }
 }

@@ -1,14 +1,19 @@
 package procomp.web;
 
+import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
+import procomp.core.common.Unit;
 import procomp.core.process.InspectionReport;
 import procomp.core.project.ProfileDefinition;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
+import procomp.shell.BuildShell;
+import procomp.shell.BuildShell.BuildRequest;
+import procomp.shell.BuildShell.CancelResult;
 import procomp.shell.CliCommandFormatter;
 import procomp.shell.DomainJson;
 import procomp.shell.GatewayShell;
@@ -45,6 +50,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -68,6 +76,8 @@ public final class ApiRouter {
     private final int boundPort;
     private final Duration logsPollInterval;
     private final ReentrantLock mutationLock = new ReentrantLock();
+    private final ConcurrentHashMap<String, Boolean> launchingBuilds = new ConcurrentHashMap<>();
+    private final Executor buildExecutor;
 
     public ApiRouter(ProcompRuntime runtime, LiveProjectHolder projectHolder, int boundPort) {
         this(runtime, projectHolder, boundPort, LogsShell.DEFAULT_POLL_INTERVAL);
@@ -79,6 +89,16 @@ public final class ApiRouter {
         int boundPort,
         Duration logsPollInterval
     ) {
+        this(runtime, projectHolder, boundPort, logsPollInterval, defaultBuildExecutor());
+    }
+
+    public ApiRouter(
+        ProcompRuntime runtime,
+        LiveProjectHolder projectHolder,
+        int boundPort,
+        Duration logsPollInterval,
+        Executor buildExecutor
+    ) {
         this.runtime = Objects.requireNonNull(runtime, "runtime must not be null");
         this.projectHolder = Objects.requireNonNull(projectHolder, "projectHolder must not be null");
         this.cli = projectHolder.configOverride()
@@ -89,6 +109,15 @@ public final class ApiRouter {
         }
         this.boundPort = boundPort;
         this.logsPollInterval = Objects.requireNonNull(logsPollInterval, "logsPollInterval must not be null");
+        this.buildExecutor = Objects.requireNonNull(buildExecutor, "buildExecutor must not be null");
+    }
+
+    private static Executor defaultBuildExecutor() {
+        return Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "procomp-web-build");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
@@ -208,6 +237,22 @@ public final class ApiRouter {
             return handleUseProfile(profileUseSegment.get());
         }
 
+        Optional<String> buildCancelSegment = extractSegment(path, SERVICES_PREFIX, "/build/cancel");
+        if (buildCancelSegment.isPresent()) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleCancelBuild(buildCancelSegment.get());
+        }
+
+        Optional<String> buildSegment = extractSegment(path, SERVICES_PREFIX, "/build");
+        if (buildSegment.isPresent()) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleBuildService(buildSegment.get(), request);
+        }
+
         Optional<String> inspectSegment = extractSegment(path, SERVICES_PREFIX, "/inspect");
         if (inspectSegment.isPresent()) {
             if (!"GET".equals(method)) {
@@ -318,11 +363,109 @@ public final class ApiRouter {
             return domainErrorResponse(err, cliCommand);
         }
         InspectionReport report = ((Result.Ok<InspectionReport, DomainError>) inspectRes).value();
+        Result<ObservedBuildRun, DomainError> buildRes =
+            runtime.buildShell().flatMap(b -> b.inspectBuild(project, serviceName));
+        Optional<ObservedBuildRun> buildRun = buildRes instanceof Result.Ok<ObservedBuildRun, DomainError>(ObservedBuildRun obs)
+            ? Optional.of(obs)
+            : Optional.empty();
         Map<String, JsonValue> envelope = new LinkedHashMap<>();
-        envelope.put("data", DomainJson.inspectionReport(project, report));
+        envelope.put("data", DomainJson.inspectionReport(project, report, buildRun));
         envelope.put("cliCommand", Json.str(cliCommand));
         envelope.put("killConflictCliCommand", Json.str(killConflictCliCommand));
         return ApiResponse.json(200, Json.obj(envelope));
+    }
+
+    private ApiResponse handleBuildService(String rawName, ApiRequest request) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "service");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String serviceName = ((Result.Ok<String, DomainError>) nameRes).value();
+
+        Result<JsonValue.JsonObject, DomainError> objRes = parseJsonObject(request.body(), true);
+        if (objRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject obj = ((Result.Ok<JsonValue.JsonObject, DomainError>) objRes).value();
+        Result<Boolean, DomainError> forceRes = readOptionalBoolean(obj, "force", false);
+        if (forceRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        boolean force = ((Result.Ok<Boolean, DomainError>) forceRes).value();
+        String cliCommand = cli.build(List.of(serviceName), force);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<BuildShell, DomainError> shellRes = runtime.buildShell();
+        if (shellRes instanceof Result.Err<BuildShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        BuildShell buildShell = ((Result.Ok<BuildShell, DomainError>) shellRes).value();
+
+        Result<Unit, DomainError> validRes = buildShell.validateCanBuild(project, serviceName, force);
+        if (validRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+
+        String launchKey = project.name() + "\0" + serviceName;
+        if (!force && launchingBuilds.putIfAbsent(launchKey, Boolean.TRUE) != null) {
+            return domainErrorResponse(
+                DomainError.of("BUILD_ALREADY_RUNNING", "Build Run for service '" + serviceName + "' is already starting"),
+                cliCommand
+            );
+        }
+        if (force) {
+            launchingBuilds.put(launchKey, Boolean.TRUE);
+        }
+
+        buildExecutor.execute(() -> {
+            try {
+                buildShell.build(project, new BuildRequest(List.of(serviceName), force, Optional.empty()));
+            } finally {
+                launchingBuilds.remove(launchKey);
+            }
+        });
+
+        Map<String, JsonValue> data = new LinkedHashMap<>();
+        data.put("service", Json.str(serviceName));
+        data.put("status", Json.str("ACCEPTED"));
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", Json.obj(data));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(202, Json.obj(envelope));
+    }
+
+    private ApiResponse handleCancelBuild(String rawName) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "service");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String serviceName = ((Result.Ok<String, DomainError>) nameRes).value();
+        String cliCommand = cli.buildCancel(serviceName);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<BuildShell, DomainError> shellRes = runtime.buildShell();
+        if (shellRes instanceof Result.Err<BuildShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<CancelResult, DomainError> cancelRes =
+            ((Result.Ok<BuildShell, DomainError>) shellRes).value().cancel(project, serviceName);
+        if (cancelRes instanceof Result.Err<CancelResult, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        return okEnvelope(
+            DomainJson.cancelResult(project, ((Result.Ok<CancelResult, DomainError>) cancelRes).value()),
+            cliCommand
+        );
     }
 
     private ApiResponse handleUpdateRoutes(ApiRequest request) {
@@ -733,10 +876,15 @@ public final class ApiRouter {
         if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
+        Result<Boolean, DomainError> buildFlagRes = parseOptionalQueryBoolean(query, "build", false);
+        if (buildFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = cli.logs(serviceName, stderr, false, lines, false);
+        boolean build = ((Result.Ok<Boolean, DomainError>) buildFlagRes).value();
+        String cliCommand = cli.logs(serviceName, stderr, false, lines, false, build);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -749,7 +897,7 @@ public final class ApiRouter {
             return domainErrorResponse(err, cliCommand);
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, false));
+            .run(project, new LogsRequest(serviceName, stderr, false, lines, false, build));
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
@@ -793,10 +941,16 @@ public final class ApiRouter {
             sendSseError(sink, err, "");
             return;
         }
+        Result<Boolean, DomainError> buildFlagRes = parseOptionalQueryBoolean(query, "build", false);
+        if (buildFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = cli.logs(serviceName, stderr, false, lines, true);
+        boolean build = ((Result.Ok<Boolean, DomainError>) buildFlagRes).value();
+        String cliCommand = cli.logs(serviceName, stderr, false, lines, true, build);
 
         sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
 
@@ -818,7 +972,7 @@ public final class ApiRouter {
             return;
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, true), logsPollInterval, sink::isOpen);
+            .run(project, new LogsRequest(serviceName, stderr, false, lines, true, build), logsPollInterval, sink::isOpen);
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
         }
@@ -948,9 +1102,11 @@ public final class ApiRouter {
             case "FORBIDDEN_ORIGIN" -> 403;
             case "METHOD_NOT_ALLOWED" -> 405;
             case "UNKNOWN_SERVICE", "UNKNOWN_PROFILE", "LOG_NOT_FOUND", "CONFIG_NOT_FOUND", "NOT_FOUND" -> 404;
-            case "PORT_CONFLICT", "GATEWAY_CONFLICT", "GATEWAY_UNMANAGED", "GATEWAY_NOT_HEALTHY", "CONFLICT_PID_UNKNOWN" -> 409;
+            case "PORT_CONFLICT", "GATEWAY_CONFLICT", "GATEWAY_UNMANAGED", "GATEWAY_NOT_HEALTHY", "CONFLICT_PID_UNKNOWN",
+                "BUILD_ALREADY_RUNNING", "BUILD_RUN_UNKNOWN" -> 409;
             case "INVALID_REQUEST",
                 "INVALID_STOP_OPTIONS",
+                "NO_BUILDER_CONFIGURED",
                 "ROUTE_INVALID_VALUE",
                 "ROUTE_MISSING_SERVICES",
                 "GATEWAY_NOT_CONFIGURED",

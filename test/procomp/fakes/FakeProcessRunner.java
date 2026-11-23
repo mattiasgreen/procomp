@@ -23,9 +23,16 @@ public final class FakeProcessRunner implements ProcessRunner {
     private final List<SpawnRequest> spawnedRequests = new ArrayList<>();
     private final List<Long> stoppedPids = new ArrayList<>();
     private DomainError spawnError;
+    private java.util.function.Function<SpawnRequest, ExitOutcome> attachedOutcomeHandler =
+        _ -> new ExitOutcome.Exited(0);
 
     public FakeProcessRunner(Clock clock) {
         this.clock = clock;
+    }
+
+    public FakeProcessRunner onAttachedExit(java.util.function.Function<SpawnRequest, ExitOutcome> handler) {
+        this.attachedOutcomeHandler = handler;
+        return this;
     }
 
     public FakeProcessRunner registerProcess(ObservedProcess snapshot) {
@@ -73,6 +80,40 @@ public final class FakeProcessRunner implements ProcessRunner {
             Optional.of(request.command().get(0))
         ));
         return Result.ok(new SpawnedProcess(pid, startedAt, cmdLine));
+    }
+
+    @Override
+    public Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+        Result<SpawnedProcess, DomainError> spawnedRes = spawnDetached(request);
+        if (spawnedRes.isErr()) {
+            return spawnedRes.castError();
+        }
+        SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnedRes).value();
+        return Result.ok(new RunningProcess() {
+            @Override
+            public long pid() {
+                return spawned.pid();
+            }
+
+            @Override
+            public Instant startedAt() {
+                return spawned.startedAt();
+            }
+
+            @Override
+            public String commandLine() {
+                return spawned.commandLine();
+            }
+
+            @Override
+            public ExitOutcome awaitExit(Optional<Duration> timeout) {
+                ExitOutcome outcome = attachedOutcomeHandler.apply(request);
+                if (outcome instanceof ExitOutcome.Exited) {
+                    processes.remove(spawned.pid());
+                }
+                return outcome;
+            }
+        });
     }
 
     @Override

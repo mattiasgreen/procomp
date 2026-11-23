@@ -88,7 +88,8 @@ Uptime is displayed alongside `Health State` so a human can tell whether a `STAR
 - **Persisted per `Project`:**
   - `Routing Table` (desired `LOCAL` / `REMOTE` per `Service`)
   - `Managed` `Process` records (PID, start time, command, artifact timestamp, log paths)
-  - Raw `Process` log files: `<service>.out.log` (`stdout`) and `<service>.err.log` (`stderr`), untouched on disk
+  - Latest `Build Run` records (`builds/<service>.json`: PID, status `RUNNING`/`SUCCEEDED`/`FAILED`, timestamps, exit code, reason, build log paths)
+  - Raw `Process` log files: `<service>.out.log` / `<service>.err.log` and `<service>.build.out.log` / `<service>.build.err.log`, untouched on disk
 
 ---
 
@@ -96,15 +97,16 @@ Uptime is displayed alongside `Health State` so a human can tell whether a `STAR
 
 All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`/`--verbose`, `-h`/`--help`) are accepted anywhere on the command line; `-v`/`--verbose` emits elapsed-time diagnostics (`[+0.124s] [<category>] <message>`) strictly to `stderr` without polluting `stdout` or printing `env` secret values. All read commands (`status`, `route`, `profile list`, `gateway status`, `inspect`) support `--json` for scripting/piping.
 
-### Process Lifecycle
+### Process & Build Lifecycle
 
 | Command | Behavior |
 | :--- | :--- |
-| `procomp start [service...]` | Runs pre-start `Discovery` per target (`None`/`CRASHED` → spawn `Managed`; `Managed`/`Unmanaged` → reuse without duplicating; `Conflict` → fail fast with `Inspection` details). Bare `start` targets all `LOCAL`-routed Services. Waits for `HEALTHY` by default (`-d`/`--detach` to return immediately). Never mutates the `Routing Table`. |
+| `procomp build [service...]` | Runs tracked in-place `Build Run`(s) sequentially (fail-fast) using each target's configured `Builder`. Bare `build` targets all `LOCAL`-routed Services with a `Builder`. Rejects overlapping `RUNNING` or `UNKNOWN` (dead-PID) runs unless `--force` is passed; supports `--cancel <service...>`, `--timeout <seconds>`, and `--json`. Never mutates the `Routing Table` or starts/restarts Services. |
+| `procomp start [service...]` | Runs pre-start `Discovery` per target (`None`/`CRASHED` → spawn `Managed`; `Managed`/`Unmanaged` → reuse without duplicating; `Conflict` → fail fast with `Inspection` details). Bare `start` targets all `LOCAL`-routed Services. Waits for `HEALTHY` by default (`-d`/`--detach` to return immediately). Never auto-builds or mutates the `Routing Table`. |
 | `procomp stop [service...]` | Stops `Managed` Service `Process`(es) cleanly. Bare `stop` stops all `Managed` Services while leaving the `Gateway` running (`--all` also stops a `Managed` `Gateway`). Never kills `Unmanaged` Processes. Killing a `Conflict` requires explicit consent. |
-| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `PORT`, `PID`, `UPTIME`, `STALE`) plus a one-line `Gateway` summary. |
-| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process`. |
-| `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
+| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `PORT`, `PID`, `UPTIME`, `STALE`) plus a one-line `Gateway` summary. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). |
+| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process` and latest `Build Run`. |
+| `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`, or build logs with `--build`). Supports `-n <lines>`, `-f` (follow), `--err`, `--build`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
 
 ### Routing Table & Profiles
 
