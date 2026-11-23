@@ -24,10 +24,15 @@ public record ServiceDefinition(
     List<EnvFileSpec> envFiles
 ) {
     public ServiceDefinition {
-        if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("ServiceDefinition name must be non-blank");
+        if (!ProjectConfigParser.isPathSafeIdentifier(name)) {
+            throw new IllegalArgumentException("ServiceDefinition name must be a single path-safe segment: " + name);
         }
         Objects.requireNonNull(port);
+        port.ifPresent(p -> {
+            if (p < 1 || p > 65535) {
+                throw new IllegalArgumentException("ServiceDefinition port out of range: " + p);
+            }
+        });
         if (runtime == null || runtime.isBlank()) {
             throw new IllegalArgumentException("ServiceDefinition runtime must be non-blank");
         }

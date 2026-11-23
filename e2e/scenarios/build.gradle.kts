@@ -28,6 +28,7 @@ val webAssetsDirPath = rootProject.file("web").absolutePath
 
 tasks.test {
     useJUnitPlatform()
+    inputs.dir(rootProject.layout.projectDirectory.dir("web")).withPathSensitivity(PathSensitivity.RELATIVE)
     systemProperty("e2e.webDir", webAssetsDirPath)
     testLogging {
         events("passed", "skipped", "failed")
@@ -69,6 +70,7 @@ val checkDemos = tasks.register<JavaExec>("checkDemos") {
     description = "Verify that committed docs/demos/*.md files match deterministic DemoCapture output."
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("e2e.scenarios.demo.DemoCaptureMain")
+    inputs.dir(demosOutputDir).withPathSensitivity(PathSensitivity.RELATIVE)
     args("--check", demosOutputDir.absolutePath)
 }
 

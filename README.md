@@ -40,8 +40,22 @@ We are deliberately building **`procomp` as a focused CLI first** to nail the do
 | `procomp profile <list\|use <name>>` | List or apply named routing `Profile`s to the `Routing Table`. |
 | `procomp gateway <start\|stop\|status\|reconcile>` | Manage the local `Gateway` process and explicitly reconcile live proxy mappings to the `Routing Table`. |
 | `procomp logs <service>` | Minimal raw log reader (`-n`, `-f`, `--err`, `--path`) for `<service>.out.log` / `<service>.err.log`. |
+| `procomp ui [--port <n>] [--open]` | Start the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. |
 
 *(Phase 2 will add `procomp build`, `procomp sync`, and `procomp doctor`.)*
+
+---
+
+## Quick Start & Verification
+
+Requires **JDK 25 LTS** (zero external runtime dependencies via JEP 458):
+
+```sh
+./procomp --help          # POSIX (macOS / Linux / Git Bash / WSL)
+procomp.cmd --help        # Windows
+./procomp-test --fast     # Offline fast test suite (Levels 1-2)
+gradle check              # Full Gradle verification (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, Scenarios, Demos)
+```
 
 ---
 
@@ -49,6 +63,6 @@ We are deliberately building **`procomp` as a focused CLI first** to nail the do
 
 - **[GLOSSARY.md](GLOSSARY.md)** — Canonical domain vocabulary (`Project`, `Service`, `Gateway`, `Process`, `Route`, `Discovery`, `Inspection`, etc.).
 - **[docs/DESIGN.md](docs/DESIGN.md)** — Settled language-agnostic v1 design, CLI contract, and explicitly deferred post-v1 areas.
-- **[docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md)** — Configuration schema reference for `procomp.json` and `appsFile` (`service-index.json`).
-- **[examples/using-service-index.procomp.json](examples/using-service-index.procomp.json)** — Example `procomp.json` pointing to an external `service-index.json`.
-- **[examples/service-index.json](examples/service-index.json)** — Example external service catalog schema.
+- **[docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md)** — Configuration schema reference for `procomp.json` and external `Catalog` files (e.g. `service-index.json`).
+- **[examples/using-service-index.procomp.json](examples/using-service-index.procomp.json)** — Example `procomp.json` pointing to an external `Catalog` (`service-index.json`).
+- **[examples/service-index.json](examples/service-index.json)** — Example external service `Catalog` schema.

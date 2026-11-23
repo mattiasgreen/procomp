@@ -20,6 +20,8 @@ export class ApiError extends Error {
 }
 
 async function requestJson(url, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const isMutating = method !== 'GET' && method !== 'HEAD';
   let response;
   try {
     response = await fetch(url, {
@@ -27,6 +29,7 @@ async function requestJson(url, options = {}) {
       ...options,
       headers: {
         Accept: 'application/json',
+        ...(isMutating ? { 'X-Procomp-Request': '1' } : {}),
         ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...(options.headers || {}),
       },
@@ -139,7 +142,7 @@ export function fetchServiceLogs(serviceName, { lines = 100, err = false } = {})
 }
 
 /**
- * Opens an SSE stream for `GET /api/services/start/stream`.
+ * Opens an SSE stream via `POST /api/services/start/stream` using `fetch()` + `ReadableStream`.
  *
  * @param {string[]} services Empty array starts all LOCAL-routed Services.
  * @param {{
@@ -151,72 +154,197 @@ export function fetchServiceLogs(serviceName, { lines = 100, err = false } = {})
  * }} handlers
  */
 export function streamStartServices(services = [], handlers = {}) {
-  const params = new URLSearchParams();
-  if (services.length > 0) {
-    params.set('services', services.join(','));
-  }
   const timeoutSeconds = handlers.timeoutSeconds ?? 30;
-  params.set('timeout', String(timeoutSeconds));
-
-  const url = `/api/services/start/stream?${params.toString()}`;
-  const eventSource = new EventSource(url);
+  const controller = new AbortController();
   let closed = false;
 
   const close = () => {
     if (!closed) {
       closed = true;
-      eventSource.close();
+      controller.abort();
     }
   };
 
-  eventSource.addEventListener('meta', (event) => {
-    const payload = parseJsonSafe(event.data);
-    if (payload && handlers.onMeta) {
-      handlers.onMeta(payload);
-    }
-  });
-
-  eventSource.addEventListener('progress', (event) => {
-    const payload = parseJsonSafe(event.data);
-    if (payload && handlers.onProgress) {
-      handlers.onProgress(payload);
-    }
-  });
-
-  eventSource.addEventListener('done', (event) => {
-    const payload = parseJsonSafe(event.data);
-    close();
-    if (handlers.onDone) {
-      handlers.onDone(payload || {});
-    }
-  });
-
-  eventSource.addEventListener('error', (event) => {
-    if (closed) {
+  const dispatchSseEvent = (eventName, dataText) => {
+    const payload = parseJsonSafe(dataText);
+    if (eventName === 'meta') {
+      if (payload && handlers.onMeta) {
+        handlers.onMeta(payload);
+      }
       return;
     }
-    const payload = parseJsonSafe(event.data);
-    close();
-    if (handlers.onError) {
-      if (payload?.error) {
-        handlers.onError(new ApiError(500, payload.error, payload.cliCommand ?? null));
-      } else {
+    if (eventName === 'progress') {
+      if (payload && handlers.onProgress) {
+        handlers.onProgress(payload);
+      }
+      return;
+    }
+    if (eventName === 'done') {
+      close();
+      if (handlers.onDone) {
+        handlers.onDone(payload || {});
+      }
+      return;
+    }
+    if (eventName === 'error') {
+      close();
+      if (handlers.onError) {
+        if (payload?.error) {
+          handlers.onError(new ApiError(500, payload.error, payload.cliCommand ?? null));
+        } else {
+          handlers.onError(
+            new ApiError(
+              0,
+              {
+                code: 'STREAM_DISCONNECTED',
+                message: 'Start progress stream disconnected unexpectedly.',
+                details: {},
+              },
+              null,
+            ),
+          );
+        }
+      }
+    }
+  };
+
+  (async () => {
+    let response;
+    try {
+      response = await fetch('/api/services/start/stream', {
+        method: 'POST',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+          'X-Procomp-Request': '1',
+        },
+        body: JSON.stringify({ services, detach: false, timeoutSeconds }),
+      });
+    } catch (err) {
+      if (closed) {
+        return;
+      }
+      close();
+      if (handlers.onError) {
         handlers.onError(
           new ApiError(
             0,
             {
-              code: 'STREAM_DISCONNECTED',
-              message: 'Start progress stream disconnected unexpectedly.',
-              details: {},
+              code: 'NETWORK_ERROR',
+              message: 'Unable to reach local procomp Web UI server.',
+              details: { cause: err instanceof Error ? err.message : String(err) },
             },
             null,
           ),
         );
       }
+      return;
     }
-  });
 
-  return { eventSource, close };
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '');
+      const payload = parseJsonSafe(text);
+      close();
+      if (handlers.onError) {
+        const errObj = payload?.error || {
+          code: `HTTP_${response.status}`,
+          message: response.statusText || `Request failed with HTTP ${response.status}`,
+          details: {},
+        };
+        handlers.onError(new ApiError(response.status, errObj, payload?.cliCommand ?? null));
+      }
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let currentEvent = 'message';
+    let dataLines = [];
+
+    const flushEvent = () => {
+      if (dataLines.length === 0) {
+        currentEvent = 'message';
+        return;
+      }
+      const dataText = dataLines.join('\n');
+      const evt = currentEvent;
+      currentEvent = 'message';
+      dataLines = [];
+      dispatchSseEvent(evt, dataText);
+    };
+
+    try {
+      while (!closed) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let nlIdx;
+        while ((nlIdx = buffer.indexOf('\n')) >= 0) {
+          let line = buffer.slice(0, nlIdx);
+          buffer = buffer.slice(nlIdx + 1);
+          if (line.endsWith('\r')) {
+            line = line.slice(0, -1);
+          }
+          if (line === '') {
+            flushEvent();
+          } else if (line.startsWith(':')) {
+            // heartbeat comment
+          } else if (line.startsWith('event:')) {
+            currentEvent = line.slice('event:'.length).trim();
+          } else if (line.startsWith('data:')) {
+            let val = line.slice('data:'.length);
+            if (val.startsWith(' ')) {
+              val = val.slice(1);
+            }
+            dataLines.push(val);
+          }
+        }
+      }
+      if (!closed) {
+        flushEvent();
+      }
+      if (!closed) {
+        close();
+        if (handlers.onError) {
+          handlers.onError(
+            new ApiError(
+              0,
+              {
+                code: 'STREAM_DISCONNECTED',
+                message: 'Start progress stream disconnected unexpectedly.',
+                details: {},
+              },
+              null,
+            ),
+          );
+        }
+      }
+    } catch {
+      if (!closed) {
+        close();
+        if (handlers.onError) {
+          handlers.onError(
+            new ApiError(
+              0,
+              {
+                code: 'STREAM_DISCONNECTED',
+                message: 'Start progress stream disconnected unexpectedly.',
+                details: {},
+              },
+              null,
+            ),
+          );
+        }
+      }
+    }
+  })();
+
+  return { close };
 }
 
 /**

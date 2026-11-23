@@ -20,9 +20,13 @@ const state = {
   profiles: [],
   configPath: '',
   pollTimer: null,
-  statusInFlight: false,
+  statusInFlightCount: 0,
+  statusSeq: 0,
   hasExplicitCliCommand: false,
   pollErrorActive: false,
+  pendingRoutes: new Set(),
+  pendingStops: new Set(),
+  pendingProfiles: new Set(),
   drawer: {
     open: false,
     service: null,
@@ -97,6 +101,7 @@ const dom = {
   logsLineCount: document.getElementById('logs-line-count'),
   chkLogsAutoscroll: document.getElementById('chk-logs-autoscroll'),
   btnLogsClear: document.getElementById('btn-logs-clear'),
+  btnLogsReconnect: document.getElementById('btn-logs-reconnect'),
   logsOutput: document.getElementById('logs-output'),
 
   cliCommandEcho: document.getElementById('cli-command-echo'),
@@ -428,8 +433,12 @@ function renderServices() {
     routeToggle.setAttribute('role', 'group');
     routeToggle.setAttribute('aria-label', `Route for ${row.service}`);
 
+    const routePending = state.pendingRoutes.has(row.service);
     const btnLocal = el('button', `seg-btn route-local${row.route === 'LOCAL' ? ' active' : ''}`, 'LOCAL');
     btnLocal.type = 'button';
+    btnLocal.disabled = routePending;
+    btnLocal.dataset.service = row.service;
+    btnLocal.dataset.action = 'route-local';
     btnLocal.setAttribute('aria-pressed', String(row.route === 'LOCAL'));
     btnLocal.addEventListener('click', () => {
       if (row.route !== 'LOCAL') {
@@ -439,6 +448,9 @@ function renderServices() {
 
     const btnRemote = el('button', `seg-btn route-remote${row.route === 'REMOTE' ? ' active' : ''}`, 'REMOTE');
     btnRemote.type = 'button';
+    btnRemote.disabled = routePending;
+    btnRemote.dataset.service = row.service;
+    btnRemote.dataset.action = 'route-remote';
     btnRemote.setAttribute('aria-pressed', String(row.route === 'REMOTE'));
     btnRemote.addEventListener('click', () => {
       if (row.route !== 'REMOTE') {
@@ -488,6 +500,8 @@ function renderServices() {
     const btnStart = el('button', 'btn btn-secondary btn-xs', starting ? 'Starting…' : 'Start');
     btnStart.type = 'button';
     btnStart.disabled = starting;
+    btnStart.dataset.service = row.service;
+    btnStart.dataset.action = 'start';
     btnStart.title = `Start ${row.service}`;
     btnStart.addEventListener('click', () => handleStartServices([row.service]));
     actionsWrap.append(btnStart);
@@ -495,13 +509,19 @@ function renderServices() {
     if (row.owner === 'CONFLICT') {
       const btnKillConflict = el('button', 'btn btn-danger btn-xs', 'Kill Conflict…');
       btnKillConflict.type = 'button';
+      btnKillConflict.dataset.service = row.service;
+      btnKillConflict.dataset.action = 'kill-conflict';
       btnKillConflict.title = `Inspect and kill conflicting Process on port ${row.port ?? ''}`;
       btnKillConflict.addEventListener('click', () => openConflictDialog(row.service));
       actionsWrap.append(btnKillConflict);
     } else {
+      const stopPending = state.pendingStops.has(row.service);
       const btnStop = el('button', 'btn btn-secondary btn-xs', 'Stop');
       btnStop.type = 'button';
+      btnStop.dataset.service = row.service;
+      btnStop.dataset.action = 'stop';
       if (row.owner === 'MANAGED') {
+        btnStop.disabled = stopPending;
         btnStop.title = `Stop Managed Process for ${row.service}`;
         btnStop.addEventListener('click', () => handleStopServices([row.service], btnStop));
       } else if (row.owner === 'UNMANAGED') {
@@ -516,12 +536,16 @@ function renderServices() {
 
     const btnInspect = el('button', 'btn btn-secondary btn-xs', 'Inspect');
     btnInspect.type = 'button';
+    btnInspect.dataset.service = row.service;
+    btnInspect.dataset.action = 'inspect';
     btnInspect.title = `Inspect ${row.service}`;
     btnInspect.addEventListener('click', () => openDrawer(row.service, 'inspect'));
     actionsWrap.append(btnInspect);
 
     const btnLogs = el('button', 'btn btn-secondary btn-xs', 'Logs');
     btnLogs.type = 'button';
+    btnLogs.dataset.service = row.service;
+    btnLogs.dataset.action = 'logs';
     btnLogs.title = `Stream live Logs for ${row.service}`;
     btnLogs.addEventListener('click', () => openDrawer(row.service, 'logs'));
     actionsWrap.append(btnLogs);
@@ -555,16 +579,20 @@ function renderProgressStrip() {
 /* ---------- Polling & Discovery ---------- */
 
 async function refreshStatus({ explicit = false } = {}) {
-  if (state.statusInFlight && !explicit) {
+  if (state.statusInFlightCount > 0 && !explicit) {
     return;
   }
-  state.statusInFlight = true;
+  const reqSeq = ++state.statusSeq;
+  state.statusInFlightCount += 1;
   if (explicit) {
     dom.btnRefresh.disabled = true;
   }
 
   try {
     const payload = await fetchStatus();
+    if (reqSeq !== state.statusSeq) {
+      return;
+    }
     state.estate = payload.data;
     state.profiles = payload.profiles || [];
     state.configPath = payload.configPath || '';
@@ -577,10 +605,28 @@ async function refreshStatus({ explicit = false } = {}) {
       clearError();
     }
 
+    const activeEl = document.activeElement;
+    const focusKey =
+      activeEl instanceof HTMLElement &&
+      dom.servicesTbody.contains(activeEl) &&
+      activeEl.dataset.service &&
+      activeEl.dataset.action
+        ? { service: activeEl.dataset.service, action: activeEl.dataset.action }
+        : null;
+
     renderHeader();
     renderGateway();
     renderProfiles();
     renderServices();
+
+    if (focusKey) {
+      const targetBtn = Array.from(dom.servicesTbody.querySelectorAll('button')).find(
+        (b) => b.dataset.service === focusKey.service && b.dataset.action === focusKey.action,
+      );
+      if (targetBtn && !targetBtn.disabled) {
+        targetBtn.focus({ preventScroll: true });
+      }
+    }
 
     dom.lastUpdated.textContent = formatClockTime(new Date());
     if (document.visibilityState === 'visible') {
@@ -589,10 +635,13 @@ async function refreshStatus({ explicit = false } = {}) {
       updatePollIndicator('paused', 'Paused');
     }
   } catch (err) {
+    if (reqSeq !== state.statusSeq) {
+      return;
+    }
     updatePollIndicator('error', 'Error');
     showError(err, { fromPoll: !explicit });
   } finally {
-    state.statusInFlight = false;
+    state.statusInFlightCount = Math.max(0, state.statusInFlightCount - 1);
     if (explicit) {
       dom.btnRefresh.disabled = false;
     }
@@ -646,15 +695,22 @@ async function runAction(controls, actionFn, { onSettled = null } = {}) {
     for (const control of list) {
       control.disabled = false;
     }
+    renderGateway();
   }
 }
 
 function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
-  return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute));
+  state.pendingRoutes.add(serviceName);
+  return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute), {
+    onSettled: () => state.pendingRoutes.delete(serviceName),
+  });
 }
 
 function handleUseProfile(profileName, btn) {
-  return runAction([btn], () => useProfile(profileName));
+  state.pendingProfiles.add(profileName);
+  return runAction([btn], () => useProfile(profileName), {
+    onSettled: () => state.pendingProfiles.delete(profileName),
+  });
 }
 
 function handleStartServices(services = []) {
@@ -703,7 +759,16 @@ function handleStartServices(services = []) {
 }
 
 function handleStopServices(services = [], triggerBtn = null) {
-  return runAction([triggerBtn], () => stopServices(services, { all: false, killConflict: false }));
+  for (const s of services) {
+    state.pendingStops.add(s);
+  }
+  return runAction([triggerBtn], () => stopServices(services, { all: false, killConflict: false }), {
+    onSettled: () => {
+      for (const s of services) {
+        state.pendingStops.delete(s);
+      }
+    },
+  });
 }
 
 function handleGatewayAction(actionFn, triggerBtn) {
@@ -919,12 +984,14 @@ function startLogStream(serviceName) {
     lines: 100,
     err: state.logs.err,
     onOpen() {
+      dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
     },
     onMeta(payload) {
       if (payload.cliCommand) {
         setCliCommand(payload.cliCommand, { explicit: true });
       }
+      dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
     },
     onLog(payload) {
@@ -932,6 +999,7 @@ function startLogStream(serviceName) {
     },
     onError(err) {
       state.logs.stream = null;
+      dom.btnLogsReconnect.hidden = false;
       if (err) {
         setLogsStreamBadge('Error', 'badge-danger');
         showError(err);
@@ -951,7 +1019,7 @@ async function openConflictDialog(serviceName) {
   dom.conflictLoading.hidden = false;
   dom.conflictError.hidden = true;
   dom.conflictDetails.hidden = true;
-  dom.btnConflictConfirm.disabled = false;
+  dom.btnConflictConfirm.disabled = true;
 
   if (typeof dom.conflictDialog.showModal === 'function') {
     dom.conflictDialog.showModal();
@@ -978,6 +1046,7 @@ async function openConflictDialog(serviceName) {
 
     dom.conflictLoading.hidden = true;
     dom.conflictDetails.hidden = false;
+    dom.btnConflictConfirm.disabled = report.owner !== 'CONFLICT';
   } catch (err) {
     if (state.conflictService !== serviceName) {
       return;
@@ -986,6 +1055,7 @@ async function openConflictDialog(serviceName) {
     dom.conflictCliPreview.textContent = '(unavailable — inspection failed)';
     dom.conflictError.textContent = err instanceof Error ? err.message : String(err);
     dom.conflictError.hidden = false;
+    dom.btnConflictConfirm.disabled = true;
   }
 }
 
@@ -1116,6 +1186,11 @@ function init() {
   });
 
   dom.btnLogsClear.addEventListener('click', clearLogsOutput);
+  dom.btnLogsReconnect.addEventListener('click', () => {
+    if (state.drawer.open && state.drawer.service && state.drawer.tab === 'logs') {
+      startLogStream(state.drawer.service);
+    }
+  });
 
   dom.btnCopyCli.addEventListener('click', copyCliCommand);
 

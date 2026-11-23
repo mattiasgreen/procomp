@@ -41,7 +41,10 @@ public final class DiscoveryEngine {
 
         if (input.managedRecord().isPresent()) {
             ManagedProcessRecord rec = input.managedRecord().get();
-            Optional<ObservedProcess> proc = input.process().filter(ObservedProcess::alive);
+            Optional<ObservedProcess> proc = input.process()
+                .filter(ObservedProcess::alive)
+                .filter(p -> p.pid() == rec.pid())
+                .filter(p -> p.startTime().map(st -> !st.isAfter(rec.startedAt().plusSeconds(60))).orElse(true));
             if (proc.isPresent()) {
                 ObservedProcess aliveProc = proc.get();
                 boolean healthy = isHealthy(target, true, input.healthCheck());
@@ -206,12 +209,13 @@ public final class DiscoveryEngine {
     }
 
     static Optional<String> extractExecutableBaseName(Optional<String> executable, Optional<String> commandLine) {
-        String rawExe = executable.filter(s -> !s.isBlank())
+        Optional<String> rawExeOpt = executable.filter(s -> !s.isBlank())
             .or(() -> commandLine.flatMap(DiscoveryEngine::firstCommandToken))
-            .orElse(null);
-        if (rawExe == null || rawExe.isBlank()) {
+            .filter(s -> !s.isBlank());
+        if (rawExeOpt.isEmpty()) {
             return Optional.empty();
         }
+        String rawExe = rawExeOpt.get();
         int lastSlash = Math.max(rawExe.lastIndexOf('/'), rawExe.lastIndexOf('\\'));
         String fileName = lastSlash >= 0 ? rawExe.substring(lastSlash + 1) : rawExe;
         String lower = fileName.trim().toLowerCase(Locale.ROOT);

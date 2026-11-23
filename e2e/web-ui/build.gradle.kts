@@ -47,10 +47,15 @@ val uiE2eTest by tasks.registering(Test::class) {
     classpath = sourceSets.test.get().runtimeClasspath
     useJUnitPlatform()
 
-    val resolvedWebDir = rootProject.file("web").absolutePath
-    val resolvedScreenshotsDir = layout.buildDirectory.dir("playwright-failures").get().asFile.absolutePath
-    systemProperty("e2e.webDir", resolvedWebDir)
-    systemProperty("e2e.failureScreenshotsDir", resolvedScreenshotsDir)
+    val webDir = rootProject.layout.projectDirectory.dir("web")
+    val screenshotsDir = layout.buildDirectory.dir("playwright-failures")
+    inputs.dir(webDir).withPathSensitivity(PathSensitivity.RELATIVE)
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf(
+            "-De2e.webDir=${webDir.asFile.absolutePath}",
+            "-De2e.failureScreenshotsDir=${screenshotsDir.get().asFile.absolutePath}",
+        )
+    })
 
     testLogging {
         events("passed", "skipped", "failed")

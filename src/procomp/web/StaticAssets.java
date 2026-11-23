@@ -5,7 +5,6 @@ import procomp.core.common.Result;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -106,7 +105,7 @@ public final class StaticAssets {
 
         String decoded;
         try {
-            decoded = URLDecoder.decode(rawRequestPath, StandardCharsets.UTF_8);
+            decoded = percentDecodePath(rawRequestPath);
         } catch (IllegalArgumentException e) {
             return AssetResult.Forbidden.INSTANCE;
         }
@@ -156,6 +155,36 @@ public final class StaticAssets {
         } catch (IOException e) {
             return AssetResult.NotFound.INSTANCE;
         }
+    }
+
+    /**
+     * RFC 3986 percent-decoding for URI path segments (preserves literal {@code '+'} unlike {@code URLDecoder}).
+     */
+    static String percentDecodePath(String raw) {
+        if (raw.indexOf('%') < 0) {
+            return raw;
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(raw.length());
+        int len = raw.length();
+        for (int i = 0; i < len; i++) {
+            char c = raw.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= len) {
+                    throw new IllegalArgumentException("Incomplete percent escape in path: " + raw);
+                }
+                int hi = Character.digit(raw.charAt(i + 1), 16);
+                int lo = Character.digit(raw.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) {
+                    throw new IllegalArgumentException("Invalid hex in percent escape: " + raw);
+                }
+                out.write((hi << 4) | lo);
+                i += 2;
+            } else {
+                byte[] utf8 = String.valueOf(c).getBytes(StandardCharsets.UTF_8);
+                out.write(utf8, 0, utf8.length);
+            }
+        }
+        return out.toString(StandardCharsets.UTF_8);
     }
 
     private static String stripLeadingSlashes(String path) {

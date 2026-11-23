@@ -14,6 +14,7 @@ public final class FakeClock implements Clock {
     public static final Instant DEFAULT_EPOCH = Instant.parse("2026-01-01T10:00:00Z");
 
     private Instant current;
+    private volatile boolean wallClockSleep;
 
     public FakeClock() {
         this(DEFAULT_EPOCH);
@@ -23,35 +24,52 @@ public final class FakeClock implements Clock {
         this.current = Objects.requireNonNull(initial, "initial must not be null");
     }
 
+    public void setWallClockSleep(boolean enabled) {
+        this.wallClockSleep = enabled;
+    }
+
     @Override
-    public Instant now() {
+    public synchronized Instant now() {
         return current;
     }
 
     @Override
     public boolean sleep(Duration duration) {
         Objects.requireNonNull(duration, "duration must not be null");
-        if (!duration.isNegative()) {
-            current = current.plus(duration);
+        if (Thread.currentThread().isInterrupted()) {
+            return false;
+        }
+        if (wallClockSleep && !duration.isNegative() && !duration.isZero()) {
+            try {
+                Thread.sleep(duration.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        synchronized (this) {
+            if (!duration.isNegative()) {
+                current = current.plus(duration);
+            }
         }
         return true;
     }
 
-    public void advanceSeconds(long seconds) {
+    public synchronized void advanceSeconds(long seconds) {
         if (seconds < 0) {
             throw new IllegalArgumentException("seconds must not be negative: " + seconds);
         }
         current = current.plusSeconds(seconds);
     }
 
-    public void advanceMillis(long millis) {
+    public synchronized void advanceMillis(long millis) {
         if (millis < 0) {
             throw new IllegalArgumentException("millis must not be negative: " + millis);
         }
         current = current.plusMillis(millis);
     }
 
-    public void reset() {
+    public synchronized void reset() {
         this.current = DEFAULT_EPOCH;
     }
 }

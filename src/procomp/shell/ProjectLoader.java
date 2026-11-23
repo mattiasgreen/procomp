@@ -6,10 +6,15 @@ import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.shell.ports.ConfigSource;
 
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Use-case orchestrator that discovers procomp.json and delegates parsing, Catalog/envFile loading,
@@ -19,17 +24,22 @@ public final class ProjectLoader {
 
     private static final String CONFIG_FILENAME = "procomp.json";
 
-    public record LoadedProject(Path configPath, Project project) {
+    public record LoadedProject(Path configPath, Project project, List<Path> watchedPaths) {
         public LoadedProject {
             Objects.requireNonNull(configPath, "configPath must not be null");
             Objects.requireNonNull(project, "project must not be null");
+            watchedPaths = List.copyOf(watchedPaths);
+        }
+
+        public LoadedProject(Path configPath, Project project) {
+            this(configPath, project, List.of(configPath));
         }
     }
 
     private final ConfigSource configSource;
 
     public ProjectLoader(ConfigSource configSource) {
-        this.configSource = configSource;
+        this.configSource = Objects.requireNonNull(configSource, "configSource must not be null");
     }
 
     public Result<Project, DomainError> load(Optional<Path> configOverride) {
@@ -37,6 +47,7 @@ public final class ProjectLoader {
     }
 
     public Result<LoadedProject, DomainError> loadWithPath(Optional<Path> configOverride) {
+        Objects.requireNonNull(configOverride, "configOverride must not be null");
         Result<Path, DomainError> pathRes = discoverConfigPath(configOverride);
         if (pathRes.isErr()) {
             return pathRes.castError();
@@ -48,12 +59,17 @@ public final class ProjectLoader {
             return rawJsonRes.castError();
         }
 
+        Set<Path> watched = new LinkedHashSet<>();
+        watched.add(configPath);
         return ProjectResolver.resolve(
             configPath,
             okVal(rawJsonRes),
-            this::readOptionalFile,
+            path -> {
+                watched.add(path.normalize());
+                return readOptionalFile(path);
+            },
             configSource.allEnvVars()
-        ).map(project -> new LoadedProject(configPath, project));
+        ).map(project -> new LoadedProject(configPath, project, new ArrayList<>(watched)));
     }
 
     private Result<Optional<String>, DomainError> readOptionalFile(Path path) {
@@ -80,7 +96,16 @@ public final class ProjectLoader {
 
         Optional<String> envConfig = configSource.envVar("PROCOMP_CONFIG").filter(s -> !s.isBlank());
         if (envConfig.isPresent()) {
-            Path resolved = cwd.resolve(envConfig.get()).normalize();
+            Path resolved;
+            try {
+                resolved = cwd.resolve(envConfig.get()).normalize();
+            } catch (InvalidPathException e) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Invalid PROCOMP_CONFIG path '" + envConfig.get() + "': " + e.getMessage(),
+                    Map.of("field", "PROCOMP_CONFIG", "value", envConfig.get())
+                ));
+            }
             if (!configSource.isRegularFile(resolved)) {
                 return Result.err(DomainError.of(
                     "CONFIG_NOT_FOUND",

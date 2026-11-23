@@ -21,7 +21,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.extension.TestWatcher;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,22 +49,20 @@ final class WebUiPlaywrightE2ETest {
     private final List<String> consoleErrors = new ArrayList<>();
 
     @RegisterExtension
-    final TestWatcher failureScreenshotWatcher = new TestWatcher() {
-        @Override
-        public void testFailed(ExtensionContext ctx, Throwable cause) {
-            if (page == null || page.isClosed()) {
-                return;
+    final org.junit.jupiter.api.extension.TestExecutionExceptionHandler failureScreenshotHandler =
+        (ExtensionContext ctx, Throwable cause) -> {
+            if (page != null && !page.isClosed()) {
+                try {
+                    Files.createDirectories(failureScreenshotsDir);
+                    String safeName = ctx.getDisplayName().replaceAll("[^a-zA-Z0-9._-]", "_");
+                    Path screenshot = failureScreenshotsDir.resolve(safeName + ".png");
+                    page.screenshot(new Page.ScreenshotOptions().setPath(screenshot).setFullPage(true));
+                    System.err.println("Saved Playwright failure screenshot: " + screenshot);
+                } catch (Exception ignored) {
+                }
             }
-            try {
-                Files.createDirectories(failureScreenshotsDir);
-                String safeName = ctx.getDisplayName().replaceAll("[^a-zA-Z0-9._-]", "_");
-                Path screenshot = failureScreenshotsDir.resolve(safeName + ".png");
-                page.screenshot(new Page.ScreenshotOptions().setPath(screenshot).setFullPage(true));
-                System.err.println("Saved Playwright failure screenshot: " + screenshot);
-            } catch (Exception ignored) {
-            }
-        }
-    };
+            throw cause;
+        };
 
     @BeforeAll
     static void launchBrowser() {

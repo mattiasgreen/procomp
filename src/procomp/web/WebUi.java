@@ -55,6 +55,7 @@ public final class WebUi implements AutoCloseable {
     private final Duration sseHeartbeatInterval;
     private final Set<SseStream> activeStreams = ConcurrentHashMap.newKeySet();
     private volatile Optional<RunningState> state = Optional.empty();
+    private volatile boolean stopping = false;
 
     public WebUi(
         ProcompRuntime runtime,
@@ -114,6 +115,7 @@ public final class WebUi implements AutoCloseable {
         server.createContext("/", exchange -> handleExchange(exchange, router));
         server.start();
 
+        stopping = false;
         state = Optional.of(new RunningState(server, executor, actualPort));
         return Result.ok(actualPort);
     }
@@ -123,6 +125,7 @@ public final class WebUi implements AutoCloseable {
      * Service or {@code Gateway} {@code Process}. Idempotent.
      */
     public synchronized void stop() {
+        stopping = true;
         Optional<RunningState> runningOpt = state;
         state = Optional.empty();
         for (SseStream stream : activeStreams) {
@@ -188,14 +191,59 @@ public final class WebUi implements AutoCloseable {
             URI uri = exchange.getRequestURI();
             String rawPath = uri.getRawPath() == null ? "/" : uri.getRawPath();
             String rawQuery = uri.getRawQuery() == null ? "" : uri.getRawQuery();
+            Map<String, String> headers = flattenHeaders(exchange.getRequestHeaders());
+
+            String host = headers.entrySet().stream()
+                .filter(e -> "host".equalsIgnoreCase(e.getKey()))
+                .map(Map.Entry::getValue)
+                .findFirst()
+                .orElse("");
+            if (host.isBlank() || !router.isAllowedHost(host)) {
+                if ("/api".equals(rawPath) || rawPath.startsWith("/api/")) {
+                    sendApiResponse(exchange, ApiResponse.json(
+                        403,
+                        procomp.core.common.Json.obj(Map.of(
+                            "error", procomp.core.common.Json.obj(Map.of(
+                                "code", procomp.core.common.Json.str("FORBIDDEN_ORIGIN"),
+                                "message", procomp.core.common.Json.str("Rejected request with missing or non-loopback Host header"),
+                                "details", procomp.core.common.Json.obj(Map.of(
+                                    "host", procomp.core.common.Json.str(host.isBlank() ? "<missing>" : host)
+                                ))
+                            )),
+                            "cliCommand", procomp.core.common.Json.str("")
+                        ))
+                    ));
+                } else {
+                    sendPlainText(exchange, 403, "Forbidden: invalid Host header");
+                }
+                return;
+            }
 
             if ("/api".equals(rawPath) || rawPath.startsWith("/api/")) {
-                handleApi(exchange, router, method, rawPath, rawQuery);
+                handleApi(exchange, router, method, rawPath, rawQuery, headers);
             } else {
                 handleStatic(exchange, method, rawPath);
             }
         } catch (IOException ignored) {
             // Client disconnected before response finished.
+        } catch (RuntimeException e) {
+            if (exchange.getResponseCode() == -1) {
+                try {
+                    sendApiResponse(exchange, ApiResponse.json(
+                        500,
+                        procomp.core.common.Json.obj(Map.of(
+                            "error", procomp.core.common.Json.obj(Map.of(
+                                "code", procomp.core.common.Json.str("INTERNAL_ERROR"),
+                                "message", procomp.core.common.Json.str("Unexpected internal error"),
+                                "details", procomp.core.common.Json.obj(Map.of())
+                            )),
+                            "cliCommand", procomp.core.common.Json.str("")
+                        ))
+                    ));
+                } catch (IOException ignored) {
+                    // Best-effort error response.
+                }
+            }
         } finally {
             exchange.close();
         }
@@ -206,18 +254,37 @@ public final class WebUi implements AutoCloseable {
         ApiRouter router,
         String method,
         String rawPath,
-        String rawQuery
+        String rawQuery,
+        Map<String, String> headers
     ) throws IOException {
-        Map<String, String> headers = flattenHeaders(exchange.getRequestHeaders());
+        String body;
+        try {
+            body = readBodyUtf8(exchange.getRequestBody());
+        } catch (PayloadTooLargeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "Request body too large";
+            sendApiResponse(exchange, ApiResponse.json(
+                413,
+                procomp.core.common.Json.obj(Map.of(
+                    "error", procomp.core.common.Json.obj(Map.of(
+                        "code", procomp.core.common.Json.str("PAYLOAD_TOO_LARGE"),
+                        "message", procomp.core.common.Json.str(msg),
+                        "details", procomp.core.common.Json.obj(Map.of("maxBytes", procomp.core.common.Json.str(Integer.toString(MAX_REQUEST_BODY_BYTES))))
+                    )),
+                    "cliCommand", procomp.core.common.Json.str("")
+                ))
+            ));
+            return;
+        }
 
         if (router.isSseEndpoint(method, rawPath)) {
-            ApiRequest request = ApiRequest.of(method, rawPath, rawQuery, headers, "");
+            ApiRequest request = ApiRequest.of(method, rawPath, rawQuery, headers, body);
             Optional<ApiResponse> preflightError = router.preflightSse(request);
             if (preflightError.isPresent()) {
                 sendApiResponse(exchange, preflightError.get());
                 return;
             }
             Headers respHeaders = exchange.getResponseHeaders();
+            applySecurityHeaders(respHeaders);
             respHeaders.set("Content-Type", SseStream.CONTENT_TYPE);
             respHeaders.set("Cache-Control", "no-cache");
             respHeaders.set("Connection", "keep-alive");
@@ -225,26 +292,44 @@ public final class WebUi implements AutoCloseable {
             exchange.sendResponseHeaders(200, 0);
 
             SseStream stream = new SseStream(exchange.getResponseBody());
-            activeStreams.add(stream);
-            Thread heartbeat = Thread.startVirtualThread(() -> runSseHeartbeat(stream));
+            Optional<RunningState> runningOpt = registerStreamIfRunning(stream);
+            if (runningOpt.isEmpty()) {
+                stream.close();
+                return;
+            }
+            java.util.concurrent.Future<?> heartbeat = runningOpt.get().executor().submit(() -> runSseHeartbeat(stream));
             try {
                 router.handleSse(request, stream);
             } finally {
                 stream.close();
-                heartbeat.interrupt();
+                heartbeat.cancel(true);
                 activeStreams.remove(stream);
             }
             return;
         }
 
-        String body = readBodyUtf8(exchange.getRequestBody());
         ApiRequest request = ApiRequest.of(method, rawPath, rawQuery, headers, body);
         sendApiResponse(exchange, router.handle(request));
+    }
+
+    private synchronized Optional<RunningState> registerStreamIfRunning(SseStream stream) {
+        if (stopping || state.isEmpty()) {
+            return Optional.empty();
+        }
+        activeStreams.add(stream);
+        return state;
+    }
+
+    private static void applySecurityHeaders(Headers respHeaders) {
+        respHeaders.set("X-Frame-Options", "DENY");
+        respHeaders.set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'");
+        respHeaders.set("X-Content-Type-Options", "nosniff");
     }
 
     private static void sendApiResponse(HttpExchange exchange, ApiResponse response) throws IOException {
         byte[] payload = response.body().getBytes(StandardCharsets.UTF_8);
         Headers respHeaders = exchange.getResponseHeaders();
+        applySecurityHeaders(respHeaders);
         respHeaders.set("Content-Type", response.contentType());
         respHeaders.set("Cache-Control", "no-store");
         if (payload.length == 0) {
@@ -288,6 +373,7 @@ public final class WebUi implements AutoCloseable {
             case AssetResult.Found found -> {
                 byte[] bytes = found.bytes();
                 Headers respHeaders = exchange.getResponseHeaders();
+                applySecurityHeaders(respHeaders);
                 respHeaders.set("Content-Type", found.contentType());
                 respHeaders.set("Cache-Control", found.cacheControl());
                 if (isHead) {
@@ -307,7 +393,9 @@ public final class WebUi implements AutoCloseable {
 
     private static void sendPlainText(HttpExchange exchange, int statusCode, String message) throws IOException {
         byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+        Headers respHeaders = exchange.getResponseHeaders();
+        applySecurityHeaders(respHeaders);
+        respHeaders.set("Content-Type", "text/plain; charset=utf-8");
         exchange.sendResponseHeaders(statusCode, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
@@ -333,11 +421,19 @@ public final class WebUi implements AutoCloseable {
         while ((read = in.read(chunk)) != -1) {
             total += read;
             if (total > MAX_REQUEST_BODY_BYTES) {
-                throw new IOException("Request body exceeded limit of " + MAX_REQUEST_BODY_BYTES + " bytes");
+                throw new PayloadTooLargeException("Request body exceeded limit of " + MAX_REQUEST_BODY_BYTES + " bytes");
             }
             buffer.write(chunk, 0, read);
         }
         return buffer.toString(StandardCharsets.UTF_8);
+    }
+
+    private static final class PayloadTooLargeException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        PayloadTooLargeException(String message) {
+            super(message);
+        }
     }
 
     private record RunningState(HttpServer server, ExecutorService executor, int port) {}

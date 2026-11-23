@@ -35,17 +35,17 @@ public final class InMemoryStateStore implements StateStore {
             .toAbsolutePath().normalize();
     }
 
-    public void clear() {
+    public synchronized void clear() {
         routingByProject.clear();
         managedByProject.clear();
         logs.clear();
     }
 
-    public void ensureLogFile(Path logPath) {
+    public synchronized void ensureLogFile(Path logPath) {
         logs.computeIfAbsent(normalize(logPath), _ -> new StringBuilder());
     }
 
-    public void appendLog(Path logPath, String line) {
+    public synchronized void appendLog(Path logPath, String line) {
         Objects.requireNonNull(line, "line must not be null");
         StringBuilder sb = logs.computeIfAbsent(normalize(logPath), _ -> new StringBuilder());
         sb.append(line);
@@ -60,22 +60,22 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public Result<Optional<Map<String, String>>, DomainError> readRouting(String project) {
+    public synchronized Result<Optional<Map<String, String>>, DomainError> readRouting(String project) {
         Map<String, String> routes = routingByProject.get(project);
         if (routes == null) {
             return Result.ok(Optional.empty());
         }
-        return Result.ok(Optional.of(Map.copyOf(routes)));
+        return Result.ok(Optional.of(java.util.Collections.unmodifiableMap(new LinkedHashMap<>(routes))));
     }
 
     @Override
-    public Result<Unit, DomainError> writeRouting(String project, Map<String, String> routes) {
+    public synchronized Result<Unit, DomainError> writeRouting(String project, Map<String, String> routes) {
         routingByProject.put(project, new LinkedHashMap<>(routes));
         return Result.ok(Unit.VALUE);
     }
 
     @Override
-    public Result<Optional<ManagedProcessRecord>, DomainError> readManagedProcess(String project, ProcessKey key) {
+    public synchronized Result<Optional<ManagedProcessRecord>, DomainError> readManagedProcess(String project, ProcessKey key) {
         Map<ProcessKey, ManagedProcessRecord> map = managedByProject.get(project);
         if (map == null) {
             return Result.ok(Optional.empty());
@@ -84,13 +84,13 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public Result<Unit, DomainError> writeManagedProcess(String project, ProcessKey key, ManagedProcessRecord record) {
+    public synchronized Result<Unit, DomainError> writeManagedProcess(String project, ProcessKey key, ManagedProcessRecord record) {
         managedByProject.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(key, record);
         return Result.ok(Unit.VALUE);
     }
 
     @Override
-    public Result<Unit, DomainError> deleteManagedProcess(String project, ProcessKey key) {
+    public synchronized Result<Unit, DomainError> deleteManagedProcess(String project, ProcessKey key) {
         Map<ProcessKey, ManagedProcessRecord> map = managedByProject.get(project);
         if (map != null) {
             map.remove(key);
@@ -109,7 +109,7 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public Result<String, DomainError> readLogText(Path logPath) {
+    public synchronized Result<String, DomainError> readLogText(Path logPath) {
         StringBuilder sb = logs.get(normalize(logPath));
         if (sb == null) {
             return Result.err(DomainError.of(
@@ -122,7 +122,7 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public Result<LogChunk, DomainError> readLogChunk(Path logPath, long byteOffset) {
+    public synchronized Result<LogChunk, DomainError> readLogChunk(Path logPath, long byteOffset) {
         StringBuilder sb = logs.get(normalize(logPath));
         if (sb == null) {
             return Result.err(DomainError.of(

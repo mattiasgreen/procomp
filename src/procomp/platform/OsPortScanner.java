@@ -28,7 +28,7 @@ public final class OsPortScanner implements PortScanner {
 
     private static final Pattern SS_PID_PATTERN = Pattern.compile("pid=(\\d+)");
     private static final Set<String> NON_LISTEN_STATES = Set.of(
-        "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "SYN_SENT", "SYN_RECV", "LAST_ACK", "CLOSING"
+        "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "SYN_SENT", "SYN_RECV", "LAST_ACK", "CLOSING", "BOUND"
     );
 
     private final String osName;
@@ -214,18 +214,34 @@ public final class OsPortScanner implements PortScanner {
     }
 
     private static Optional<String> runCommandQuiet(List<String> command) {
+        Process p = null;
         try {
-            Process p = new ProcessBuilder(command).redirectErrorStream(true).start();
-            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            p = new ProcessBuilder(command).redirectErrorStream(true).start();
+            Process proc = p;
+            java.util.concurrent.CompletableFuture<byte[]> stdoutFuture = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try (java.io.InputStream in = proc.getInputStream()) {
+                    return in.readAllBytes();
+                } catch (IOException e) {
+                    return new byte[0];
+                }
+            });
             if (!p.waitFor(5, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
+                stdoutFuture.cancel(true);
                 return Optional.empty();
             }
-            return p.exitValue() == 0 ? Optional.of(output) : Optional.empty();
-        } catch (IOException e) {
+            byte[] bytes = stdoutFuture.get(1, TimeUnit.SECONDS);
+            return p.exitValue() == 0 ? Optional.of(new String(bytes, StandardCharsets.UTF_8)) : Optional.empty();
+        } catch (IOException | java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            if (p != null) {
+                p.destroyForcibly();
+            }
             return Optional.empty();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (p != null) {
+                p.destroyForcibly();
+            }
             return Optional.empty();
         }
     }

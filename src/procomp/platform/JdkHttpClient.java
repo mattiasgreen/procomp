@@ -17,15 +17,20 @@ import java.util.Objects;
 /**
  * {@link HttpClient} adapter backed by {@link java.net.http.HttpClient}.
  */
-public final class JdkHttpClient implements HttpClient {
+public final class JdkHttpClient implements HttpClient, AutoCloseable {
 
     private final java.net.http.HttpClient delegate;
 
     public JdkHttpClient() {
         this.delegate = java.net.http.HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
+            .connectTimeout(Duration.ofSeconds(2))
             .followRedirects(java.net.http.HttpClient.Redirect.NEVER)
             .build();
+    }
+
+    @Override
+    public void close() {
+        delegate.close();
     }
 
     @Override

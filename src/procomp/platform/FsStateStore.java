@@ -14,8 +14,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -28,6 +30,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Cross-platform filesystem implementation of {@link StateStore}.
@@ -36,9 +40,14 @@ import java.util.OptionalLong;
  */
 public final class FsStateStore implements StateStore {
 
+    private static final int MAX_LOG_CHUNK_BYTES = 1024 * 1024;
+    private static final long MAX_LOG_TEXT_BYTES = 16L * 1024 * 1024;
+    private static final int WINDOWS_MOVE_MAX_ATTEMPTS = 5;
+
     private final String osName;
     private final Map<String, String> env;
     private final Path userHome;
+    private final ConcurrentHashMap<Path, ReentrantReadWriteLock> fileLocks = new ConcurrentHashMap<>();
 
     public FsStateStore() {
         this(
@@ -56,45 +65,51 @@ public final class FsStateStore implements StateStore {
 
     @Override
     public Path projectStateDir(String project) {
-        if (project == null || project.isBlank()) {
-            throw new IllegalArgumentException("project must be non-blank");
-        }
+        requireSafeSegment(project, "project");
         Optional<String> override = nonBlankEnv("PROCOMP_STATE_DIR");
+        Path root;
         if (override.isPresent()) {
-            return Path.of(override.get()).resolve(project).normalize();
-        }
-        if (isWindows()) {
+            root = Path.of(override.get()).normalize();
+        } else if (isWindows()) {
             Path base = nonBlankEnv("LOCALAPPDATA")
                 .map(Path::of)
                 .orElseGet(() -> userHome.resolve("AppData").resolve("Local"));
-            return base.resolve("procomp").resolve(project).normalize();
+            root = base.resolve("procomp").normalize();
+        } else {
+            Path base = nonBlankEnv("XDG_STATE_HOME")
+                .map(Path::of)
+                .orElseGet(() -> userHome.resolve(".local").resolve("state"));
+            root = base.resolve("procomp").normalize();
         }
-        Path base = nonBlankEnv("XDG_STATE_HOME")
-            .map(Path::of)
-            .orElseGet(() -> userHome.resolve(".local").resolve("state"));
-        return base.resolve("procomp").resolve(project).normalize();
+        return resolveContained(root, project, "project");
     }
 
     @Override
     public Result<Optional<Map<String, String>>, DomainError> readRouting(String project) {
         Path file = projectStateDir(project).resolve("routing.json");
-        if (!Files.isRegularFile(file)) {
-            return Result.ok(Optional.empty());
-        }
-        return readJsonObject(file).flatMap(obj -> {
-            Optional<JsonValue> routesVal = obj.get("routes");
-            if (routesVal.isEmpty() || !(routesVal.get() instanceof JsonValue.JsonObject routesObj)) {
-                return Result.err(corruptState(file, "Missing or invalid 'routes' object"));
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.readLock().lock();
+        try {
+            if (!Files.isRegularFile(file)) {
+                return Result.ok(Optional.empty());
             }
-            Map<String, String> routes = new LinkedHashMap<>();
-            for (Map.Entry<String, JsonValue> entry : routesObj.fields().entrySet()) {
-                if (!(entry.getValue() instanceof JsonValue.JsonString(String route))) {
-                    return Result.err(corruptState(file, "Route value for '" + entry.getKey() + "' must be a string"));
+            return readJsonObject(file).flatMap(obj -> {
+                Optional<JsonValue> routesVal = obj.get("routes");
+                if (routesVal.isEmpty() || !(routesVal.get() instanceof JsonValue.JsonObject routesObj)) {
+                    return Result.err(corruptState(file, "Missing or invalid 'routes' object"));
                 }
-                routes.put(entry.getKey(), route);
-            }
-            return Result.ok(Optional.of(routes));
-        });
+                Map<String, String> routes = new LinkedHashMap<>();
+                for (Map.Entry<String, JsonValue> entry : routesObj.fields().entrySet()) {
+                    if (!(entry.getValue() instanceof JsonValue.JsonString(String route))) {
+                        return Result.err(corruptState(file, "Route value for '" + entry.getKey() + "' must be a string"));
+                    }
+                    routes.put(entry.getKey(), route);
+                }
+                return Result.ok(Optional.of(routes));
+            });
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     @Override
@@ -106,16 +121,28 @@ public final class FsStateStore implements StateStore {
         }
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("routes", Json.obj(routeNodes));
-        return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.writeLock().lock();
+        try {
+            return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     @Override
     public Result<Optional<ManagedProcessRecord>, DomainError> readManagedProcess(String project, ProcessKey key) {
         Path file = processFilePath(project, key);
-        if (!Files.isRegularFile(file)) {
-            return Result.ok(Optional.empty());
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.readLock().lock();
+        try {
+            if (!Files.isRegularFile(file)) {
+                return Result.ok(Optional.empty());
+            }
+            return readManagedProcessFile(file).map(Optional::of);
+        } finally {
+            lock.readLock().unlock();
         }
-        return readManagedProcessFile(file).map(Optional::of);
     }
 
     @Override
@@ -132,12 +159,20 @@ public final class FsStateStore implements StateStore {
         root.put("artifactTimestamp", record.artifactTimestamp().map(t -> (JsonValue) Json.str(t.toString())).orElse(Json.nil()));
         root.put("stdoutLog", Json.str(record.stdoutLog().toString()));
         root.put("stderrLog", Json.str(record.stderrLog().toString()));
-        return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.writeLock().lock();
+        try {
+            return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     @Override
     public Result<Unit, DomainError> deleteManagedProcess(String project, ProcessKey key) {
         Path file = processFilePath(project, key);
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.writeLock().lock();
         try {
             Files.deleteIfExists(file);
             return Result.ok(Unit.VALUE);
@@ -147,17 +182,23 @@ public final class FsStateStore implements StateStore {
                 "Failed to delete managed process record '" + file + "': " + e.getMessage(),
                 Map.of("path", file.toString())
             ));
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
     @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
-            case ProcessKey.Service(String svc) -> svc;
+            case ProcessKey.Service(String svc) -> {
+                requireSafeSegment(svc, "service");
+                yield svc;
+            }
             case ProcessKey.Gateway _ -> "gateway";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
-        return projectStateDir(project).resolve("logs").resolve(baseName + suffix).normalize();
+        Path logsDir = projectStateDir(project).resolve("logs").normalize();
+        return resolveContained(logsDir, baseName + suffix, "log");
     }
 
     @Override
@@ -165,8 +206,24 @@ public final class FsStateStore implements StateStore {
         if (!Files.isRegularFile(logPath)) {
             return Result.err(DomainError.of("LOG_NOT_FOUND", "Log file not found: " + logPath, Map.of("path", logPath.toString())));
         }
-        try {
-            return Result.ok(Files.readString(logPath, StandardCharsets.UTF_8));
+        try (FileChannel channel = FileChannel.open(logPath, StandardOpenOption.READ)) {
+            long size = channel.size();
+            if (size <= MAX_LOG_TEXT_BYTES) {
+                return Result.ok(Files.readString(logPath, StandardCharsets.UTF_8));
+            }
+            long start = size - MAX_LOG_TEXT_BYTES;
+            channel.position(start);
+            ByteBuffer buffer = ByteBuffer.allocate((int) MAX_LOG_TEXT_BYTES);
+            while (buffer.hasRemaining()) {
+                if (channel.read(buffer) < 0) {
+                    break;
+                }
+            }
+            buffer.flip();
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            int offset = skipLeadingUtf8ContinuationBytes(bytes);
+            return Result.ok(new String(bytes, offset, bytes.length - offset, StandardCharsets.UTF_8));
         } catch (IOException e) {
             return Result.err(DomainError.of("STATE_IO_ERROR", "Failed to read log '" + logPath + "': " + e.getMessage(), Map.of("path", logPath.toString())));
         }
@@ -184,11 +241,9 @@ public final class FsStateStore implements StateStore {
             if (remaining <= 0) {
                 return Result.ok(new LogChunk("", size));
             }
-            if (remaining > Integer.MAX_VALUE - 8) {
-                remaining = Integer.MAX_VALUE - 8;
-            }
+            int toRead = (int) Math.min(remaining, MAX_LOG_CHUNK_BYTES);
             channel.position(start);
-            ByteBuffer buffer = ByteBuffer.allocate((int) remaining);
+            ByteBuffer buffer = ByteBuffer.allocate(toRead);
             while (buffer.hasRemaining()) {
                 if (channel.read(buffer) < 0) {
                     break;
@@ -197,7 +252,12 @@ public final class FsStateStore implements StateStore {
             buffer.flip();
             byte[] bytes = new byte[buffer.remaining()];
             buffer.get(bytes);
-            return Result.ok(new LogChunk(new String(bytes, StandardCharsets.UTF_8), start + bytes.length));
+            int completeLen = completeUtf8PrefixLength(bytes);
+            if (completeLen == 0 && bytes.length > 0) {
+                // Only incomplete trailing bytes exist; wait for writer to finish codepoint
+                return Result.ok(new LogChunk("", start));
+            }
+            return Result.ok(new LogChunk(new String(bytes, 0, completeLen, StandardCharsets.UTF_8), start + completeLen));
         } catch (IOException e) {
             return Result.err(DomainError.of("STATE_IO_ERROR", "Failed to read log chunk '" + logPath + "': " + e.getMessage(), Map.of("path", logPath.toString())));
         }
@@ -206,7 +266,10 @@ public final class FsStateStore implements StateStore {
     private Path processFilePath(String project, ProcessKey key) {
         Path dir = projectStateDir(project);
         return switch (key) {
-            case ProcessKey.Service(String svc) -> dir.resolve("processes").resolve(svc + ".json");
+            case ProcessKey.Service(String svc) -> {
+                requireSafeSegment(svc, "service");
+                yield resolveContained(dir.resolve("processes").normalize(), svc + ".json", "service");
+            }
             case ProcessKey.Gateway _ -> dir.resolve("gateway.json");
         };
     }
@@ -255,13 +318,21 @@ public final class FsStateStore implements StateStore {
             Result<String, DomainError> stderrRes = requireString(obj, "stderrLog", file);
             if (stderrRes.isErr()) return stderrRes.castError();
 
+            Path stdoutPath;
+            Path stderrPath;
+            try {
+                stdoutPath = Path.of(okVal(stdoutRes));
+                stderrPath = Path.of(okVal(stderrRes));
+            } catch (InvalidPathException e) {
+                return Result.err(corruptState(file, "Invalid log path: " + e.getMessage()));
+            }
             return Result.ok(new ManagedProcessRecord(
                 pidOpt.getAsLong(),
                 okVal(startedRes),
                 commandSummary,
                 artifactTimestamp,
-                Path.of(okVal(stdoutRes)),
-                Path.of(okVal(stderrRes))
+                stdoutPath,
+                stderrPath
             ));
         });
     }
@@ -294,11 +365,7 @@ public final class FsStateStore implements StateStore {
             Path tmp = Files.createTempFile(parent, prefix, ".tmp");
             try {
                 Files.writeString(tmp, content, StandardCharsets.UTF_8);
-                try {
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-                }
+                moveWithRetry(tmp, normalized);
                 return Result.ok(Unit.VALUE);
             } finally {
                 Files.deleteIfExists(tmp);
@@ -310,6 +377,100 @@ public final class FsStateStore implements StateStore {
                 Map.of("path", target.toString())
             ));
         }
+    }
+
+    private void moveWithRetry(Path tmp, Path normalized) throws IOException {
+        IOException lastFailure = null;
+        long backoffMs = 15L;
+        for (int attempt = 1; attempt <= WINDOWS_MOVE_MAX_ATTEMPTS; attempt++) {
+            try {
+                try {
+                    Files.move(tmp, normalized, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, normalized, StandardCopyOption.REPLACE_EXISTING);
+                }
+                return;
+            } catch (AccessDeniedException e) {
+                lastFailure = e;
+                if (!isWindows() || attempt == WINDOWS_MOVE_MAX_ATTEMPTS) {
+                    throw e;
+                }
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+                backoffMs *= 2;
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+    }
+
+    private ReentrantReadWriteLock lockFor(Path file) {
+        return fileLocks.computeIfAbsent(file.toAbsolutePath().normalize(), ignored -> new ReentrantReadWriteLock());
+    }
+
+    private static void requireSafeSegment(String value, String label) {
+        if (value == null
+            || value.isBlank()
+            || value.equals(".")
+            || value.equals("..")
+            || value.contains("/")
+            || value.contains("\\")
+            || value.contains("\0")) {
+            throw new IllegalArgumentException(label + " must be a single path-safe segment");
+        }
+    }
+
+    private static Path resolveContained(Path root, String child, String label) {
+        Path normalizedRoot = root.normalize();
+        Path resolved = normalizedRoot.resolve(child).normalize();
+        if (!resolved.startsWith(normalizedRoot)) {
+            throw new IllegalArgumentException("Resolved " + label + " path escapes root: " + child);
+        }
+        return resolved;
+    }
+
+    private static int skipLeadingUtf8ContinuationBytes(byte[] bytes) {
+        int i = 0;
+        while (i < bytes.length && (bytes[i] & 0b1100_0000) == 0b1000_0000) {
+            i++;
+        }
+        return i;
+    }
+
+    private static int completeUtf8PrefixLength(byte[] bytes) {
+        int len = bytes.length;
+        if (len == 0) {
+            return 0;
+        }
+        // Inspect up to the last 3 bytes for a truncated multi-byte UTF-8 sequence.
+        int start = Math.max(0, len - 3);
+        for (int i = len - 1; i >= start; i--) {
+            int b = bytes[i] & 0xFF;
+            if ((b & 0b1000_0000) == 0) {
+                return len; // ASCII terminates cleanly
+            }
+            if ((b & 0b1100_0000) != 0b1000_0000) {
+                // Found leading byte of last multi-byte sequence
+                int expected;
+                if ((b & 0b1110_0000) == 0b1100_0000) {
+                    expected = 2;
+                } else if ((b & 0b1111_0000) == 0b1110_0000) {
+                    expected = 3;
+                } else if ((b & 0b1111_1000) == 0b1111_0000) {
+                    expected = 4;
+                } else {
+                    return len; // invalid byte, let decoder handle it
+                }
+                int available = len - i;
+                return available < expected ? i : len;
+            }
+        }
+        return len;
     }
 
     private static Result<Instant, DomainError> requireInstant(JsonValue.JsonObject obj, String key, Path file) {

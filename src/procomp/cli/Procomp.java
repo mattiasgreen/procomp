@@ -117,7 +117,12 @@ public final class Procomp {
                 if (i + 1 >= args.length || args[i + 1].isBlank()) {
                     return Result.err("Option '--config' requires a file path.");
                 }
-                configOverride = Optional.of(Path.of(args[++i]));
+                String rawPath = args[++i];
+                try {
+                    configOverride = Optional.of(Path.of(rawPath));
+                } catch (java.nio.file.InvalidPathException e) {
+                    return Result.err("Invalid --config path '" + rawPath + "': " + e.getMessage());
+                }
                 continue;
             }
             if (arg.startsWith("--config=")) {
@@ -125,7 +130,11 @@ public final class Procomp {
                 if (pathVal.isBlank()) {
                     return Result.err("Option '--config=' requires a non-empty file path.");
                 }
-                configOverride = Optional.of(Path.of(pathVal));
+                try {
+                    configOverride = Optional.of(Path.of(pathVal));
+                } catch (java.nio.file.InvalidPathException e) {
+                    return Result.err("Invalid --config path '" + pathVal + "': " + e.getMessage());
+                }
                 continue;
             }
             if (!seenCommand && arg.startsWith("-")) {
@@ -151,11 +160,11 @@ public final class Procomp {
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
               status [--json]                     Show estate Routing Table, Process ownership, Health, and Gateway
               inspect <service>                   Deep read-only Inspection of a Service's local Process (--json)
-              logs <service>                      Read raw stdout/stderr logs (-n, -f, --err, --path)
-              route [service... <local|remote>]   Show or update the Project's Routing Table
-              profile <list|use <name>>           List or apply named routing Profiles
+              logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path)
+              route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
+              profile <list|use <name>>           List or apply named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile>
-                                                  Manage the local Gateway and reconcile mappings
+                                                  Manage the local Gateway (-d|--detach, --timeout <sec>, --json)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 

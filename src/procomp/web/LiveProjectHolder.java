@@ -9,6 +9,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
@@ -44,9 +47,9 @@ public final class LiveProjectHolder {
         try {
             if (cached.isPresent()) {
                 CachedProject entry = cached.get();
-                if (entry.diskStamp().isPresent()) {
-                    Optional<DiskStamp> currentStamp = readDiskStamp(entry.loaded().configPath());
-                    if (currentStamp.isPresent() && currentStamp.get().equals(entry.diskStamp().get())) {
+                if (entry.diskStamps().isPresent()) {
+                    Optional<Map<Path, Optional<DiskStamp>>> currentStamps = readDiskStamps(entry.loaded().watchedPaths());
+                    if (currentStamps.isPresent() && currentStamps.get().equals(entry.diskStamps().get())) {
                         return Result.ok(entry.loaded());
                     }
                 }
@@ -54,8 +57,8 @@ public final class LiveProjectHolder {
 
             Result<LoadedProject, DomainError> loadRes = projectLoader.loadWithPath(configOverride);
             if (loadRes instanceof Result.Ok<LoadedProject, DomainError>(LoadedProject loaded)) {
-                Optional<DiskStamp> stamp = readDiskStamp(loaded.configPath());
-                cached = Optional.of(new CachedProject(loaded, stamp));
+                Optional<Map<Path, Optional<DiskStamp>>> stamps = readDiskStamps(loaded.watchedPaths());
+                cached = Optional.of(new CachedProject(loaded, stamps));
                 return Result.ok(loaded);
             }
             cached = Optional.empty();
@@ -74,6 +77,18 @@ public final class LiveProjectHolder {
         }
     }
 
+    private static Optional<Map<Path, Optional<DiskStamp>>> readDiskStamps(List<Path> paths) {
+        if (paths.isEmpty() || !Files.isRegularFile(paths.getFirst())) {
+            // Backed by an in-memory ConfigSource (configPath does not exist on real disk)
+            return Optional.empty();
+        }
+        Map<Path, Optional<DiskStamp>> stamps = new LinkedHashMap<>();
+        for (Path p : paths) {
+            stamps.put(p, readDiskStamp(p));
+        }
+        return Optional.of(stamps);
+    }
+
     private static Optional<DiskStamp> readDiskStamp(Path path) {
         if (!Files.isRegularFile(path)) {
             return Optional.empty();
@@ -89,5 +104,5 @@ public final class LiveProjectHolder {
 
     private record DiskStamp(FileTime mtime, long size) {}
 
-    private record CachedProject(LoadedProject loaded, Optional<DiskStamp> diskStamp) {}
+    private record CachedProject(LoadedProject loaded, Optional<Map<Path, Optional<DiskStamp>>> diskStamps) {}
 }

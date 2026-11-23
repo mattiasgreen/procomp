@@ -6,7 +6,7 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 
 - **Domain vocabulary:** Read `GLOSSARY.md` before naming types, modules, flags, or output fields; use its canonical terms and avoid listed synonyms.
 - **v1 behavior & CLI contract:** Read `docs/DESIGN.md` before designing or implementing any command, Discovery flow, Health State rule, Gateway Reconciliation, or state layout.
-- **Config format:** Read `docs/CONFIG_SCHEMA.md` when touching `procomp.json` or `service-index.json` loading; validate strictly and fail fast on unrecognized fields.
+- **Config format:** Read `docs/CONFIG_SCHEMA.md` when touching `procomp.json` or `Catalog` (e.g., `service-index.json`) loading; validate strictly and fail fast on unrecognized fields.
 
 ## Runtime & Tooling
 
@@ -14,17 +14,17 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
 - **Gradle Dev & Verification Toolchain (Inner vs. Outer Loop):** Gradle caching, parallel builds, and configuration cache are enabled in `gradle.properties`. Always verify from fastest to slowest:
   - **Inner loop (during edits):** `gradle lint` (incremental compile, Error Prone + NullAway, Spotless) or `gradle fastCheck` (`lint` + parallel `unitTest` covering Levels 1–2, zero OS processes/ports).
   - **Pre-commit / ticket completion:** `gradle check` (adds sequential `integrationTest` Level 3 + `:verifyJep458` empty-classpath smoke check).
-  - **Outer loop (before merging integration/process/gateway changes):** `gradle outerLoop` (`check` + `:e2e:runner:e2eTest`). Never run `:e2e:runner:e2eTest` in the inner edit loop.
+  - **Outer loop (before merging integration/process/gateway/UI changes):** `gradle outerLoop` (`check` + `:e2e:scenarios:check` + `:e2e:runner:e2eTest` + `:e2e:web-ui:uiE2eTest`; run `:e2e:web-ui:installBrowsers` once to install Playwright Chromium). Never run `:e2e:runner:e2eTest` or `:e2e:web-ui:uiE2eTest` in the inner edit loop.
   - Offline fast testing remains available via `java test/TestRunner.java` (`./procomp-test` / `procomp-test.cmd`, `--fast` for Levels 1–2). See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
 
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 
-Organize code into four strict layers with dependencies flowing strictly inward (`cli`/`tui` → `shell` → `core`; `platform` → `shell/ports` + `core`):
+Organize code into four strict layers with dependencies flowing strictly inward (`cli`/`web`/`tui` → `shell` → `core`; `platform` → `shell/ports` + `core`):
 
 - **`core/` (Functional Core):** Immutable DDD domain types and pure, total functions grouped by domain (`project`, `routing`, `process`, `gateway`). Keep `core/` 100% pure — zero I/O, zero OS/FS/HTTP/clock calls, zero dependencies outside `core/`.
 - **`shell/` (Imperative Shell):** Modality-agnostic use-case orchestrators and narrow I/O ports (`shell/ports/`). Keep conditionals and domain decisions in `core/`; `shell/` gathers inputs via ports, calls `core/`, and executes returned actions.
 - **`platform/` (I/O Adapters):** Cross-platform (Windows, macOS, Linux) implementations of `shell/ports/` for OS processes, TCP ports, HTTP, state-dir filesystem, and clock.
-- **`cli/` (and future `tui/`):** Thin modality frontends that parse input, call `shell/`, and render output or exit codes.
+- **`cli/`, `web/` (and future `tui/`):** Thin modality frontends that parse input/HTTP, call `shell/`, and render output, HTTP/SSE responses, or exit codes.
 
 ## Structural Rules
 

@@ -55,6 +55,14 @@ public final class ApiRouterTest {
         "Sec-Fetch-Site", "same-origin"
     );
 
+    private static ApiRequest localGet(String path) {
+        return ApiRequest.of("GET", path, "", LOCAL_HEADERS, "");
+    }
+
+    private static ApiRequest localGet(String path, String rawQuery) {
+        return ApiRequest.of("GET", path, rawQuery, LOCAL_HEADERS, "");
+    }
+
     public static void testStatusAndInspectEndpointsReturnExactWireContractAndCliCommands() {
         Fixture fx = Fixture.create(Optional.of(Path.of("custom/procomp.json")));
 
@@ -68,7 +76,7 @@ public final class ApiRouterTest {
         ));
         fx.httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
 
-        ApiResponse statusRes = fx.router.handle(ApiRequest.get("/api/status"));
+        ApiResponse statusRes = fx.router.handle(localGet("/api/status"));
         Assert.assertEquals(200, statusRes.statusCode(), "GET /api/status returns 200: " + statusRes.body());
         Assert.assertEquals(ApiRouter.JSON_CONTENT_TYPE, statusRes.contentType(), "JSON content type");
 
@@ -89,7 +97,7 @@ public final class ApiRouterTest {
         Assert.assertEquals(3, arr(data, "services").elements().size(), "3 services");
 
         // GET /api/services/billing/inspect
-        ApiResponse inspectRes = fx.router.handle(ApiRequest.get("/api/services/billing/inspect"));
+        ApiResponse inspectRes = fx.router.handle(localGet("/api/services/billing/inspect"));
         Assert.assertEquals(200, inspectRes.statusCode(), "GET /api/services/billing/inspect returns 200");
         JsonValue.JsonObject inspectRoot = parseObj(inspectRes.body());
         Assert.assertEquals(
@@ -109,7 +117,7 @@ public final class ApiRouterTest {
         Assert.assertEquals(1, arr(inspectData, "parentChain").elements().size(), "parentChain populated");
 
         // Unknown service -> 404
-        ApiResponse missingRes = fx.router.handle(ApiRequest.get("/api/services/ghost/inspect"));
+        ApiResponse missingRes = fx.router.handle(localGet("/api/services/ghost/inspect"));
         Assert.assertEquals(404, missingRes.statusCode(), "unknown service returns 404");
         JsonValue.JsonObject missingRoot = parseObj(missingRes.body());
         Assert.assertEquals("UNKNOWN_SERVICE", str(obj(missingRoot, "error"), "code"), "UNKNOWN_SERVICE code");
@@ -170,11 +178,13 @@ public final class ApiRouterTest {
             Map.of(),
             Map.of("Host", "evil.com:9090"),
             Map.of("Host", "127.0.0.1:9999"),
+            Map.of("Host", "127.0.0.1:9090"),
             Map.of("Host", "127.0.0.1:9090", "Origin", "https://evil.com"),
             Map.of("Host", "127.0.0.1:9090", "Origin", "http://127.0.0.1:9999"),
             Map.of("Host", "127.0.0.1:9090", "Origin", "null"),
             Map.of("Host", "127.0.0.1:9090", "Sec-Fetch-Site", "cross-site"),
-            Map.of("Host", "127.0.0.1:9090", "Sec-Fetch-Site", "same-site")
+            Map.of("Host", "127.0.0.1:9090", "Sec-Fetch-Site", "same-site"),
+            Map.of("Host", "127.0.0.1:9090", "Sec-Fetch-Site", "none")
         );
 
         for (Map<String, String> headers : rejectedHeaders) {
@@ -183,7 +193,7 @@ public final class ApiRouterTest {
             Assert.assertEquals("FORBIDDEN_ORIGIN", str(obj(parseObj(res.body()), "error"), "code"), "FORBIDDEN_ORIGIN");
 
             Optional<ApiResponse> ssePreflight = fx.router.preflightSse(
-                ApiRequest.of("GET", "/api/services/start/stream", "services=orders", headers, "")
+                ApiRequest.of("POST", "/api/services/start/stream", headers, "{\"services\":[\"orders\"]}")
             );
             Assert.assertTrue(ssePreflight.isPresent(), "Expected SSE preflight rejection for headers " + headers);
             Assert.assertEquals(403, ssePreflight.get().statusCode(), "SSE preflight returns 403 for headers " + headers);
@@ -194,9 +204,18 @@ public final class ApiRouterTest {
             );
         }
 
-        // Valid localhost Host without Origin (e.g. curl) and with localhost Origin are accepted
-        ApiResponse noOrigin = fx.router.handle(ApiRequest.of("PUT", "/api/routes", Map.of("Host", "localhost:9090"), body));
-        Assert.assertEquals(200, noOrigin.statusCode(), "localhost Host without Origin allowed");
+        // DNS rebinding guard: GET /api/status also rejects non-loopback Host
+        ApiResponse badHostGet = fx.router.handle(ApiRequest.of("GET", "/api/status", Map.of("Host", "evil.com:9090"), ""));
+        Assert.assertEquals(403, badHostGet.statusCode(), "non-loopback Host rejected on GET /api/status");
+
+        // Valid localhost Host with Content-Type: application/json (e.g. curl) and with localhost Origin are accepted
+        ApiResponse jsonCurl = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/routes",
+            Map.of("Host", "localhost:9090", "Content-Type", "application/json"),
+            body
+        ));
+        Assert.assertEquals(200, jsonCurl.statusCode(), "localhost Host with application/json allowed");
 
         ApiResponse localhostOrigin = fx.router.handle(ApiRequest.of(
             "PUT",
@@ -207,20 +226,26 @@ public final class ApiRouterTest {
         Assert.assertEquals(200, localhostOrigin.statusCode(), "matching localhost Origin allowed");
 
         Optional<ApiResponse> allowedSse = fx.router.preflightSse(
-            ApiRequest.of("GET", "/api/services/start/stream", "services=orders", LOCAL_HEADERS, "")
+            ApiRequest.of("POST", "/api/services/start/stream", LOCAL_HEADERS, "{\"services\":[\"orders\"]}")
         );
-        Assert.assertTrue(allowedSse.isEmpty(), "same-origin SSE start stream passes preflight");
+        Assert.assertTrue(allowedSse.isEmpty(), "same-origin POST SSE start stream passes preflight");
     }
 
     public static void testStartStopConflictKillGatingAndStartSseStream() {
         Fixture fx = Fixture.create(Optional.empty());
         fx.httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
 
-        // SSE start stream: GET /api/services/start/stream?services=orders&timeout=15
-        Assert.assertTrue(fx.router.isSseEndpoint("GET", "/api/services/start/stream"), "recognized as SSE endpoint");
+        // SSE start stream: POST /api/services/start/stream (GET is rejected with 405)
+        Assert.assertFalse(fx.router.isSseEndpoint("GET", "/api/services/start/stream"), "GET not allowed on start stream");
+        Assert.assertTrue(fx.router.isSseEndpoint("POST", "/api/services/start/stream"), "POST recognized as SSE endpoint");
         RecordingSseSink sink = new RecordingSseSink();
         fx.router.handleSse(
-            ApiRequest.of("GET", "/api/services/start/stream", "services=orders&timeout=15", LOCAL_HEADERS, ""),
+            ApiRequest.of(
+                "POST",
+                "/api/services/start/stream",
+                LOCAL_HEADERS,
+                "{\"services\":[\"orders\"],\"timeoutSeconds\":15}"
+            ),
             sink
         );
 
@@ -247,7 +272,7 @@ public final class ApiRouterTest {
         ));
 
         // GET /api/services/payments/inspect returns plain killConflictCliCommand (without --config)
-        ApiResponse conflictInspect = fx.router.handle(ApiRequest.get("/api/services/payments/inspect"));
+        ApiResponse conflictInspect = fx.router.handle(localGet("/api/services/payments/inspect"));
         Assert.assertEquals(200, conflictInspect.statusCode(), "conflict inspect returns 200");
         Assert.assertEquals(
             "procomp stop payments --kill-conflict",
@@ -352,7 +377,7 @@ public final class ApiRouterTest {
         fx.stateStore.appendLog(outLog, "line1\nline2\nline3\n");
 
         // GET /api/services/orders/logs?lines=2&err=false
-        ApiResponse logsRes = fx.router.handle(ApiRequest.get("/api/services/orders/logs", "lines=2&err=false"));
+        ApiResponse logsRes = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&err=false"));
         Assert.assertEquals(200, logsRes.statusCode(), "logs 200: " + logsRes.body());
         JsonValue.JsonObject logsRoot = parseObj(logsRes.body());
         Assert.assertEquals("procomp logs orders -n 2", str(logsRoot, "cliCommand"), "logs cliCommand");
@@ -383,7 +408,7 @@ public final class ApiRouterTest {
         };
 
         SseStream sseStream = new SseStream(disconnectAfter3);
-        fx.router.handleSse(ApiRequest.get("/api/services/orders/logs/stream", "lines=2&err=false"), sseStream);
+        fx.router.handleSse(localGet("/api/services/orders/logs/stream", "lines=2&err=false"), sseStream);
 
         Assert.assertFalse(sseStream.isOpen(), "SseStream marked closed after client disconnect");
         String wire = captured.toString(StandardCharsets.UTF_8);
@@ -422,7 +447,7 @@ public final class ApiRouterTest {
             ApiRouter router = new ApiRouter(runtime, holder, PORT);
 
             // 1. Initial load sees 1 service
-            ApiResponse res1 = router.handle(ApiRequest.get("/api/status"));
+            ApiResponse res1 = router.handle(localGet("/api/status"));
             Assert.assertEquals(200, res1.statusCode(), "initial status 200");
             Assert.assertEquals(1, arr(obj(parseObj(res1.body()), "data"), "services").elements().size(), "1 service initially");
 
@@ -437,13 +462,13 @@ public final class ApiRouterTest {
                   }
                 }
                 """, StandardCharsets.UTF_8);
-            ApiResponse res2 = router.handle(ApiRequest.get("/api/status"));
+            ApiResponse res2 = router.handle(localGet("/api/status"));
             Assert.assertEquals(200, res2.statusCode(), "reloaded status 200");
             Assert.assertEquals(2, arr(obj(parseObj(res2.body()), "data"), "services").elements().size(), "2 services after reload");
 
             // 3. Save invalid JSON -> returns 400 DomainError without crashing
             Files.writeString(configFile, "{ invalid json", StandardCharsets.UTF_8);
-            ApiResponse resInvalid = router.handle(ApiRequest.get("/api/status"));
+            ApiResponse resInvalid = router.handle(localGet("/api/status"));
             Assert.assertEquals(400, resInvalid.statusCode(), "invalid config returns 400");
             Assert.assertEquals("JSON_PARSE_ERROR", str(obj(parseObj(resInvalid.body()), "error"), "code"), "JSON_PARSE_ERROR");
 
@@ -457,7 +482,7 @@ public final class ApiRouterTest {
                   }
                 }
                 """, StandardCharsets.UTF_8);
-            ApiResponse resRecovered = router.handle(ApiRequest.get("/api/status"));
+            ApiResponse resRecovered = router.handle(localGet("/api/status"));
             Assert.assertEquals(200, resRecovered.statusCode(), "recovered status 200");
             Assert.assertEquals(1, arr(obj(parseObj(resRecovered.body()), "data"), "services").elements().size(), "recovered 1 service");
         } finally {

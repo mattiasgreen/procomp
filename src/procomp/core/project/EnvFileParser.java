@@ -17,8 +17,9 @@ final class EnvFileParser {
         if (content == null) {
             return Result.err(DomainError.of("ENV_FILE_PARSE_ERROR", "Env file content must not be null", Map.of("file", sourceLabel)));
         }
+        String normalized = (!content.isEmpty() && content.charAt(0) == '\uFEFF') ? content.substring(1) : content;
         Map<String, String> result = new LinkedHashMap<>();
-        String[] lines = content.split("\r?\n", -1);
+        String[] lines = normalized.split("\r?\n", -1);
         for (int i = 0; i < lines.length; i++) {
             int lineNum = i + 1;
             String trimmed = lines[i].trim();
@@ -48,7 +49,7 @@ final class EnvFileParser {
             String rawVal = entry.substring(eqIdx + 1).trim();
             Result<String, DomainError> valRes = parseValue(rawVal, sourceLabel, lineNum);
             if (valRes.isErr()) {
-                return valRes.fold(ignored -> { throw new IllegalStateException(); }, Result::err);
+                return valRes.castError();
             }
             result.put(key, ((Result.Ok<String, DomainError>) valRes).value());
         }
@@ -156,6 +157,9 @@ final class EnvFileParser {
     }
 
     private static String stripInlineComment(String raw) {
+        if (raw.startsWith("#")) {
+            return "";
+        }
         for (int i = 0; i < raw.length(); i++) {
             if (raw.charAt(i) == '#' && i > 0 && Character.isWhitespace(raw.charAt(i - 1))) {
                 return raw.substring(0, i);

@@ -705,8 +705,13 @@ public final class RealTopologyWorld implements ScenarioWorld {
     private void rebuildArtifact(String service) {
         Path jar = findSandboxArtifact(service);
         try {
-            Instant future = Instant.now().plusSeconds(10);
-            Files.setLastModifiedTime(jar, FileTime.from(future));
+            Instant bumped = Instant.now().plusMillis(50);
+            Files.setLastModifiedTime(jar, FileTime.from(bumped));
+            try {
+                Thread.sleep(60L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to update artifact timestamp for " + service, e);
         }
@@ -950,14 +955,29 @@ public final class RealTopologyWorld implements ScenarioWorld {
         if (dir == null || !Files.exists(dir)) {
             return;
         }
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (Exception ignored) {
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            boolean allDeleted = true;
+            try (Stream<Path> walk = Files.walk(dir)) {
+                List<Path> paths = walk.sorted(Comparator.reverseOrder()).toList();
+                for (Path p : paths) {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (IOException ignored) {
+                        allDeleted = false;
+                    }
                 }
-            });
-        } catch (Exception ignored) {
+            } catch (IOException ignored) {
+                allDeleted = false;
+            }
+            if (allDeleted || !Files.exists(dir)) {
+                return;
+            }
+            try {
+                Thread.sleep(100L * attempt);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
     }
 }

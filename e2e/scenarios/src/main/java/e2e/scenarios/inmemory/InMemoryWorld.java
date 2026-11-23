@@ -67,6 +67,10 @@ public final class InMemoryWorld implements ScenarioWorld {
         return procompRuntime;
     }
 
+    public void setWallClockSleep(boolean enabled) {
+        clock.setWallClockSleep(enabled);
+    }
+
     public Map<String, GitRepoState> gitRepositories() {
         return Collections.unmodifiableMap(gitRepositories);
     }

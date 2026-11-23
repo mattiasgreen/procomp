@@ -529,7 +529,11 @@ final class ProcessLifecycle {
         );
         Result<Unit, DomainError> writeRes = stateStore.writeManagedProcess(projectName, key, record);
         if (writeRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
-            return Result.err(err);
+            // Best-effort rollback so we don't leak an orphaned OS process if persisting the record fails.
+            processRunner.stopTree(spawned.pid(), Duration.ofSeconds(2));
+            Map<String, String> details = new LinkedHashMap<>(err.details());
+            details.put("spawnedPid", Long.toString(spawned.pid()));
+            return Result.err(DomainError.of(err.code(), err.message(), details));
         }
         return Result.ok(spawned);
     }

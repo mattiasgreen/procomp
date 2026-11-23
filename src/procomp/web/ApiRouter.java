@@ -97,19 +97,19 @@ public final class ApiRouter {
     public boolean isSseEndpoint(String method, String path) {
         Objects.requireNonNull(method, "method must not be null");
         Objects.requireNonNull(path, "path must not be null");
-        if (!"GET".equalsIgnoreCase(method)) {
-            return false;
-        }
         if ("/api/services/start/stream".equals(path)) {
-            return true;
+            return "POST".equalsIgnoreCase(method);
         }
-        return extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
+        if ("GET".equalsIgnoreCase(method)) {
+            return extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
+        }
+        return false;
     }
 
     /**
      * Pre-flight validation for SSE endpoints before HTTP {@code 200 OK} streaming headers are sent.
-     * Enforces localhost CSRF ({@code Host}, {@code Origin}, {@code Sec-Fetch-Site}) protection on
-     * mutating SSE streams ({@code GET /api/services/start/stream}).
+     * Enforces loopback {@code Host} validation on all SSE streams and full CSRF protection on
+     * mutating SSE streams ({@code POST /api/services/start/stream}).
      */
     public Optional<ApiResponse> preflightSse(ApiRequest request) {
         Objects.requireNonNull(request, "request must not be null");
@@ -118,6 +118,11 @@ public final class ApiRouter {
             if (csrfErr.isPresent()) {
                 return Optional.of(errorResponse(403, csrfErr.get(), ""));
             }
+            return Optional.empty();
+        }
+        Optional<DomainError> hostErr = checkHost(request);
+        if (hostErr.isPresent()) {
+            return Optional.of(errorResponse(403, hostErr.get(), ""));
         }
         return Optional.empty();
     }
@@ -134,6 +139,11 @@ public final class ApiRouter {
             Optional<DomainError> csrfErr = checkCsrf(request);
             if (csrfErr.isPresent()) {
                 return errorResponse(403, csrfErr.get(), "");
+            }
+        } else {
+            Optional<DomainError> hostErr = checkHost(request);
+            if (hostErr.isPresent()) {
+                return errorResponse(403, hostErr.get(), "");
             }
         }
 
@@ -159,7 +169,7 @@ public final class ApiRouter {
         }
 
         if ("/api/services/start/stream".equals(path)) {
-            return methodNotAllowed(method, "GET");
+            return methodNotAllowed(method, "POST");
         }
 
         if ("/api/services/stop".equals(path)) {
@@ -407,7 +417,7 @@ public final class ApiRouter {
         if (detachRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
-        Result<Integer, DomainError> timeoutRes = readOptionalNonNegativeInt(
+        Result<Integer, DomainError> timeoutRes = readOptionalPositiveInt(
             obj,
             "timeoutSeconds",
             (int) StartRequest.DEFAULT_TIMEOUT.toSeconds()
@@ -421,23 +431,28 @@ public final class ApiRouter {
         Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
         String cliCommand = cli.start(services, detach, timeout);
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        Result<ProcessShell, DomainError> shellRes = runtime.processShell();
-        if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
+            Result<ProcessShell, DomainError> shellRes = runtime.processShell();
+            if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<StartResult, DomainError> startRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
+                .start(project, new StartRequest(services, detach, timeout));
+            if (startRes instanceof Result.Err<StartResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            StartResult result = ((Result.Ok<StartResult, DomainError>) startRes).value();
+            return okEnvelope(DomainJson.startResult(result), cliCommand);
+        } finally {
+            mutationLock.unlock();
         }
-        Result<StartResult, DomainError> startRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
-            .start(project, new StartRequest(services, detach, timeout));
-        if (startRes instanceof Result.Err<StartResult, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        StartResult result = ((Result.Ok<StartResult, DomainError>) startRes).value();
-        return okEnvelope(DomainJson.startResult(result), cliCommand);
     }
 
     private void handleStartServicesStream(ApiRequest request, SseSink sink) {
@@ -447,61 +462,101 @@ public final class ApiRouter {
             return;
         }
 
-        Result<Map<String, String>, DomainError> queryRes = parseQuery(request.rawQuery());
-        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
-            sendSseError(sink, err, "");
-            return;
-        }
-        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+        List<String> services;
+        boolean detach;
+        int timeoutSeconds;
+        if (!request.body().isBlank()) {
+            Result<JsonValue.JsonObject, DomainError> objRes = parseJsonObject(request.body(), false);
+            if (objRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            JsonValue.JsonObject obj = ((Result.Ok<JsonValue.JsonObject, DomainError>) objRes).value();
+            Result<List<String>, DomainError> servicesRes = readStringList(obj, "services", false);
+            if (servicesRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            Result<Boolean, DomainError> detachRes = readOptionalBoolean(obj, "detach", false);
+            if (detachRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            Result<Integer, DomainError> timeoutRes = readOptionalPositiveInt(
+                obj,
+                "timeoutSeconds",
+                (int) StartRequest.DEFAULT_TIMEOUT.toSeconds()
+            );
+            if (timeoutRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            services = ((Result.Ok<List<String>, DomainError>) servicesRes).value();
+            detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
+            timeoutSeconds = ((Result.Ok<Integer, DomainError>) timeoutRes).value();
+        } else {
+            Result<Map<String, String>, DomainError> queryRes = parseQuery(request.rawQuery());
+            if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
 
-        List<String> services = parseCsvList(query.getOrDefault("services", ""));
-        Result<Integer, DomainError> timeoutRes = parseOptionalQueryNonNegativeInt(
-            query,
-            "timeout",
-            (int) StartRequest.DEFAULT_TIMEOUT.toSeconds()
-        );
-        if (timeoutRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
-            sendSseError(sink, err, "");
-            return;
-        }
-        Result<Boolean, DomainError> detachRes = parseOptionalQueryBoolean(query, "detach", false);
-        if (detachRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
-            sendSseError(sink, err, "");
-            return;
+            services = parseCsvList(query.getOrDefault("services", ""));
+            Result<Integer, DomainError> timeoutRes = parseOptionalQueryPositiveInt(
+                query,
+                "timeout",
+                (int) StartRequest.DEFAULT_TIMEOUT.toSeconds()
+            );
+            if (timeoutRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            Result<Boolean, DomainError> detachRes = parseOptionalQueryBoolean(query, "detach", false);
+            if (detachRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+                sendSseError(sink, err, "");
+                return;
+            }
+            detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
+            timeoutSeconds = ((Result.Ok<Integer, DomainError>) timeoutRes).value();
         }
 
-        boolean detach = ((Result.Ok<Boolean, DomainError>) detachRes).value();
-        Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
+        Duration timeout = Duration.ofSeconds(timeoutSeconds);
         String cliCommand = cli.start(services, detach, timeout);
 
         sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            sendSseError(sink, err, cliCommand);
-            return;
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                sendSseError(sink, err, cliCommand);
+                return;
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        ProcompRuntime streamRuntime = runtime.withObserver(event ->
-            sink.send("progress", Json.stringify(DomainJson.progressEvent(event)))
-        );
-        Result<ProcessShell, DomainError> shellRes = streamRuntime.processShell();
-        if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
-            sendSseError(sink, err, cliCommand);
-            return;
+            ProcompRuntime streamRuntime = runtime.withObserver(event ->
+                sink.send("progress", Json.stringify(DomainJson.progressEvent(event)))
+            );
+            Result<ProcessShell, DomainError> shellRes = streamRuntime.processShell();
+            if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
+                sendSseError(sink, err, cliCommand);
+                return;
+            }
+            Result<StartResult, DomainError> startRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
+                .start(project, new StartRequest(services, detach, timeout));
+            if (startRes instanceof Result.Err<StartResult, DomainError>(DomainError err)) {
+                sendSseError(sink, err, cliCommand);
+                return;
+            }
+            StartResult result = ((Result.Ok<StartResult, DomainError>) startRes).value();
+            Map<String, JsonValue> doneObj = new LinkedHashMap<>();
+            doneObj.put("data", DomainJson.startResult(result));
+            doneObj.put("cliCommand", Json.str(cliCommand));
+            sink.send("done", Json.stringify(Json.obj(doneObj)));
+        } finally {
+            mutationLock.unlock();
         }
-        Result<StartResult, DomainError> startRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
-            .start(project, new StartRequest(services, detach, timeout));
-        if (startRes instanceof Result.Err<StartResult, DomainError>(DomainError err)) {
-            sendSseError(sink, err, cliCommand);
-            return;
-        }
-        StartResult result = ((Result.Ok<StartResult, DomainError>) startRes).value();
-        Map<String, JsonValue> doneObj = new LinkedHashMap<>();
-        doneObj.put("data", DomainJson.startResult(result));
-        doneObj.put("cliCommand", Json.str(cliCommand));
-        sink.send("done", Json.stringify(Json.obj(doneObj)));
     }
 
     private ApiResponse handleStopServices(ApiRequest request) {
@@ -529,23 +584,28 @@ public final class ApiRouter {
         boolean killConflict = ((Result.Ok<Boolean, DomainError>) killConflictRes).value();
         String cliCommand = cli.stop(services, all, killConflict);
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        Result<ProcessShell, DomainError> shellRes = runtime.processShell();
-        if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
+            Result<ProcessShell, DomainError> shellRes = runtime.processShell();
+            if (shellRes instanceof Result.Err<ProcessShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<StopResult, DomainError> stopRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
+                .stop(project, new StopRequest(services, all, killConflict, StopRequest.DEFAULT_GRACEFUL_TIMEOUT));
+            if (stopRes instanceof Result.Err<StopResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            StopResult result = ((Result.Ok<StopResult, DomainError>) stopRes).value();
+            return okEnvelope(DomainJson.stopResult(result), cliCommand);
+        } finally {
+            mutationLock.unlock();
         }
-        Result<StopResult, DomainError> stopRes = ((Result.Ok<ProcessShell, DomainError>) shellRes).value()
-            .stop(project, new StopRequest(services, all, killConflict, StopRequest.DEFAULT_GRACEFUL_TIMEOUT));
-        if (stopRes instanceof Result.Err<StopResult, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        StopResult result = ((Result.Ok<StopResult, DomainError>) stopRes).value();
-        return okEnvelope(DomainJson.stopResult(result), cliCommand);
     }
 
     private ApiResponse handleGatewayStart(ApiRequest request) {
@@ -559,7 +619,7 @@ public final class ApiRouter {
         if (detachRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
-        Result<Integer, DomainError> timeoutRes = readOptionalNonNegativeInt(
+        Result<Integer, DomainError> timeoutRes = readOptionalPositiveInt(
             obj,
             "timeoutSeconds",
             (int) GatewayStartRequest.DEFAULT_TIMEOUT.toSeconds()
@@ -572,67 +632,82 @@ public final class ApiRouter {
         Duration timeout = Duration.ofSeconds(((Result.Ok<Integer, DomainError>) timeoutRes).value());
         String cliCommand = cli.gatewayStart(detach, timeout);
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
-        if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
+            Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
+            if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<GatewayStartResult, DomainError> startRes = ((Result.Ok<GatewayShell, DomainError>) shellRes).value()
+                .start(project, new GatewayStartRequest(detach, timeout));
+            if (startRes instanceof Result.Err<GatewayStartResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            GatewayStartResult result = ((Result.Ok<GatewayStartResult, DomainError>) startRes).value();
+            return okEnvelope(DomainJson.gatewayStartResult(result), cliCommand);
+        } finally {
+            mutationLock.unlock();
         }
-        Result<GatewayStartResult, DomainError> startRes = ((Result.Ok<GatewayShell, DomainError>) shellRes).value()
-            .start(project, new GatewayStartRequest(detach, timeout));
-        if (startRes instanceof Result.Err<GatewayStartResult, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        GatewayStartResult result = ((Result.Ok<GatewayStartResult, DomainError>) startRes).value();
-        return okEnvelope(DomainJson.gatewayStartResult(result), cliCommand);
     }
 
     private ApiResponse handleGatewayStop() {
         String cliCommand = cli.gatewayStop();
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
-        if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
+            Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
+            if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<GatewayStopResult, DomainError> stopRes = ((Result.Ok<GatewayShell, DomainError>) shellRes).value()
+                .stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT));
+            if (stopRes instanceof Result.Err<GatewayStopResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            GatewayStopResult result = ((Result.Ok<GatewayStopResult, DomainError>) stopRes).value();
+            return okEnvelope(DomainJson.gatewayStopResult(result), cliCommand);
+        } finally {
+            mutationLock.unlock();
         }
-        Result<GatewayStopResult, DomainError> stopRes = ((Result.Ok<GatewayShell, DomainError>) shellRes).value()
-            .stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT));
-        if (stopRes instanceof Result.Err<GatewayStopResult, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        GatewayStopResult result = ((Result.Ok<GatewayStopResult, DomainError>) stopRes).value();
-        return okEnvelope(DomainJson.gatewayStopResult(result), cliCommand);
     }
 
     private ApiResponse handleGatewayReconcile() {
         String cliCommand = cli.gatewayReconcile();
 
-        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
-        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
 
-        Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
-        if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
+            Result<GatewayShell, DomainError> shellRes = runtime.gatewayShell();
+            if (shellRes instanceof Result.Err<GatewayShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<GatewayReconcileResult, DomainError> reconcileRes =
+                ((Result.Ok<GatewayShell, DomainError>) shellRes).value().reconcile(project);
+            if (reconcileRes instanceof Result.Err<GatewayReconcileResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            GatewayReconcileResult result = ((Result.Ok<GatewayReconcileResult, DomainError>) reconcileRes).value();
+            return okEnvelope(DomainJson.gatewayReconcileResult(result), cliCommand);
+        } finally {
+            mutationLock.unlock();
         }
-        Result<GatewayReconcileResult, DomainError> reconcileRes =
-            ((Result.Ok<GatewayShell, DomainError>) shellRes).value().reconcile(project);
-        if (reconcileRes instanceof Result.Err<GatewayReconcileResult, DomainError>(DomainError err)) {
-            return domainErrorResponse(err, cliCommand);
-        }
-        GatewayReconcileResult result = ((Result.Ok<GatewayReconcileResult, DomainError>) reconcileRes).value();
-        return okEnvelope(DomainJson.gatewayReconcileResult(result), cliCommand);
     }
 
     private ApiResponse handleLogs(String rawName, String rawQuery) {
@@ -747,38 +822,65 @@ public final class ApiRouter {
         }
     }
 
-    private Optional<DomainError> checkCsrf(ApiRequest request) {
+    private Optional<DomainError> checkHost(ApiRequest request) {
         Optional<String> hostOpt = request.header("Host");
         if (hostOpt.isEmpty() || !isAllowedHost(hostOpt.get())) {
             return Optional.of(DomainError.of(
                 "FORBIDDEN_ORIGIN",
-                "Rejected mutating request with missing or non-loopback Host header",
+                "Rejected request with missing or non-loopback Host header",
                 Map.of("host", hostOpt.orElse("<missing>"))
             ));
-        }
-        Optional<String> originOpt = request.header("Origin");
-        if (originOpt.isPresent() && !originOpt.get().isBlank() && !isAllowedOrigin(originOpt.get())) {
-            return Optional.of(DomainError.of(
-                "FORBIDDEN_ORIGIN",
-                "Rejected cross-origin request from Origin '" + originOpt.get() + "'",
-                Map.of("origin", originOpt.get())
-            ));
-        }
-        Optional<String> secFetchSiteOpt = request.header("Sec-Fetch-Site");
-        if (secFetchSiteOpt.isPresent() && !secFetchSiteOpt.get().isBlank()) {
-            String val = secFetchSiteOpt.get().trim().toLowerCase(Locale.ROOT);
-            if (!"same-origin".equals(val) && !"none".equals(val)) {
-                return Optional.of(DomainError.of(
-                    "FORBIDDEN_ORIGIN",
-                    "Rejected request with Sec-Fetch-Site '" + secFetchSiteOpt.get() + "'",
-                    Map.of("secFetchSite", secFetchSiteOpt.get())
-                ));
-            }
         }
         return Optional.empty();
     }
 
-    private boolean isAllowedHost(String rawHost) {
+    private Optional<DomainError> checkCsrf(ApiRequest request) {
+        Optional<DomainError> hostErr = checkHost(request);
+        if (hostErr.isPresent()) {
+            return hostErr;
+        }
+        Optional<String> originOpt = request.header("Origin");
+        boolean hasValidOrigin = false;
+        if (originOpt.isPresent() && !originOpt.get().isBlank()) {
+            if (!isAllowedOrigin(originOpt.get())) {
+                return Optional.of(DomainError.of(
+                    "FORBIDDEN_ORIGIN",
+                    "Rejected cross-origin request from Origin '" + originOpt.get() + "'",
+                    Map.of("origin", originOpt.get())
+                ));
+            }
+            hasValidOrigin = true;
+        }
+        Optional<String> secFetchSiteOpt = request.header("Sec-Fetch-Site");
+        boolean hasSameOriginFetch = false;
+        if (secFetchSiteOpt.isPresent() && !secFetchSiteOpt.get().isBlank()) {
+            String val = secFetchSiteOpt.get().trim().toLowerCase(Locale.ROOT);
+            if (!"same-origin".equals(val)) {
+                return Optional.of(DomainError.of(
+                    "FORBIDDEN_ORIGIN",
+                    "Rejected mutating request with Sec-Fetch-Site '" + secFetchSiteOpt.get() + "'",
+                    Map.of("secFetchSite", secFetchSiteOpt.get())
+                ));
+            }
+            hasSameOriginFetch = true;
+        }
+        boolean hasJsonContentType = request.header("Content-Type")
+            .map(ct -> ct.trim().toLowerCase(Locale.ROOT).startsWith("application/json"))
+            .orElse(false);
+        boolean hasCustomHeader = request.header("X-Procomp-Request")
+            .map(v -> !v.isBlank())
+            .orElse(false);
+        if (!hasValidOrigin && !hasSameOriginFetch && !hasJsonContentType && !hasCustomHeader) {
+            return Optional.of(DomainError.of(
+                "FORBIDDEN_ORIGIN",
+                "Rejected mutating request lacking same-origin or JSON/custom-header CSRF proof",
+                Map.of("method", request.method(), "path", request.path())
+            ));
+        }
+        return Optional.empty();
+    }
+
+    boolean isAllowedHost(String rawHost) {
         return isAllowedLoopbackAuthority(rawHost.trim().toLowerCase(Locale.ROOT));
     }
 
@@ -885,7 +987,7 @@ public final class ApiRouter {
 
     private static Result<String, DomainError> decodeSegment(String raw, String label) {
         try {
-            String decoded = URLDecoder.decode(raw, StandardCharsets.UTF_8);
+            String decoded = StaticAssets.percentDecodePath(raw);
             if (decoded.isBlank()) {
                 return Result.err(DomainError.of("INVALID_REQUEST", label + " name must not be blank"));
             }
@@ -972,7 +1074,7 @@ public final class ApiRouter {
         return Result.err(DomainError.of("INVALID_REQUEST", "Field '" + field + "' must be a boolean"));
     }
 
-    private static Result<Integer, DomainError> readOptionalNonNegativeInt(
+    private static Result<Integer, DomainError> readOptionalPositiveInt(
         JsonValue.JsonObject obj,
         String field,
         int defaultValue
@@ -983,11 +1085,11 @@ public final class ApiRouter {
         }
         if (valOpt.get() instanceof JsonValue.JsonNumber num) {
             OptionalInt parsed = num.asInt();
-            if (parsed.isPresent() && parsed.getAsInt() >= 0) {
+            if (parsed.isPresent() && parsed.getAsInt() >= 1) {
                 return Result.ok(parsed.getAsInt());
             }
         }
-        return Result.err(DomainError.of("INVALID_REQUEST", "Field '" + field + "' must be a non-negative integer"));
+        return Result.err(DomainError.of("INVALID_REQUEST", "Field '" + field + "' must be a positive integer"));
     }
 
     private static Result<Map<String, String>, DomainError> parseQuery(String rawQuery) {
@@ -1025,6 +1127,26 @@ public final class ApiRouter {
             }
         }
         return List.copyOf(items);
+    }
+
+    private static Result<Integer, DomainError> parseOptionalQueryPositiveInt(
+        Map<String, String> query,
+        String key,
+        int defaultValue
+    ) {
+        String raw = query.get(key);
+        if (raw == null || raw.isBlank()) {
+            return Result.ok(defaultValue);
+        }
+        try {
+            int val = Integer.parseInt(raw.trim());
+            if (val < 1) {
+                return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be a positive integer"));
+            }
+            return Result.ok(val);
+        } catch (NumberFormatException e) {
+            return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be an integer"));
+        }
     }
 
     private static Result<Integer, DomainError> parseOptionalQueryNonNegativeInt(

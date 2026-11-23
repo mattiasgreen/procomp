@@ -511,6 +511,55 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testHostEnvSecretNotReparsedAsTemplateAndPathSafeServiceNames() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
+            {
+              "project": "acme",
+              "runtimes": {
+                "rt": {
+                  "artifactGlob": "*.jar",
+                  "command": ["echo", "{{service}}", "--format={{rawFmt}}", "{{artifact}}"]
+                }
+              },
+              "services": {
+                "orders": {
+                  "runtime": "rt",
+                  "port": 9001,
+                  "workingDir": ".",
+                  "vars": { "rawFmt": "{{.Names}}" },
+                  "env": {
+                    "DB_PASS": "${env:SECRET_WITH_BRACES}",
+                    "TAG": "{{service}}-${env:SECRET_WITH_BRACES}"
+                  }
+                }
+              }
+            }
+            """;
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of("SECRET_WITH_BRACES", "p@ss{{not_a_var}}")),
+            "host secret containing {{...}} must not be re-parsed by TemplateExpander"
+        );
+        ServiceDefinition orders = project.service("orders").orElseThrow();
+        Assert.assertEquals("p@ss{{not_a_var}}", orders.env().asMap().get("DB_PASS"), "secret preserved verbatim");
+        Assert.assertEquals("orders-p@ss{{not_a_var}}", orders.env().asMap().get("TAG"), "template expanded before host env");
+
+        List<String> resolvedCmd = Assert.assertOk(
+            ProjectResolver.resolveServiceCommand(orders, Optional.of(Path.of("orders.jar"))),
+            "resolveServiceCommand replaces only {{artifact}} without re-parsing {{.Names}}"
+        );
+        Assert.assertEquals(List.of("echo", "orders", "--format={{.Names}}", "orders.jar"), resolvedCmd, "command preserved");
+
+        String traversalJson = """
+            {
+              "project": "acme",
+              "runtimes": { "rt": { "command": ["echo"] } },
+              "services": { "../../evil": { "runtime": "rt", "workingDir": "." } }
+            }
+            """;
+        assertResolveErr(configPath, traversalJson, "CONFIG_INVALID_VALUE");
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),

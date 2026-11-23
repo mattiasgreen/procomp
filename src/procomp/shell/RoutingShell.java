@@ -11,6 +11,8 @@ import procomp.shell.ports.StateStore;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Modality-agnostic orchestrator for Routing Table and Profile operations.
@@ -19,6 +21,7 @@ import java.util.Objects;
 public final class RoutingShell {
 
     private final StateStore stateStore;
+    private final ConcurrentHashMap<String, ReentrantLock> projectLocks = new ConcurrentHashMap<>();
 
     public RoutingShell(StateStore stateStore) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore must not be null");
@@ -38,9 +41,15 @@ public final class RoutingShell {
      */
     public Result<RoutingTable, DomainError> updateRoutes(Project project, List<String> serviceNames, Route route) {
         Objects.requireNonNull(project, "project must not be null");
-        return showRoutes(project)
-            .flatMap(current -> RoutingEngine.applyRoute(project, current, serviceNames, route))
-            .flatMap(updated -> persistRouting(project, updated));
+        ReentrantLock lock = projectLocks.computeIfAbsent(project.name(), ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            return showRoutes(project)
+                .flatMap(current -> RoutingEngine.applyRoute(project, current, serviceNames, route))
+                .flatMap(updated -> persistRouting(project, updated));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -56,8 +65,14 @@ public final class RoutingShell {
      */
     public Result<RoutingTable, DomainError> useProfile(Project project, String profileName) {
         Objects.requireNonNull(project, "project must not be null");
-        return RoutingEngine.applyProfile(project, profileName)
-            .flatMap(updated -> persistRouting(project, updated));
+        ReentrantLock lock = projectLocks.computeIfAbsent(project.name(), ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            return RoutingEngine.applyProfile(project, profileName)
+                .flatMap(updated -> persistRouting(project, updated));
+        } finally {
+            lock.unlock();
+        }
     }
 
     private Result<RoutingTable, DomainError> persistRouting(Project project, RoutingTable updated) {

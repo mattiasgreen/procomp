@@ -92,7 +92,10 @@ public final class UiCli {
         runtime.out().flush();
 
         if (options.open()) {
-            WebUi.openBrowser(url);
+            if (!WebUi.openBrowser(url)) {
+                runtime.err().println("Warning: could not open browser automatically; open " + url + " manually.");
+                runtime.err().flush();
+            }
         }
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);

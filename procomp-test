@@ -8,4 +8,5 @@ else
   JAVA_BIN="java"
 fi
 
+cd "$SCRIPT_DIR"
 exec "$JAVA_BIN" "$SCRIPT_DIR/test/TestRunner.java" "$@"

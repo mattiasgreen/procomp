@@ -51,7 +51,9 @@ val e2eTest by tasks.registering(Test::class) {
     description = "Runs true E2E integration tests with real Spring Boot JARs, embedded Artemis, and WireMock."
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
-    useJUnitPlatform()
+    useJUnitPlatform {
+        includeTags("e2e")
+    }
 
     dependsOn(
         prepareWireMock,
@@ -95,21 +97,31 @@ val sandbox by tasks.registering(JavaExec::class) {
         ":e2e:notifications:bootJar",
     )
 
+    val repoRootPath = rootProject.projectDir.absolutePath
+    val wiremockJarPath = wiremockJarFile.map { it.asFile.absolutePath }
     val launcher = javaToolchains.launcherFor(java.toolchain)
-    doFirst {
-        systemProperty("e2e.repoRoot", rootProject.projectDir.absolutePath)
-        systemProperty("e2e.wiremockJar", wiremockJarFile.get().asFile.absolutePath)
-        systemProperty("e2e.javaHome", launcher.get().metadata.installationPath.asFile.absolutePath)
+    val javaHomePath = launcher.map { it.metadata.installationPath.asFile.absolutePath }
+    val scenarioProp = providers.gradleProperty("scenario")
+    val stepProp = providers.gradleProperty("step")
 
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf(
+            "-De2e.repoRoot=$repoRootPath",
+            "-De2e.wiremockJar=${wiremockJarPath.get()}",
+            "-De2e.javaHome=${javaHomePath.get()}",
+        )
+    })
+
+    argumentProviders.add(CommandLineArgumentProvider {
         val cliArgs = mutableListOf<String>()
-        if (project.hasProperty("scenario")) {
+        scenarioProp.orNull?.takeIf { it.isNotBlank() }?.let {
             cliArgs.add("--scenario")
-            cliArgs.add(project.property("scenario").toString())
+            cliArgs.add(it)
         }
-        if (project.hasProperty("step")) {
+        stepProp.orNull?.takeIf { it.isNotBlank() }?.let {
             cliArgs.add("--step")
-            cliArgs.add(project.property("step").toString())
+            cliArgs.add(it)
         }
-        args = cliArgs
-    }
+        cliArgs
+    })
 }

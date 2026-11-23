@@ -26,10 +26,12 @@ public final class ScenarioWebUiHost implements AutoCloseable {
     private static final Duration FAST_LOGS_POLL = Duration.ofMillis(50);
     private static final Duration FAST_SSE_HEARTBEAT = Duration.ofMillis(500);
 
+    private final InMemoryWorld world;
     private final WebUi webUi;
     private final int boundPort;
 
-    private ScenarioWebUiHost(WebUi webUi, int boundPort) {
+    private ScenarioWebUiHost(InMemoryWorld world, WebUi webUi, int boundPort) {
+        this.world = world;
         this.webUi = webUi;
         this.boundPort = boundPort;
     }
@@ -42,9 +44,11 @@ public final class ScenarioWebUiHost implements AutoCloseable {
         Objects.requireNonNull(world, "world must not be null");
         Objects.requireNonNull(webDir, "webDir must not be null");
 
+        world.setWallClockSleep(true);
         ProcompRuntime runtime = world.procompRuntime();
         Result<ProjectLoader, DomainError> loaderRes = runtime.projectLoader();
         if (loaderRes instanceof Result.Err<ProjectLoader, DomainError>(DomainError err)) {
+            world.setWallClockSleep(false);
             throw new IllegalStateException("InMemoryWorld ProcompRuntime missing ProjectLoader: " + err.format());
         }
         ProjectLoader loader = ((Result.Ok<ProjectLoader, DomainError>) loaderRes).value();
@@ -55,10 +59,11 @@ public final class ScenarioWebUiHost implements AutoCloseable {
         Result<Integer, DomainError> startRes = webUi.start();
         if (startRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
             webUi.close();
+            world.setWallClockSleep(false);
             throw new IllegalStateException("Failed to start ScenarioWebUiHost: " + err.format());
         }
         int boundPort = ((Result.Ok<Integer, DomainError>) startRes).value();
-        return new ScenarioWebUiHost(webUi, boundPort);
+        return new ScenarioWebUiHost(world, webUi, boundPort);
     }
 
     public int boundPort() {
@@ -71,6 +76,10 @@ public final class ScenarioWebUiHost implements AutoCloseable {
 
     @Override
     public void close() {
-        webUi.close();
+        try {
+            webUi.close();
+        } finally {
+            world.setWallClockSleep(false);
+        }
     }
 }

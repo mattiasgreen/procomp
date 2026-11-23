@@ -165,16 +165,19 @@ public final class WebUiSmokeTest {
                 Assert.assertEquals(403, badOriginRes.statusCode(), "bad Origin rejected with 403");
                 Assert.assertContains(badOriginRes.body(), "FORBIDDEN_ORIGIN", "403 body contains FORBIDDEN_ORIGIN");
 
-                // 3b. Cross-origin GET /api/services/start/stream rejected with HTTP 403 BEFORE 200 SSE headers
+                // 3b. Cross-origin POST /api/services/start/stream rejected with HTTP 403 BEFORE 200 SSE headers
                 HttpResponse<String> badSseOriginRes = http.send(
-                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/services/start/stream?services=orders"))
+                    HttpRequest.newBuilder(URI.create(baseUrl + "/api/services/start/stream"))
                         .header("Origin", "http://evil.example")
-                        .GET()
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"services\":[\"orders\"]}"))
                         .build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
                 );
                 Assert.assertEquals(403, badSseOriginRes.statusCode(), "cross-origin SSE start stream rejected with 403");
                 Assert.assertContains(badSseOriginRes.body(), "FORBIDDEN_ORIGIN", "403 SSE body contains FORBIDDEN_ORIGIN");
+                Assert.assertEquals("DENY", badSseOriginRes.headers().firstValue("X-Frame-Options").orElse(""), "X-Frame-Options header present");
+                Assert.assertEquals("nosniff", badSseOriginRes.headers().firstValue("X-Content-Type-Options").orElse(""), "X-Content-Type-Options header present");
 
                 HttpResponse<String> routeOkRes = http.send(
                     HttpRequest.newBuilder(URI.create(baseUrl + "/api/routes"))
@@ -198,6 +201,7 @@ public final class WebUiSmokeTest {
                     .build()) {
                     HttpResponse<InputStream> sseRes = sseClient.send(
                         HttpRequest.newBuilder(URI.create(baseUrl + "/api/services/orders/logs/stream?lines=10"))
+                            .timeout(Duration.ofSeconds(10))
                             .GET()
                             .build(),
                         HttpResponse.BodyHandlers.ofInputStream()

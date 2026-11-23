@@ -54,12 +54,15 @@ tasks.named<JavaCompile>("compileTestJava") {
 
 val testSourceSet = sourceSets.test.get()
 
+val webAssetsDir = layout.projectDirectory.dir("web")
+
 val unitTest by tasks.registering(Test::class) {
     group = "verification"
     description = "Runs fast Level 1-2 unit and in-memory shell/CLI/web tests in parallel."
     testClassesDirs = testSourceSet.output.classesDirs
     classpath = testSourceSet.runtimeClasspath
     useJUnitPlatform()
+    inputs.dir(webAssetsDir).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.property("procomp.levels", "1,2")
     systemProperty("procomp.levels", "1,2")
     systemProperty("junit.jupiter.execution.parallel.enabled", "true")
@@ -78,6 +81,7 @@ val integrationTest by tasks.registering(Test::class) {
     classpath = testSourceSet.runtimeClasspath
     useJUnitPlatform()
     shouldRunAfter(unitTest)
+    inputs.dir(webAssetsDir).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.property("procomp.levels", "3")
     systemProperty("procomp.levels", "3")
     systemProperty("junit.jupiter.execution.parallel.enabled", "false")
@@ -95,7 +99,7 @@ tasks.test {
 
 spotless {
     java {
-        target("src/**/*.java", "test/**/*.java", "gradle-test/**/*.java")
+        target("src/**/*.java", "test/**/*.java", "gradle-test/**/*.java", "e2e/*/src/**/*.java")
         trimTrailingWhitespace()
         endWithNewline()
         removeUnusedImports()
@@ -116,23 +120,44 @@ val fastCheck by tasks.registering {
 
 val verifyJep458 by tasks.registering(Exec::class) {
     group = "verification"
-    description = "Verifies pure zero-dependency JEP 458 direct source launch of procomp."
+    description = "Verifies pure zero-dependency JEP 458 direct source launch of procomp with an empty classpath."
     val launcher = javaToolchains.launcherFor(java.toolchain)
-    val javaExec = launcher.get().executablePath.asFile.absolutePath
-    val javaHome = launcher.get().metadata.installationPath.asFile.absolutePath
-    inputs.dir(layout.projectDirectory.dir("src"))
+    inputs.dir(layout.projectDirectory.dir("src")).withPathSensitivity(PathSensitivity.RELATIVE)
     outputs.upToDateWhen { true }
-    executable(javaExec)
-    args("src/procomp/cli/Procomp.java", "--help")
-    environment("JAVA_HOME", javaHome)
+    environment("CLASSPATH", "")
+    executable(launcher.map { it.executablePath.asFile.absolutePath }.get())
+    args("--class-path", "", "src/procomp/cli/Procomp.java", "--help")
+    environment("JAVA_HOME", launcher.map { it.metadata.installationPath.asFile.absolutePath }.get())
+}
+
+val verifyTestRunnerCompile by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Verifies offline test/TestRunner.java compiles cleanly with zero external dependencies."
+    val compiler = javaToolchains.compilerFor(java.toolchain)
+    val outDir = layout.buildDirectory.dir("verify-test-runner")
+    inputs.file(layout.projectDirectory.file("test/TestRunner.java")).withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.dir(outDir)
+    environment("CLASSPATH", "")
+    executable(compiler.map { it.executablePath.asFile.absolutePath }.get())
+    argumentProviders.add(CommandLineArgumentProvider {
+        val dir = outDir.get().asFile
+        dir.mkdirs()
+        listOf("-encoding", "UTF-8", "-d", dir.absolutePath, "test/TestRunner.java")
+    })
 }
 
 tasks.named("check") {
-    dependsOn(lint, unitTest, integrationTest, verifyJep458)
+    dependsOn(lint, unitTest, integrationTest, verifyJep458, verifyTestRunnerCompile)
 }
 
 val outerLoop by tasks.registering {
     group = "verification"
-    description = "Full outer-loop verification: check (Levels 1-3 + JEP 458) + real E2E topology suite + Playwright Web UI suite."
-    dependsOn(tasks.named("check"), ":e2e:runner:e2eTest", ":e2e:web-ui:uiE2eTest")
+    description = "Full outer-loop verification: check (Levels 1-3 + JEP 458) + scenarios/demos + real E2E topology + Playwright Web UI."
+    dependsOn(
+        tasks.named("check"),
+        ":e2e:scenarios:check",
+        ":e2e:runner:check",
+        ":e2e:runner:e2eTest",
+        ":e2e:web-ui:uiE2eTest",
+    )
 }

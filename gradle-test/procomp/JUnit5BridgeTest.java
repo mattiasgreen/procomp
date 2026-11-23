@@ -36,6 +36,9 @@ final class JUnit5BridgeTest {
         List<DynamicContainer> containers = new ArrayList<>();
         for (String className : classNames) {
             int level = classifyLevel(className);
+            if (level == 0) {
+                throw new IllegalStateException("Unclassified test class (not in core/shell/cli/web/platform/smoke): " + className);
+            }
             if (!allowedLevels.isEmpty() && !allowedLevels.contains(level)) {
                 continue;
             }
@@ -60,6 +63,9 @@ final class JUnit5BridgeTest {
                 tests.add(DynamicTest.dynamicTest(m.getName(), () -> invokeStatic(m)));
             }
             containers.add(DynamicContainer.dynamicContainer(className, tests));
+        }
+        if (containers.isEmpty()) {
+            throw new IllegalStateException("No test classes matched the active level filters.");
         }
         return containers.stream();
     }
