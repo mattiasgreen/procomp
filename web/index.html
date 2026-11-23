@@ -229,11 +229,51 @@
       </section>
     </main>
 
+    <!-- Expandable CLI Command History Panel -->
+    <section
+      id="cli-history-panel"
+      class="cli-history-panel"
+      role="region"
+      aria-label="CLI command history"
+      hidden
+    >
+      <div class="cli-history-header">
+        <div class="cli-history-title-group">
+          <h2 class="section-title">CLI Command History</h2>
+          <span id="cli-history-summary" class="mono muted">0 commands</span>
+        </div>
+        <div class="cli-history-actions">
+          <button id="btn-copy-cli-history" type="button" class="btn btn-secondary btn-sm" title="Copy all commands in chronological order">
+            Copy All
+          </button>
+          <button id="btn-clear-cli-history" type="button" class="btn btn-secondary btn-sm">Clear</button>
+          <button id="btn-close-cli-history" type="button" class="btn-icon" aria-label="Close CLI command history" title="Close">&times;</button>
+        </div>
+      </div>
+      <div id="cli-history-empty" class="cli-history-empty muted" hidden>
+        No CLI commands recorded yet.
+      </div>
+      <ol id="cli-history-list" class="cli-history-list"></ol>
+    </section>
+
     <!-- Persistent CLI Command Echo Footer -->
     <footer class="cli-footer" aria-label="Verbatim CLI command echo">
       <span class="cli-footer-label">CLI</span>
       <code id="cli-command-echo" class="cli-command-echo">procomp status</code>
-      <button id="btn-copy-cli" type="button" class="btn btn-secondary btn-sm">Copy</button>
+      <div class="cli-footer-actions">
+        <button id="btn-copy-cli" type="button" class="btn btn-secondary btn-sm">Copy</button>
+        <button
+          id="btn-cli-history"
+          type="button"
+          class="btn btn-secondary btn-sm"
+          aria-expanded="false"
+          aria-controls="cli-history-panel"
+          title="View full CLI command history"
+        >
+          <span>History</span>
+          <span id="cli-history-count" class="cli-history-count">0</span>
+        </button>
+      </div>
     </footer>
   </div>
 
