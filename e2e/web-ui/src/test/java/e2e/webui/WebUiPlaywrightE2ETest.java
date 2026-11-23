@@ -143,6 +143,69 @@ final class WebUiPlaywrightE2ETest {
     }
 
     @Test
+    void cliFooterHistoryPanelShowsFullCommandHistoryWithoutDuplicatesAndCanBeCleared() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // Initial status load records procomp status once
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp status");
+                assertThat(page.locator("#cli-history-count")).hasText("1");
+                assertThat(page.locator("#cli-history-panel")).isHidden();
+
+                // Flip pricing Route to LOCAL, reconcile Gateway, and start pricing (SSE meta+done)
+                Locator pricingRow = serviceRow("pricing");
+                pricingRow.locator("button.route-local").click();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing local");
+
+                page.locator("#btn-drift-reconcile").click();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
+
+                pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Start")).click();
+                assertThat(pricingRow).containsText("HEALTHY");
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp start pricing");
+
+                // History count must be 4 (no duplicate for SSE start meta+done)
+                assertThat(page.locator("#cli-history-count")).hasText("4");
+
+                // Open CLI history panel from the footer
+                Locator historyBtn = page.locator("#btn-cli-history");
+                historyBtn.click();
+                assertThat(historyBtn).hasAttribute("aria-expanded", "true");
+                assertThat(page.locator("#cli-history-panel")).isVisible();
+                assertThat(page.locator("#cli-history-summary")).hasText("4 commands");
+
+                Locator items = page.locator("#cli-history-list .cli-history-cmd");
+                assertThat(items).hasCount(4);
+                assertThat(items.nth(0)).hasText("procomp start pricing");
+                assertThat(items.nth(1)).hasText("procomp gateway reconcile");
+                assertThat(items.nth(2)).hasText("procomp route pricing local");
+                assertThat(items.nth(3)).hasText("procomp status");
+
+                // Clear history -> shows empty state and resets count to 0
+                page.locator("#btn-clear-cli-history").click();
+                assertThat(page.locator("#cli-history-count")).hasText("0");
+                assertThat(page.locator("#cli-history-empty")).isVisible();
+                assertThat(page.locator("#cli-history-list")).isHidden();
+
+                // Subsequent explicit action records cleanly
+                page.locator("#btn-refresh").click();
+                assertThat(page.locator("#cli-history-count")).hasText("1");
+                assertThat(items).hasCount(1);
+                assertThat(items.nth(0)).hasText("procomp status");
+
+                // Close panel via close button
+                page.locator("#btn-close-cli-history").click();
+                assertThat(page.locator("#cli-history-panel")).isHidden();
+                assertThat(historyBtn).hasAttribute("aria-expanded", "false");
+            }
+        }
+    }
+
+    @Test
     void ownershipAndConflictShowsConfirmationDialogBeforeKillingConflictProcess() {
         try (InMemoryWorld world = new InMemoryWorld()) {
             new ScenarioRunner().jumpToStep(ScenarioCatalog.ownershipAndConflicts(), world, "port-conflict");

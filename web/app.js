@@ -17,6 +17,7 @@ import {
 
 const POLL_INTERVAL_MS = 2500;
 const MAX_LOG_LINES = 5000;
+const MAX_CLI_HISTORY = 500;
 
 const state = {
   estate: null,
@@ -26,6 +27,10 @@ const state = {
   statusInFlightCount: 0,
   statusSeq: 0,
   hasExplicitCliCommand: false,
+  hasRecordedInitialCliCommand: false,
+  cliHistory: [],
+  cliHistoryOpen: false,
+  cliHistorySeq: 0,
   pollErrorActive: false,
   pendingRoutes: new Set(),
   pendingStops: new Set(),
@@ -114,8 +119,18 @@ const dom = {
   btnLogsReconnect: document.getElementById('btn-logs-reconnect'),
   logsOutput: document.getElementById('logs-output'),
 
+  cliHistoryPanel: document.getElementById('cli-history-panel'),
+  cliHistorySummary: document.getElementById('cli-history-summary'),
+  cliHistoryEmpty: document.getElementById('cli-history-empty'),
+  cliHistoryList: document.getElementById('cli-history-list'),
+  btnCopyCliHistory: document.getElementById('btn-copy-cli-history'),
+  btnClearCliHistory: document.getElementById('btn-clear-cli-history'),
+  btnCloseCliHistory: document.getElementById('btn-close-cli-history'),
+
   cliCommandEcho: document.getElementById('cli-command-echo'),
   btnCopyCli: document.getElementById('btn-copy-cli'),
+  btnCliHistory: document.getElementById('btn-cli-history'),
+  cliHistoryCount: document.getElementById('cli-history-count'),
 
   conflictDialog: document.getElementById('conflict-dialog'),
   conflictServiceName: document.getElementById('conflict-service-name'),
@@ -232,30 +247,117 @@ function formatClockTime(date) {
   return date.toLocaleTimeString([], { hour12: false });
 }
 
-/* ---------- CLI Command Echo & Error Banner ---------- */
+/* ---------- CLI Command Echo, History & Error Banner ---------- */
 
-function setCliCommand(command, { explicit = true } = {}) {
+function setCliCommand(command, { explicit = true, recordHistory = true, errorCode = null } = {}) {
   if (!command) {
-    return;
+    return null;
   }
   if (!explicit && state.hasExplicitCliCommand) {
-    return;
+    return null;
   }
   if (explicit) {
     state.hasExplicitCliCommand = true;
   }
   dom.cliCommandEcho.textContent = command;
   dom.cliCommandEcho.title = command;
+
+  const shouldRecord = recordHistory && (explicit || !state.hasRecordedInitialCliCommand);
+  if (!shouldRecord) {
+    return null;
+  }
+
+  state.hasRecordedInitialCliCommand = true;
+  const entry = {
+    id: ++state.cliHistorySeq,
+    command,
+    timestamp: formatClockTime(new Date()),
+    errorCode,
+  };
+  state.cliHistory.push(entry);
+  if (state.cliHistory.length > MAX_CLI_HISTORY) {
+    state.cliHistory.splice(0, state.cliHistory.length - MAX_CLI_HISTORY);
+  }
+  renderCliHistory();
+  return entry;
 }
 
-function showError(err, { fromPoll = false } = {}) {
+function renderCliHistory() {
+  const count = state.cliHistory.length;
+  dom.cliHistoryCount.textContent = String(count);
+  dom.cliHistorySummary.textContent = `${count} ${count === 1 ? 'command' : 'commands'}`;
+  dom.btnCopyCliHistory.disabled = count === 0;
+  dom.btnClearCliHistory.disabled = count === 0;
+
+  if (!state.cliHistoryOpen) {
+    return;
+  }
+
+  dom.cliHistoryList.replaceChildren();
+  if (count === 0) {
+    dom.cliHistoryEmpty.hidden = false;
+    dom.cliHistoryList.hidden = true;
+    return;
+  }
+
+  dom.cliHistoryEmpty.hidden = true;
+  dom.cliHistoryList.hidden = false;
+
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const item = state.cliHistory[i];
+    const li = el('li', 'cli-history-item');
+    li.append(
+      el('span', 'cli-history-index mono muted', `#${i + 1}`),
+      el('span', 'cli-history-time mono muted', item.timestamp),
+    );
+    const cmdEl = el('code', 'cli-history-cmd', item.command);
+    cmdEl.title = item.command;
+    li.append(cmdEl);
+
+    if (item.errorCode) {
+      const errBadge = el('span', 'badge badge-danger', 'ERR');
+      errBadge.title = item.errorCode;
+      li.append(errBadge);
+    }
+
+    const copyBtn = el('button', 'btn btn-secondary btn-xs cli-history-copy', 'Copy');
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy command';
+    copyBtn.addEventListener('click', () => copyTextToClipboard(item.command, copyBtn, 'Copy'));
+    li.append(copyBtn);
+
+    dom.cliHistoryList.append(li);
+  }
+}
+
+function setCliHistoryOpen(open) {
+  state.cliHistoryOpen = open;
+  dom.cliHistoryPanel.hidden = !open;
+  dom.btnCliHistory.setAttribute('aria-expanded', String(open));
+  dom.btnCliHistory.classList.toggle('active', open);
+  if (open) {
+    renderCliHistory();
+  }
+}
+
+function clearCliHistory() {
+  state.cliHistory = [];
+  state.hasRecordedInitialCliCommand = true;
+  renderCliHistory();
+}
+
+function showError(err, { fromPoll = false, recordCliHistory = true } = {}) {
   state.pollErrorActive = fromPoll;
   const code = err instanceof ApiError ? err.code : 'ERROR';
   const message = err instanceof Error ? err.message : String(err);
   const details = err instanceof ApiError && err.details ? err.details : {};
 
   if (err instanceof ApiError && err.cliCommand) {
-    setCliCommand(err.cliCommand, { explicit: !fromPoll });
+    setCliCommand(err.cliCommand, {
+      explicit: !fromPoll,
+      recordHistory: recordCliHistory,
+      errorCode: code,
+    });
   }
 
   dom.errorCode.textContent = code;
@@ -767,13 +869,14 @@ function handleStartServices(services = []) {
     target: label,
     message: 'Starting…',
     stream: null,
+    historyEntry: null,
   };
 
   entry.stream = streamStartServices(services, {
     timeoutSeconds: 30,
     onMeta(payload) {
       if (payload.cliCommand) {
-        setCliCommand(payload.cliCommand, { explicit: true });
+        entry.historyEntry = setCliCommand(payload.cliCommand, { explicit: true });
       }
     },
     onProgress(payload) {
@@ -783,7 +886,10 @@ function handleStartServices(services = []) {
     },
     onDone(payload) {
       if (payload.cliCommand) {
-        setCliCommand(payload.cliCommand, { explicit: true });
+        setCliCommand(payload.cliCommand, {
+          explicit: true,
+          recordHistory: !entry.historyEntry,
+        });
       }
       state.activeStarts.delete(id);
       renderProgressStrip();
@@ -793,7 +899,13 @@ function handleStartServices(services = []) {
     onError(err) {
       state.activeStarts.delete(id);
       renderProgressStrip();
-      showError(err);
+      if (entry.historyEntry) {
+        entry.historyEntry.errorCode = err instanceof ApiError ? err.code : 'ERROR';
+        renderCliHistory();
+        showError(err, { recordCliHistory: false });
+      } else {
+        showError(err);
+      }
       refreshStatus({ explicit: false });
     },
   });
@@ -1105,6 +1217,7 @@ function startActiveLogStream() {
   dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
   dom.btnLogsStderr.classList.toggle('active', state.logs.err);
 
+  let logHistoryEntry = null;
   const handlers = {
     lines: 100,
     err: state.logs.err,
@@ -1115,7 +1228,7 @@ function startActiveLogStream() {
     },
     onMeta(payload) {
       if (payload.cliCommand) {
-        setCliCommand(payload.cliCommand, { explicit: true });
+        logHistoryEntry = setCliCommand(payload.cliCommand, { explicit: true });
       }
       dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
@@ -1128,7 +1241,13 @@ function startActiveLogStream() {
       dom.btnLogsReconnect.hidden = false;
       if (err) {
         setLogsStreamBadge('Error', 'badge-danger');
-        showError(err);
+        if (logHistoryEntry) {
+          logHistoryEntry.errorCode = err instanceof ApiError ? err.code : 'ERROR';
+          renderCliHistory();
+          showError(err, { recordCliHistory: false });
+        } else {
+          showError(err);
+        }
       } else {
         setLogsStreamBadge('Disconnected', 'badge-neutral');
       }
@@ -1212,8 +1331,7 @@ function confirmConflictKill() {
 
 /* ---------- Clipboard Copy ---------- */
 
-async function copyCliCommand() {
-  const text = dom.cliCommandEcho.textContent || '';
+async function copyTextToClipboard(text, buttonEl, defaultLabel = 'Copy') {
   if (!text) {
     return;
   }
@@ -1230,16 +1348,33 @@ async function copyCliCommand() {
       document.execCommand('copy');
       textarea.remove();
     }
-    dom.btnCopyCli.textContent = 'Copied';
-    window.setTimeout(() => {
-      dom.btnCopyCli.textContent = 'Copy';
-    }, 1500);
+    if (buttonEl) {
+      buttonEl.textContent = 'Copied';
+      window.setTimeout(() => {
+        buttonEl.textContent = defaultLabel;
+      }, 1500);
+    }
   } catch {
-    dom.btnCopyCli.textContent = 'Copy failed';
-    window.setTimeout(() => {
-      dom.btnCopyCli.textContent = 'Copy';
-    }, 1500);
+    if (buttonEl) {
+      buttonEl.textContent = 'Copy failed';
+      window.setTimeout(() => {
+        buttonEl.textContent = defaultLabel;
+      }, 1500);
+    }
   }
+}
+
+function copyCliCommand() {
+  const text = dom.cliCommandEcho.textContent || '';
+  return copyTextToClipboard(text, dom.btnCopyCli, 'Copy');
+}
+
+function copyCliHistory() {
+  if (state.cliHistory.length === 0) {
+    return;
+  }
+  const text = state.cliHistory.map((item) => item.command).join('\n');
+  return copyTextToClipboard(text, dom.btnCopyCliHistory, 'Copy All');
 }
 
 /* ---------- Event Wiring & Lifecycle ---------- */
@@ -1334,6 +1469,17 @@ function init() {
   });
 
   dom.btnCopyCli.addEventListener('click', copyCliCommand);
+  dom.btnCliHistory.addEventListener('click', () => setCliHistoryOpen(!state.cliHistoryOpen));
+  dom.btnCloseCliHistory.addEventListener('click', () => setCliHistoryOpen(false));
+  dom.btnCopyCliHistory.addEventListener('click', copyCliHistory);
+  dom.btnClearCliHistory.addEventListener('click', clearCliHistory);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.cliHistoryOpen && !dom.conflictDialog.open) {
+      setCliHistoryOpen(false);
+      dom.btnCliHistory.focus();
+    }
+  });
 
   dom.btnConflictCancel.addEventListener('click', closeConflictDialog);
   dom.btnConflictConfirm.addEventListener('click', confirmConflictKill);
@@ -1354,6 +1500,7 @@ function init() {
   window.addEventListener('pagehide', closeAllStreams);
   window.addEventListener('beforeunload', closeAllStreams);
 
+  renderCliHistory();
   refreshStatus({ explicit: false });
   startPolling();
 }

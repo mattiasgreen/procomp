@@ -1053,6 +1053,129 @@ body {
   color: var(--text-primary);
 }
 
+.cli-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cli-history-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+#btn-cli-history.active {
+  background: var(--accent-subtle);
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+
+#btn-cli-history.active .cli-history-count {
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+
+/* Expandable CLI Command History Panel */
+.cli-history-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--footer-height);
+  z-index: 29;
+  max-height: min(42vh, 360px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.55);
+}
+
+.cli-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 20px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cli-history-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cli-history-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cli-history-empty {
+  padding: 20px;
+  text-align: center;
+  font-size: 12.5px;
+}
+
+.cli-history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.cli-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.cli-history-item:last-child {
+  border-bottom: none;
+}
+
+.cli-history-item:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.cli-history-index {
+  font-size: 11px;
+  min-width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.cli-history-time {
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+.cli-history-cmd {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.cli-history-copy {
+  flex-shrink: 0;
+}
+
 /* Native <dialog> Modal for Conflict Kill */
 .conflict-dialog {
   width: min(580px, calc(100vw - 32px));
