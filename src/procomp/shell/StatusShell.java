@@ -174,6 +174,7 @@ public final class StatusShell {
             return portSnapRes.castError();
         }
         Map<Integer, PortBinding> portSnapshot = ((Result.Ok<Map<Integer, PortBinding>, DomainError>) portSnapRes).value();
+        Map<Long, Long> rssSnapshot = processShell.snapshotRssBytes();
 
         Map<java.nio.file.Path, GitShell.RepositoryStatusRow> repoSnapshot = Map.of();
         if (gitShell.isPresent()) {
@@ -192,7 +193,7 @@ public final class StatusShell {
         if (serviceList.size() <= 1) {
             for (ServiceDefinition service : serviceList) {
                 Result<ServiceStatusRow, DomainError> rowRes =
-                    discoverServiceRow(project, service, routing, portSnapshot, finalRepoSnapshot, now);
+                    discoverServiceRow(project, service, routing, portSnapshot, rssSnapshot, finalRepoSnapshot, now);
                 if (rowRes.isErr()) {
                     return rowRes.castError();
                 }
@@ -203,7 +204,7 @@ public final class StatusShell {
                 List<Future<Result<ServiceStatusRow, DomainError>>> futures = new ArrayList<>(serviceList.size());
                 for (ServiceDefinition service : serviceList) {
                     futures.add(executor.submit(() ->
-                        discoverServiceRow(project, service, routing, portSnapshot, finalRepoSnapshot, now)
+                        discoverServiceRow(project, service, routing, portSnapshot, rssSnapshot, finalRepoSnapshot, now)
                     ));
                 }
                 for (Future<Result<ServiceStatusRow, DomainError>> future : futures) {
@@ -233,7 +234,7 @@ public final class StatusShell {
 
         GatewaySummary gatewaySummary = GatewaySummary.notConfigured();
         if (project.gateway().isPresent()) {
-            Result<GatewayStatusReport, DomainError> gwRes = gatewayShell.status(project, routing);
+            Result<GatewayStatusReport, DomainError> gwRes = gatewayShell.status(project, routing, rssSnapshot);
             if (gwRes instanceof Result.Err<GatewayStatusReport, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -248,6 +249,7 @@ public final class StatusShell {
         ServiceDefinition service,
         RoutingTable routing,
         Map<Integer, PortBinding> portSnapshot,
+        Map<Long, Long> rssSnapshot,
         Map<java.nio.file.Path, GitShell.RepositoryStatusRow> repoSnapshot,
         Instant now
     ) {
@@ -275,6 +277,7 @@ public final class StatusShell {
             buildRun = new ObservedBuildRun(fallback, Optional.empty(), Optional.empty());
         }
 
+        Optional<Long> rssBytes = processShell.resolveRssBytes(disc, rssSnapshot);
         Optional<GitShell.RepositoryStatusRow> gitRow = service.repository()
             .map(ref -> repoSnapshot.get(ref.root()));
 
@@ -288,6 +291,7 @@ public final class StatusShell {
             disc.pid(),
             disc.startedAt(),
             disc.uptime(now),
+            rssBytes,
             disc.stale(),
             disc.healthEndpoint(),
             healthNote,
@@ -307,6 +311,26 @@ public final class StatusShell {
             }
             Objects.requireNonNull(gateway, "gateway must not be null");
             services = List.copyOf(services);
+        }
+
+        /**
+         * Sum of observed RSS bytes across all running Services ({@code Managed}, {@code Unmanaged},
+         * {@code Conflict}) and the {@code Gateway}, or empty when no running Process reports RSS.
+         */
+        public Optional<Long> totalRssBytes() {
+            long total = 0L;
+            boolean any = false;
+            for (ServiceStatusRow row : services) {
+                if (row.rssBytes().isPresent()) {
+                    total += row.rssBytes().get();
+                    any = true;
+                }
+            }
+            if (gateway.report().isPresent() && gateway.report().get().rssBytes().isPresent()) {
+                total += gateway.report().get().rssBytes().get();
+                any = true;
+            }
+            return any ? Optional.of(total) : Optional.empty();
         }
     }
 
@@ -338,6 +362,7 @@ public final class StatusShell {
         Optional<Long> pid,
         Optional<Instant> startedAt,
         Optional<Duration> uptime,
+        Optional<Long> rssBytes,
         boolean stale,
         Optional<String> healthEndpoint,
         Optional<String> healthNote,
@@ -359,7 +384,7 @@ public final class StatusShell {
             Optional<String> healthNote
         ) {
             this(
-                service, route, ownership, provenance, health, port, pid, startedAt, uptime, stale,
+                service, route, ownership, provenance, health, port, pid, startedAt, uptime, Optional.empty(), stale,
                 healthEndpoint, healthNote,
                 new ObservedBuildRun(BuildDisplayState.NO_BUILDER, Optional.empty(), Optional.empty()),
                 Optional.empty()
@@ -382,7 +407,7 @@ public final class StatusShell {
             ObservedBuildRun build
         ) {
             this(
-                service, route, ownership, provenance, health, port, pid, startedAt, uptime, stale,
+                service, route, ownership, provenance, health, port, pid, startedAt, uptime, Optional.empty(), stale,
                 healthEndpoint, healthNote, build, Optional.empty()
             );
         }
@@ -399,6 +424,7 @@ public final class StatusShell {
             Objects.requireNonNull(pid, "pid must not be null");
             Objects.requireNonNull(startedAt, "startedAt must not be null");
             Objects.requireNonNull(uptime, "uptime must not be null");
+            Objects.requireNonNull(rssBytes, "rssBytes must not be null");
             Objects.requireNonNull(healthEndpoint, "healthEndpoint must not be null");
             Objects.requireNonNull(healthNote, "healthNote must not be null");
             Objects.requireNonNull(build, "build must not be null");
