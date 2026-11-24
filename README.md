@@ -34,8 +34,8 @@ We are deliberately building **`procomp` as a focused CLI first** to nail the do
 | :--- | :--- |
 | `procomp start [service...]` | Run pre-start `Discovery` (reusing `Managed`/`Unmanaged` processes, failing fast on `Conflict`), start `Managed` local processes, and wait for `HEALTHY` (`-d` to detach). Bare `start` starts all `LOCAL`-routed services. |
 | `procomp stop [service...]` | Stop `Managed` service processes cleanly (never killing `Unmanaged` processes; leaves `Gateway` running unless `--all`). |
-| `procomp status` | Show a concise snapshot (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `PORT`, `PID`, `UPTIME`, `STALE`) plus `Gateway` summary (`--json` supported). |
-| `procomp inspect <service>` | Deep read-only `Inspection` of a service's local process (PID, command line, parent chain, RAM, health, log paths). |
+| `procomp status` | Show a concise snapshot (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `PORT`, `PID`, `UPTIME`, `RSS`, `STALE`) plus `Gateway` and `Total RSS` summary (`--json` supported). |
+| `procomp inspect <service>` | Deep read-only `Inspection` of a service's local process (PID, command line, parent chain, RSS, health, log paths, and context-aware diagnostic commands). |
 | `procomp route [service... <local\|remote>]` | Show or update the Project's declarative `Routing Table` (never starts/stops processes or touches the `Gateway`). |
 | `procomp profile <list\|use <name>>` | List or apply named routing `Profile`s to the `Routing Table`. |
 | `procomp gateway <start\|stop\|status\|reconcile>` | Manage the local `Gateway` process and explicitly reconcile live proxy mappings to the `Routing Table`. |
@@ -64,5 +64,7 @@ gradle check              # Full Gradle verification (Spotless, Error Prone + Nu
 - **[GLOSSARY.md](GLOSSARY.md)** — Canonical domain vocabulary (`Project`, `Service`, `Gateway`, `Process`, `Route`, `Discovery`, `Inspection`, etc.).
 - **[docs/DESIGN.md](docs/DESIGN.md)** — Settled language-agnostic v1 design, CLI contract, and explicitly deferred post-v1 areas.
 - **[docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md)** — Configuration schema reference for `procomp.json` and external `Catalog` files (e.g. `service-index.json`).
+- **[docs/LOW_RAM_SPRING_BOOT.md](docs/LOW_RAM_SPRING_BOOT.md)** — Guide for reducing local Spring Boot RAM overhead using `procomp.json` JVM flags and environment variables without modifying Service Repositories.
+- **[examples/low-ram-spring-boot.procomp.json](examples/low-ram-spring-boot.procomp.json)** — Example low-RAM Spring Boot `procomp.json` configuration.
 - **[examples/using-service-index.procomp.json](examples/using-service-index.procomp.json)** — Example `procomp.json` pointing to an external `Catalog` (`service-index.json`).
 - **[examples/service-index.json](examples/service-index.json)** — Example external service `Catalog` schema.

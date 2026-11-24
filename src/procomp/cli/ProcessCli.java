@@ -4,6 +4,7 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.Json;
 import procomp.core.common.Result;
+import procomp.core.process.DiagnosticCommand;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.Project;
@@ -244,7 +245,7 @@ public final class ProcessCli {
         out.println("PID:             " + report.pid().map(Object::toString).orElse("-"));
         out.println("Uptime:          " + report.uptime().map(CliFormat::formatDuration).orElse("-"));
         out.println("Stale:           " + (report.stale() ? "YES" : "no"));
-        out.println("RAM:             " + report.rssBytes().map(ProcessCli::formatBytes).orElse("-"));
+        out.println("RSS:             " + report.rssBytes().map(CliFormat::formatBytes).orElse("-"));
         out.println("Command Line:    " + report.commandLine().orElse("-"));
         if (!report.arguments().isEmpty()) {
             out.println("Arguments:       " + String.join(" ", report.arguments()));
@@ -264,6 +265,13 @@ public final class ProcessCli {
         out.println("Health Response: " + report.healthResponse());
         out.println("Stdout Log:      " + report.outLogPath());
         out.println("Stderr Log:      " + report.errLogPath());
+        if (!report.diagnosticCommands().isEmpty()) {
+            out.println("Diagnostic Commands:");
+            for (DiagnosticCommand cmd : report.diagnosticCommands()) {
+                String suffix = cmd.note().map(n -> "  (" + n + ")").orElse("");
+                out.println("  - " + cmd.label() + ": " + cmd.command() + suffix);
+            }
+        }
         if (buildRun.isPresent()) {
             ObservedBuildRun build = buildRun.get();
             out.println("Build Run:       " + build.displayState().name());
@@ -298,17 +306,5 @@ public final class ProcessCli {
         PrintWriter out
     ) {
         out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun)));
-    }
-
-    private static String formatBytes(long bytes) {
-        long mb = bytes / (1024L * 1024L);
-        if (mb > 0) {
-            return mb + " MB";
-        }
-        long kb = bytes / 1024L;
-        if (kb > 0) {
-            return kb + " KB";
-        }
-        return bytes + " B";
     }
 }

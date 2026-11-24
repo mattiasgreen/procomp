@@ -13,12 +13,13 @@ Summary: 0 started, 1 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  STALE
-broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       no
-orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  5s      no
-notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  RSS     STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  5s      142 MB  no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
+Total RSS: 142 MB (1 service)
 ```
 
 ## Step 2: procomp stop spares Unmanaged Processes (never kill what you do not own)
@@ -30,12 +31,13 @@ Summary: 0 stopped, 1 Unmanaged spared.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  STALE
-broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       no
-orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  10s     no
-notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  RSS     STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  10s     142 MB  no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
+Total RSS: 142 MB (1 service)
 ```
 
 ## Step 3: A foreign port Conflict fails fast on start and inspect reveals the occupying process
@@ -55,7 +57,7 @@ Health:          STARTING
 PID:             10001
 Uptime:          5s
 Stale:           no
-RAM:             24 MB
+RSS:             24 MB
 Command Line:    python3 -m http.server 18101
 Arguments:       -m http.server 18101
 Parent Chain:

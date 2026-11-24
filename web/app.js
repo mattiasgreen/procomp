@@ -78,6 +78,7 @@ const dom = {
   gatewaySync: document.getElementById('gateway-sync'),
   gatewayPid: document.getElementById('gateway-pid'),
   gatewayUptime: document.getElementById('gateway-uptime'),
+  gatewayRss: document.getElementById('gateway-rss'),
   gatewayActions: document.getElementById('gateway-actions'),
   gatewayUnconfigured: document.getElementById('gateway-unconfigured'),
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
@@ -441,6 +442,10 @@ function renderGateway() {
     gw.uptimeSeconds !== null && gw.uptimeSeconds !== undefined
       ? `up ${formatUptime(gw.uptimeSeconds)}`
       : '';
+  dom.gatewayRss.textContent =
+    gw.rssBytes !== null && gw.rssBytes !== undefined
+      ? `${formatBytes(gw.rssBytes)} RSS`
+      : '';
 
   const isDrifted =
     gw.syncStatus === 'DRIFTED' ||
@@ -516,12 +521,15 @@ function renderServices() {
 
   const localCount = services.filter((s) => s.route === 'LOCAL').length;
   const healthyCount = services.filter((s) => s.health === 'HEALTHY').length;
-  dom.servicesSummary.textContent = `${services.length} total · ${localCount} LOCAL · ${healthyCount} HEALTHY`;
+  const totalRss = state.estate?.totalRssBytes;
+  const rssPart =
+    totalRss !== null && totalRss !== undefined ? ` · Total RSS: ${formatBytes(totalRss)}` : '';
+  dom.servicesSummary.textContent = `${services.length} total · ${localCount} LOCAL · ${healthyCount} HEALTHY${rssPart}`;
 
   if (services.length === 0) {
     const tr = el('tr');
     const td = el('td', 'empty-cell', 'No Services defined in this Project.');
-    td.colSpan = 9;
+    td.colSpan = 11;
     tr.append(td);
     dom.servicesTbody.append(tr);
     return;
@@ -598,10 +606,11 @@ function renderServices() {
     }
     tdBuild.append(buildBadge);
 
-    // PORT, PID, UPTIME
+    // PORT, PID, UPTIME, RSS
     const tdPort = el('td', 'mono', row.port ?? '—');
     const tdPid = el('td', 'mono', row.pid ?? '—');
     const tdUptime = el('td', 'mono', formatUptime(row.uptimeSeconds));
+    const tdRss = el('td', 'mono', formatBytes(row.rssBytes));
 
     // STALE
     const tdStale = el('td');
@@ -699,7 +708,7 @@ function renderServices() {
 
     tdActions.append(actionsWrap);
 
-    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdPort, tdPid, tdUptime, tdStale, tdActions);
+    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdPort, tdPid, tdUptime, tdRss, tdStale, tdActions);
     dom.servicesTbody.append(tr);
   }
 }
@@ -1060,7 +1069,7 @@ function renderInspection(report) {
     ['PID', report.pid ?? '—'],
     ['Uptime', formatUptime(report.uptimeSeconds)],
     ['Stale', report.stale ? 'YES' : 'NO'],
-    ['RAM (RSS)', formatBytes(report.rssBytes)],
+    ['RSS', formatBytes(report.rssBytes)],
     ['Health Endpoint', report.healthEndpoint ?? '—'],
     ['Health Response', report.healthResponse || '—'],
     ['Stdout Log Path', report.outLogPath || '—'],
@@ -1108,6 +1117,32 @@ function renderInspection(report) {
       el('pre', 'code-block', report.arguments.join('\n')),
     );
     dom.inspectContent.append(argsBlock);
+  }
+
+  // Context-aware diagnostic commands
+  if (Array.isArray(report.diagnosticCommands) && report.diagnosticCommands.length > 0) {
+    const diagBlock = el('div', 'inspect-block');
+    diagBlock.append(el('span', 'inspect-block-title', 'Diagnostic Commands'));
+    const list = el('ul', 'diag-cmd-list');
+    for (const item of report.diagnosticCommands) {
+      const li = el('li', 'diag-cmd-item');
+      const header = el('div', 'diag-cmd-header');
+      header.append(el('span', 'diag-cmd-label', item.label || 'Command'));
+      if (item.note) {
+        header.append(el('span', 'diag-cmd-note muted', item.note));
+      }
+      const row = el('div', 'diag-cmd-row');
+      row.append(el('code', 'diag-cmd-code mono', item.command));
+      const copyBtn = el('button', 'btn btn-secondary btn-xs', 'Copy');
+      copyBtn.type = 'button';
+      copyBtn.title = `Copy ${item.label || 'command'}`;
+      copyBtn.addEventListener('click', () => copyTextToClipboard(item.command, copyBtn, 'Copy'));
+      row.append(copyBtn);
+      li.append(header, row);
+      list.append(li);
+    }
+    diagBlock.append(list);
+    dom.inspectContent.append(diagBlock);
   }
 
   // Parent process chain

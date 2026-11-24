@@ -9,6 +9,7 @@ import procomp.core.common.JsonValue;
 import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.gateway.RouteDrift;
 import procomp.core.gateway.StaleManagedMapping;
+import procomp.core.process.DiagnosticCommand;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.ProfileDefinition;
@@ -68,6 +69,7 @@ public final class DomainJson {
             sObj.put("pid", numOrNull(row.pid()));
             sObj.put("startedAt", strOrNull(row.startedAt().map(Instant::toString)));
             sObj.put("uptimeSeconds", uptimeOrNull(row.uptime()));
+            sObj.put("rssBytes", numOrNull(row.rssBytes()));
             sObj.put("stale", Json.bool(row.stale()));
             sObj.put("healthEndpoint", strOrNull(row.healthEndpoint()));
             sObj.put("healthNote", strOrNull(row.healthNote()));
@@ -75,6 +77,7 @@ public final class DomainJson {
             serviceNodes.add(Json.obj(sObj));
         }
         root.put("services", Json.arr(serviceNodes));
+        root.put("totalRssBytes", numOrNull(status.totalRssBytes()));
         return Json.obj(root);
     }
 
@@ -91,6 +94,7 @@ public final class DomainJson {
             gw.put("health", Json.nil());
             gw.put("pid", Json.nil());
             gw.put("uptimeSeconds", Json.nil());
+            gw.put("rssBytes", Json.nil());
             gw.put("healthEndpoint", Json.nil());
             gw.put("healthResponse", Json.nil());
             gw.put("syncStatus", Json.nil());
@@ -291,6 +295,17 @@ public final class DomainJson {
         root.put("outLogPath", Json.str(report.outLogPath().toString()));
         root.put("errLogPath", Json.str(report.errLogPath().toString()));
         root.put("stale", Json.bool(report.stale()));
+
+        List<JsonValue> diagNodes = new ArrayList<>(report.diagnosticCommands().size());
+        for (DiagnosticCommand cmd : report.diagnosticCommands()) {
+            Map<String, JsonValue> dObj = new LinkedHashMap<>();
+            dObj.put("label", Json.str(cmd.label()));
+            dObj.put("command", Json.str(cmd.command()));
+            dObj.put("note", strOrNull(cmd.note()));
+            diagNodes.add(Json.obj(dObj));
+        }
+        root.put("diagnosticCommands", Json.arr(diagNodes));
+
         buildRun.ifPresent(b -> root.put("buildRun", observedBuildRun(b)));
         return Json.obj(root);
     }
@@ -421,6 +436,7 @@ public final class DomainJson {
         target.put("health", Json.str(report.discovery().health().name()));
         target.put("pid", numOrNull(report.discovery().pid()));
         target.put("uptimeSeconds", uptimeOrNull(report.uptime()));
+        target.put("rssBytes", numOrNull(report.rssBytes()));
         target.put("healthEndpoint", strOrNull(report.discovery().healthEndpoint()));
         target.put("healthResponse", Json.str(report.discovery().healthResponse()));
         appendDriftFields(target, report.drift());
