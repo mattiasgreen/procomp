@@ -51,7 +51,15 @@ public final class Procomp {
         }
         ParsedArgs parsed = ((Result.Ok<ParsedArgs, String>) parsedRes).value();
 
-        if (parsed.help() || parsed.commandArgs().isEmpty()) {
+        if (parsed.help()) {
+            printUsage(runtime.out());
+            return 0;
+        }
+        if (parsed.version()) {
+            runtime.out().println("procomp " + ProcompVersion.resolve());
+            return 0;
+        }
+        if (parsed.commandArgs().isEmpty()) {
             printUsage(runtime.out());
             return 0;
         }
@@ -111,6 +119,7 @@ public final class Procomp {
 
     private static Result<ParsedArgs, String> parseArgs(String[] args) {
         boolean help = false;
+        boolean version = false;
         boolean verbose = false;
         Optional<Path> configOverride = Optional.empty();
         List<String> commandArgs = new ArrayList<>();
@@ -120,6 +129,10 @@ public final class Procomp {
             String arg = args[i];
             if ("--help".equals(arg) || "-h".equals(arg)) {
                 help = true;
+                continue;
+            }
+            if (!seenCommand && ("--version".equals(arg) || "-V".equals(arg))) {
+                version = true;
                 continue;
             }
             if ("--verbose".equals(arg) || "-v".equals(arg)) {
@@ -157,7 +170,7 @@ public final class Procomp {
             commandArgs.add(arg);
         }
 
-        return Result.ok(new ParsedArgs(help, verbose, configOverride, commandArgs));
+        return Result.ok(new ParsedArgs(help, version, verbose, configOverride, commandArgs));
     }
 
     private static void printUsage(PrintWriter out) {
@@ -166,6 +179,7 @@ public final class Procomp {
 
             Global options:
               -h, --help          Show this help message
+              -V, --version       Show installed procomp version
               -v, --verbose       Emit detailed elapsed-time diagnostics to stderr (never prints secrets)
                   --config <path> Use explicit procomp.json path (overrides PROCOMP_CONFIG and walk-up)
 
@@ -185,5 +199,11 @@ public final class Procomp {
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 
-    private record ParsedArgs(boolean help, boolean verbose, Optional<Path> configOverride, List<String> commandArgs) {}
+    private record ParsedArgs(
+        boolean help,
+        boolean version,
+        boolean verbose,
+        Optional<Path> configOverride,
+        List<String> commandArgs
+    ) {}
 }
