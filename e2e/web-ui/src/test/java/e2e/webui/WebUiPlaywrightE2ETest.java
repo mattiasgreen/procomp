@@ -286,8 +286,11 @@ final class WebUiPlaywrightE2ETest {
                     "Inspection drawer must never leak secret env values"
                 );
 
-                // Switch to live SSE Logs tab on orders and push a new log line while connected
-                page.locator("#tab-logs").click();
+                // Open fullscreen Logs view for orders and push a live line while connected
+                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Logs")).click();
+                assertThat(page.locator("#view-logs")).isVisible();
+                assertThat(page.locator("#logs-target-name")).hasText("orders");
                 assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
 
                 String liveMarker = "playwright-sse-live-line-42";
@@ -298,6 +301,85 @@ final class WebUiPlaywrightE2ETest {
                     page.locator("#logs-output").innerText().contains(InMemoryConfigSource.DEMO_SECRET_VALUE),
                     "Live logs must never leak secret env values"
                 );
+            }
+        }
+    }
+
+    @Test
+    void fullscreenLogsViewAndServiceTableFilteringSupportOrQueriesWrapAndShortcuts() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // LOCAL-routed services (broker, orders, notifications) are sorted above REMOTE (pricing)
+                assertThat(page.locator("#services-tbody tr").first().locator("td:first-child")).hasText("broker");
+                assertThat(page.locator("#services-tbody tr").last().locator("td:first-child")).hasText("pricing");
+
+                // LOCAL only chip collapses table to the 3 LOCAL services
+                page.locator("#btn-services-local-only").click();
+                assertThat(page.locator("#btn-services-local-only")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#services-tbody tr")).hasCount(3);
+                assertThat(serviceRow("pricing")).hasCount(0);
+
+                // Turn off LOCAL only and test case-insensitive |-OR filter (including trailing |)
+                page.locator("#btn-services-local-only").click();
+                page.locator("#services-filter-input").fill("PRICING|");
+                assertThat(page.locator("#services-tbody tr")).hasCount(1);
+                assertThat(serviceRow("pricing")).isVisible();
+
+                page.locator("#services-filter-input").fill("pricing|orders");
+                assertThat(page.locator("#services-tbody tr")).hasCount(2);
+
+                // Clear filter via Escape inside input, then blur via second Escape
+                page.locator("#services-filter-input").press("Escape");
+                assertThat(page.locator("#services-filter-input")).hasValue("");
+                page.locator("#services-filter-input").press("Escape");
+
+                // Press '2' to switch to fullscreen Logs view (auto-selects first LOCAL service: broker)
+                page.keyboard().press("2");
+                assertThat(page.locator("#view-logs")).isVisible();
+                assertThat(page.locator("#view-services")).isHidden();
+                assertThat(page.locator("#logs-target-name")).hasText("broker");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("broker");
+                assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
+
+                // Switch target to orders via sidebar in 1 click
+                page.locator("#logs-target-list button[data-service='orders']").click();
+                assertThat(page.locator("#logs-target-name")).hasText("orders");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("orders");
+                assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
+
+                // Push mixed log lines and filter with |-OR
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "INFO startup ok", false));
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "WARN slow query", false));
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "ERROR payment timeout", false));
+                assertThat(page.locator("#logs-output")).containsText("ERROR payment timeout");
+
+                // Press '/' to focus log line filter
+                page.keyboard().press("/");
+                page.locator("#logs-filter-input").fill("error|warn");
+                assertThat(page.locator("#logs-output")).containsText("WARN slow query");
+                assertThat(page.locator("#logs-output")).containsText("ERROR payment timeout");
+                assertFalse(page.locator("#logs-output").innerText().contains("INFO startup ok"));
+                assertThat(page.locator("#logs-line-count")).containsText("/");
+
+                // Wrap toggle defaults to off (.no-wrap) and toggles cleanly
+                assertThat(page.locator("#logs-output")).hasClass(java.util.regex.Pattern.compile(".*\\bno-wrap\\b.*"));
+                page.locator("#chk-logs-wrap").check();
+                assertThat(page.locator("#logs-output")).not().hasClass(java.util.regex.Pattern.compile(".*\\bno-wrap\\b.*"));
+
+                // Switch target to Gateway via sidebar in 1 click
+                page.locator("#logs-target-list button[data-target-type='gateway']").click();
+                assertThat(page.locator("#logs-target-name")).hasText("gateway");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("gateway");
+                assertThat(page.locator("#logs-source-group")).isHidden();
+
+                // Press '1' to return to Services view
+                page.keyboard().press("1");
+                assertThat(page.locator("#view-services")).isVisible();
+                assertThat(page.locator("#view-logs")).isHidden();
             }
         }
     }

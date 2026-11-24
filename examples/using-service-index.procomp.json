@@ -5,6 +5,7 @@
     { "path": ".env.local", "optional": true }
   ],
   "defaults": {
+    "builder": "gradle",
     "proxyPathTemplate": "/{{service}}",
     "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
     "vars": {
@@ -12,6 +13,11 @@
     },
     "env": {
       "SPRING_PROFILES_ACTIVE": "local"
+    }
+  },
+  "builders": {
+    "gradle": {
+      "command": ["./gradlew", ":{{subproject}}:bootJar"]
     }
   },
   "runtimes": {

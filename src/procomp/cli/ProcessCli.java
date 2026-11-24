@@ -149,10 +149,18 @@ public final class ProcessCli {
                         buildRes instanceof Result.Ok<ObservedBuildRun, procomp.core.common.DomainError>(ObservedBuildRun obs)
                             ? java.util.Optional.of(obs)
                             : java.util.Optional.empty();
+                    java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow = java.util.Optional.empty();
+                    var repoOpt = project.service(serviceName).flatMap(procomp.core.project.ServiceDefinition::repository);
+                    if (repoOpt.isPresent()) {
+                        var gitRes = runtime.gitShell().flatMap(g -> g.observeRepository(project, repoOpt.get()));
+                        if (gitRes instanceof Result.Ok<procomp.shell.GitShell.RepositoryStatusRow, procomp.core.common.DomainError>(var gr)) {
+                            gitRow = java.util.Optional.of(gr);
+                        }
+                    }
                     if (json) {
-                        renderInspectJson(project, report, buildRun, runtime.out());
+                        renderInspectJson(project, report, buildRun, gitRow, runtime.out());
                     } else {
-                        renderInspectText(report, buildRun, runtime.out());
+                        renderInspectText(report, buildRun, gitRow, runtime.out());
                     }
                 }
             );
@@ -227,12 +235,21 @@ public final class ProcessCli {
     }
 
     static void renderInspectText(InspectionReport report, PrintWriter out) {
-        renderInspectText(report, java.util.Optional.empty(), out);
+        renderInspectText(report, java.util.Optional.empty(), java.util.Optional.empty(), out);
     }
 
     static void renderInspectText(
         InspectionReport report,
         java.util.Optional<ObservedBuildRun> buildRun,
+        PrintWriter out
+    ) {
+        renderInspectText(report, buildRun, java.util.Optional.empty(), out);
+    }
+
+    static void renderInspectText(
+        InspectionReport report,
+        java.util.Optional<ObservedBuildRun> buildRun,
+        java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow,
         PrintWriter out
     ) {
         out.println("Service:         " + report.service());
@@ -297,14 +314,27 @@ public final class ProcessCli {
                 out.println("Build Stderr:    " + rec.stderrLog());
             }
         }
+        if (gitRow.isPresent()) {
+            var git = gitRow.get();
+            out.println("Repository:      " + git.repository().name() + " (" + git.repository().root() + ")");
+            out.println("Git Status:      " + git.compactDisplay());
+            if (git.latestRun().isPresent()) {
+                var run = git.latestRun().get();
+                var rec = run.record();
+                out.println("Git Run:         " + run.effectiveStatus().name() + " (" + rec.operation().cliName() + ")");
+                out.println("Git Stdout:      " + rec.stdoutLog());
+                out.println("Git Stderr:      " + rec.stderrLog());
+            }
+        }
     }
 
     private static void renderInspectJson(
         Project project,
         InspectionReport report,
         java.util.Optional<ObservedBuildRun> buildRun,
+        java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow,
         PrintWriter out
     ) {
-        out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun)));
+        out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun, gitRow)));
     }
 }

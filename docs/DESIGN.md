@@ -22,11 +22,12 @@ See [GLOSSARY.md](../GLOSSARY.md) for exact definitions.
 ```text
 Project
  ├── Repositories[] (optional Git checkouts; 1 Repository → 1..N Services)
+ │    └── Git Runs[] (tracked mutating Git executions: CLONE, FETCH, PULL, SWITCH, STASH)
  ├── Services[]
- │    ├── Config (identity, optional Repository, runtime, localport, proxyPath, remoteUrl)
+ │    ├── Config (identity, optional Repository, optional Builder, runtime, localport, proxyPath, remoteUrl)
  │    ├── Route (LOCAL | REMOTE — stored in Routing Table; defaults to REMOTE)
  │    ├── Process? (0..1 active local Process: Managed | Unmanaged | Conflict)
- │    └── Build Runs[] (tracked build executions — Phase 2)
+ │    └── Build Runs[] (tracked build executions)
  ├── Profiles[] (named Route presets)
  └── Gateway (local reverse-proxy router, optionally backed by its own Process)
 ```
@@ -45,7 +46,7 @@ Project
 
 ### Discovery (Read-Only Observation)
 
-`Discovery` determines what is running for a `Service` (or `Gateway`), who owns it, and its `Health State`. It never mutates state.
+`Discovery` determines what is running for a `Service` (or `Gateway`), who owns it, its `Health State`, and—when a `Repository` is configured—its local, zero-network Git state (branch, dirty/untracked count, ahead/behind counts, local fetch age from `.git/FETCH_HEAD` or `.git/HEAD`, and latest `Git Run`). It never mutates state and never makes network calls.
 
 1. Check if `procomp` has a recorded `Managed` PID for the `Service`:
    - Alive → **`Managed`** (evaluate health; do **not** assume `STARTING`).
@@ -89,7 +90,8 @@ Uptime is displayed alongside `Health State` so a human can tell whether a `STAR
   - `Routing Table` (desired `LOCAL` / `REMOTE` per `Service`)
   - `Managed` `Process` records (PID, start time, command, artifact timestamp, log paths)
   - Latest `Build Run` records (`builds/<service>.json`: PID, status `RUNNING`/`SUCCEEDED`/`FAILED`, timestamps, exit code, reason, build log paths)
-  - Raw `Process` log files: `<service>.out.log` / `<service>.err.log` and `<service>.build.out.log` / `<service>.build.err.log`, untouched on disk
+  - Latest `Git Run` records (`git/<repository>.json`: operation `CLONE`/`FETCH`/`PULL`/`SWITCH`/`STASH`, PID, status `RUNNING`/`SUCCEEDED`/`FAILED`, timestamps, exit code, reason, Git log paths)
+  - Raw `Process` log files: `<service>.out.log` / `<service>.err.log`, `<service>.build.out.log` / `<service>.build.err.log`, and `<repository>.git.out.log` / `<repository>.git.err.log`, untouched on disk
 
 ---
 
@@ -104,9 +106,25 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp build [service...]` | Runs tracked in-place `Build Run`(s) sequentially (fail-fast) using each target's configured `Builder`. Bare `build` targets all `LOCAL`-routed Services with a `Builder`. Rejects overlapping `RUNNING` or `UNKNOWN` (dead-PID) runs unless `--force` is passed; supports `--cancel <service...>`, `--timeout <seconds>`, and `--json`. Never mutates the `Routing Table` or starts/restarts Services. |
 | `procomp start [service...]` | Runs pre-start `Discovery` per target (`None`/`CRASHED` → spawn `Managed`; `Managed`/`Unmanaged` → reuse without duplicating; `Conflict` → fail fast with `Inspection` details). Bare `start` targets all `LOCAL`-routed Services. Waits for `HEALTHY` by default (`-d`/`--detach` to return immediately). Never auto-builds or mutates the `Routing Table`. |
 | `procomp stop [service...]` | Stops `Managed` Service `Process`(es) cleanly. Bare `stop` stops all `Managed` Services while leaving the `Gateway` running (`--all` also stops a `Managed` `Gateway`). Never kills `Unmanaged` Processes. Killing a `Conflict` requires explicit consent. |
-| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `PORT`, `PID`, `UPTIME`, `RSS`, `STALE`) plus a one-line `Gateway` summary and a `Total RSS` summary when any Process is running. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). |
-| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process` (including `RSS` and context-aware diagnostic commands) and latest `Build Run`. |
-| `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`, or build logs with `--build`). Supports `-n <lines>`, `-f` (follow), `--err`, `--build`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
+| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `GIT`, `PORT`, `PID`, `UPTIME`, `RSS`, `STALE`) plus a one-line `Gateway` summary and a `Total RSS` summary when any Process is running. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). `GIT` shows compact zero-network `Repository` state (branch, `*` dirty, `↑`/`↓`, fetch-age warning, `DETACHED@sha`, `NOT_CLONED`, `NO_REPO`, or active `Git Run`). |
+| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process` (including `RSS` and context-aware diagnostic commands), latest `Build Run`, and `Repository` / latest `Git Run`. |
+| `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`, build logs with `--build`, or Git logs with `--git`). Supports `-n <lines>`, `-f` (follow), `--err`, `--build`, `--git`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
+
+### Git (`Repository` Lifecycle — Non-Authoring)
+
+All `procomp git` commands accept `Service` or `Repository` names (canonical `Repository` name = local folder basename), deduplicated to unique `Repository`s. Mutating commands default to `LOCAL`-routed `Service`s' `Repository`s (`--all` for all), track execution as `Git Run`s with PIDs/logs/cancellation (`--force` to override `UNKNOWN`, `--timeout <seconds>`), run strictly non-interactively (`GIT_TERMINAL_PROMPT=0`), continue on per-`Repository` error with deterministic output order (non-zero exit if any failed), and never mutate the `Routing Table`, `Process`es, or `Build Run`s. Authoring/publishing (`commit`, `push`, `switch -c`, `stash pop`, `merge`, `rebase`) is deliberately out of scope (see `docs/adr/0006-non-authoring-git-orchestration.md`).
+
+| Command | Behavior |
+| :--- | :--- |
+| `procomp git status [--local] [--fetch] [--all] [--json]` | Read-only per-`Repository` status table (`REPOSITORY`, `SERVICES`, `STATE`, `BRANCH`, `UPSTREAM`, `DIRTY`, `STASHES`, `FETCHED`, `LAST_RUN`) across all `Repository`s by default (or `--local`). Zero network calls unless `--fetch` is passed (which runs tracked `FETCH` `Git Run`s on `LOCAL` repos unless `--all`). |
+| `procomp git branches <target> [--json]` | Lists deduplicated local and `origin/*` branches (excluding `origin/HEAD`) ordered by committer date descending with last commit datetime, ref origin (`local`, `remote`, `local+remote`), and short subject. |
+| `procomp git clone [target...] [--all] [--force] [--timeout <sec>] [--json]` | Explicitly clones missing `Repository` checkouts (bounded parallelism). Already-cloned `Repository`s report `SKIPPED`; non-empty non-Git folders or missing `repositoryUrl` fail fast. |
+| `procomp git fetch [target...] [--all] [--force] [--timeout <sec>] [--json]` | Runs `git fetch --prune` across targeted `Repository`s (bounded parallelism). Fails fast on `NOT_CLONED`. |
+| `procomp git pull [target...] [--all] [--force] [--timeout <sec>] [--json]` | Runs `git pull --ff-only` across targeted `Repository`s (bounded parallelism). Fails fast if `NOT_CLONED` or if the working tree has any staged, unstaged, or untracked changes. |
+| `procomp git switch <branch> [target...] [--all] [--force] [--timeout <sec>] [--json]` | Switches targeted `Repository`s sequentially to an existing local or `origin/<branch>` branch (or `--default` instead of `<branch>` for `origin/HEAD`). Strictly non-destructive: fails fast if `NOT_CLONED` or if any staged, unstaged, or untracked changes exist. Never creates branches or auto-pulls. |
+| `procomp git stash [push] [target...] [-m <msg>] [-u\|--include-untracked] [--all] [--force] [--json]` | Parks uncommitted changes via `git stash push` sequentially (clean repos report `SKIPPED`). `procomp git stash list [target...] [--all] [--json]` lists stashes read-only. (`stash pop` is intentionally excluded.) |
+| `procomp git cancel [target...] [--all] [--json]` | Cleanly terminates `RUNNING` `Git Run`(s). |
+| `procomp git logs <target> [-n <lines>] [-f] [--err] [--path]` | Minimal raw log reader for `<repository>.git.out.log` (or `.err.log` with `--err`). |
 
 ### Routing Table & Profiles
 
@@ -127,6 +145,12 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp gateway reconcile` | Converges the live `Gateway` mappings to match the Project's `Routing Table`. |
 | `procomp gateway logs` | Minimal raw log reader for `gateway.out.log` (or `gateway.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. |
 
+### Web UI
+
+| Command | Behavior |
+| :--- | :--- |
+| `procomp ui [--port <n>] [--open]` | Starts the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. Displays the estate table (including clickable `BUILD` and `GIT` badges), per-Service/Repository Build and Git controls (`Clone`, `Fetch`, `Pull`, `Switch` modal with `-committerdate` branch picker / `Fetch` / `--default` / inline dirty-tree warning & one-click `Stash (incl. untracked)`, `Stash`, `Cancel`), `Build Run` & `Repository`/`Git Run` details in the Inspect drawer, and `Service` / `Build` / `Git` source tabs in the live SSE Logs view, echoing verbatim `procomp` CLI commands on every action. |
+
 ---
 
 ## 6. Explicitly Deferred (Post-v1)
@@ -136,7 +160,7 @@ The following areas are intentionally deferred until v1 core functionality is so
 - **Implementation language & runtime selection** (to be chosen next).
 - **Scaling & performance optimizations:** Batch OS snapshots, parallel worker pools, WireMock batch-import tuning, etc.
 - **Rich log viewing:** JSON normalization, `logMapping`, multi-service chronological merging, level filtering, stack-trace folding (to be designed in a dedicated session).
-- **Phase 2 commands:** `procomp build` (tracked `Build Run`s + auto-build options), `procomp sync` (safe Git updates and explicit-demand `Repository` cloning — never auto-cloning), and `procomp doctor` (preflight checks).
+- **Phase 2 commands:** auto-build options (e.g., `procomp start --build`) and `procomp doctor` (preflight checks).
 - **Rich `inspect` diagnostics:** Runtime-specific diagnostics (e.g., JVM JFR, Prometheus metrics).
 - **Gateway auto-reconciliation:** Having the `Gateway` watch/poll the `Routing Table` for changes rather than coupling `route` to `gateway`.
 - **Supervisor / interactive mode:** A `tmux`-style per-project supervisor and optional TUI layered on top of the CLI.

@@ -13,11 +13,11 @@ Summary: 0 started, 1 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  RSS     STALE
-broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       -       no
-orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  5s      142 MB  no
-notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  16161  -      -       -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  18101  -      -       -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  NO_REPO  18102  10000  5s      142 MB  no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  18103  -      -       -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
 Total RSS: 142 MB (1 service)
 ```
@@ -31,11 +31,11 @@ Summary: 0 stopped, 1 Unmanaged spared.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER            HEALTH   BUILD       PORT   PID    UPTIME  RSS     STALE
-broker         REMOTE  NONE             STOPPED  NO_BUILDER  16161  -      -       -       no
-orders         REMOTE  NONE             STOPPED  NO_BUILDER  18101  -      -       -       no
-pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  18102  10000  10s     142 MB  no
-notifications  REMOTE  NONE             STOPPED  NO_BUILDER  18103  -      -       -       no
+SERVICE        ROUTE   OWNER            HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+broker         REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  16161  -      -       -       no
+orders         REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  18101  -      -       -       no
+pricing        REMOTE  UNMANAGED (IDE)  HEALTHY  NO_BUILDER  NO_REPO  18102  10000  10s     142 MB  no
+notifications  REMOTE  NONE             STOPPED  NO_BUILDER  NO_REPO  18103  -      -       -       no
 Gateway: port 18080, NONE, STOPPED, OFFLINE
 Total RSS: 142 MB (1 service)
 ```
