@@ -2,8 +2,15 @@ import {
   ApiError,
   buildService,
   cancelBuild,
+  fetchGitBranches,
   fetchInspect,
   fetchStatus,
+  gitCancel,
+  gitClone,
+  gitFetch,
+  gitPull,
+  gitStash,
+  gitSwitch,
   reconcileGateway,
   startGateway,
   stopGateway,
@@ -49,6 +56,7 @@ const state = {
     targetService: null,
     err: false,
     build: false,
+    git: false,
     autoScroll: true,
     wrap: false,
     sidebarQuery: '',
@@ -61,6 +69,14 @@ const state = {
   activeStarts: new Map(),
   startSeq: 0,
   conflictService: null,
+  gitSwitch: {
+    repository: null,
+    services: [],
+    dirty: false,
+    branches: [],
+    selectedBranch: null,
+    filter: '',
+  },
 };
 
 const dom = {
@@ -106,6 +122,8 @@ const dom = {
   btnDriftReconcile: document.getElementById('btn-drift-reconcile'),
 
   profileList: document.getElementById('profile-list'),
+  btnGitFetchLocal: document.getElementById('btn-git-fetch-local'),
+  btnGitPullLocal: document.getElementById('btn-git-pull-local'),
   btnStartLocal: document.getElementById('btn-start-local'),
   btnStopManaged: document.getElementById('btn-stop-managed'),
 
@@ -130,6 +148,7 @@ const dom = {
   logsSourceGroup: document.getElementById('logs-source-group'),
   btnLogsSourceService: document.getElementById('btn-logs-source-service'),
   btnLogsSourceBuild: document.getElementById('btn-logs-source-build'),
+  btnLogsSourceGit: document.getElementById('btn-logs-source-git'),
   btnLogsStdout: document.getElementById('btn-logs-stdout'),
   btnLogsStderr: document.getElementById('btn-logs-stderr'),
   logsStreamStatus: document.getElementById('logs-stream-status'),
@@ -155,6 +174,21 @@ const dom = {
   cliHistoryCount: document.getElementById('cli-history-count'),
 
   conflictDialog: document.getElementById('conflict-dialog'),
+  gitSwitchDialog: document.getElementById('git-switch-dialog'),
+  gitSwitchRepoName: document.getElementById('git-switch-repo-name'),
+  gitSwitchServices: document.getElementById('git-switch-services'),
+  gitSwitchFetched: document.getElementById('git-switch-fetched'),
+  btnGitSwitchFetch: document.getElementById('btn-git-switch-fetch'),
+  btnGitSwitchDefault: document.getElementById('btn-git-switch-default'),
+  gitSwitchDirtyBanner: document.getElementById('git-switch-dirty-banner'),
+  gitSwitchDirtySummary: document.getElementById('git-switch-dirty-summary'),
+  btnGitSwitchStash: document.getElementById('btn-git-switch-stash'),
+  gitSwitchError: document.getElementById('git-switch-error'),
+  gitSwitchFilter: document.getElementById('git-switch-filter'),
+  gitSwitchLoading: document.getElementById('git-switch-loading'),
+  gitSwitchBranchList: document.getElementById('git-switch-branch-list'),
+  btnGitSwitchCancel: document.getElementById('btn-git-switch-cancel'),
+  btnGitSwitchConfirm: document.getElementById('btn-git-switch-confirm'),
   conflictServiceName: document.getElementById('conflict-service-name'),
   conflictLoading: document.getElementById('conflict-loading'),
   conflictError: document.getElementById('conflict-error'),
@@ -719,6 +753,33 @@ function renderServices() {
       tdBuild.append(buildBadge);
     }
 
+    // GIT
+    const tdGit = el('td');
+    const git = row.git;
+    if (!git) {
+      tdGit.append(el('span', 'badge badge-neutral', 'NO_REPO'));
+    } else {
+      const gitLabel = git.compact || git.state || 'NO_REPO';
+      const gitBtn = el('button', `badge badge-clickable ${gitBadgeClass(git)}`, gitLabel);
+      gitBtn.type = 'button';
+      gitBtn.dataset.service = row.service;
+      gitBtn.dataset.repository = git.repository;
+      gitBtn.dataset.action = 'git-badge';
+      if (git.latestRun) {
+        gitBtn.title = `Repository ${git.repository} (${git.latestRun.status} ${git.latestRun.operation}) — Click for Git logs`;
+        gitBtn.addEventListener('click', () =>
+          openLogsView('service', row.service, { build: false, git: true, err: false }),
+        );
+      } else if (git.state === 'CLONED') {
+        gitBtn.title = `Repository ${git.repository} — Click to switch branch`;
+        gitBtn.addEventListener('click', () => openGitSwitchDialog(git.repository, row.service));
+      } else {
+        gitBtn.title = `Repository ${git.repository} (${git.state})`;
+        gitBtn.addEventListener('click', () => openInspectDrawer(row.service));
+      }
+      tdGit.append(gitBtn);
+    }
+
     // PORT, PID, UPTIME
     const tdPort = el('td', 'mono', row.port ?? '—');
     const tdPid = el('td', 'mono', row.pid ?? '—');
@@ -737,6 +798,74 @@ function renderServices() {
     // ACTIONS
     const tdActions = el('td', 'col-actions');
     const actionsWrap = el('div', 'row-actions');
+
+    if (git) {
+      const gitRunning = git.latestRun?.status === 'RUNNING';
+      if (gitRunning) {
+        const btnCancelGit = el('button', 'btn btn-danger btn-xs', 'Cancel Git');
+        btnCancelGit.type = 'button';
+        btnCancelGit.dataset.repository = git.repository;
+        btnCancelGit.dataset.action = 'git-cancel';
+        btnCancelGit.addEventListener('click', () =>
+          runAction([btnCancelGit], () => gitCancel([git.repository])),
+        );
+        actionsWrap.append(btnCancelGit);
+      } else if (git.state === 'NOT_CLONED') {
+        const btnClone = el('button', 'btn btn-primary btn-xs', 'Clone');
+        btnClone.type = 'button';
+        btnClone.dataset.repository = git.repository;
+        btnClone.dataset.action = 'git-clone';
+        btnClone.title = `Clone Repository ${git.repository}`;
+        btnClone.addEventListener('click', () =>
+          runAction([btnClone], () => gitClone([git.repository])),
+        );
+        actionsWrap.append(btnClone);
+      } else if (git.state === 'CLONED') {
+        const btnFetch = el('button', 'btn btn-secondary btn-xs', 'Fetch');
+        btnFetch.type = 'button';
+        btnFetch.dataset.repository = git.repository;
+        btnFetch.dataset.action = 'git-fetch';
+        btnFetch.title = `Fetch Repository ${git.repository}`;
+        btnFetch.addEventListener('click', () =>
+          runAction([btnFetch], () => gitFetch([git.repository])),
+        );
+        actionsWrap.append(btnFetch);
+
+        const btnPull = el('button', 'btn btn-secondary btn-xs', 'Pull');
+        btnPull.type = 'button';
+        btnPull.dataset.repository = git.repository;
+        btnPull.dataset.action = 'git-pull';
+        btnPull.disabled = Boolean(git.dirty);
+        btnPull.title = git.dirty
+          ? `Cannot pull ${git.repository}: working tree is dirty`
+          : `Fast-forward pull Repository ${git.repository}`;
+        btnPull.addEventListener('click', () =>
+          runAction([btnPull], () => gitPull([git.repository])),
+        );
+        actionsWrap.append(btnPull);
+
+        const btnSwitch = el('button', 'btn btn-secondary btn-xs', 'Switch…');
+        btnSwitch.type = 'button';
+        btnSwitch.dataset.repository = git.repository;
+        btnSwitch.dataset.action = 'git-switch';
+        btnSwitch.title = `Switch branch for Repository ${git.repository}`;
+        btnSwitch.addEventListener('click', () => openGitSwitchDialog(git.repository, row.service));
+        actionsWrap.append(btnSwitch);
+
+        const btnStash = el('button', 'btn btn-secondary btn-xs', 'Stash');
+        btnStash.type = 'button';
+        btnStash.dataset.repository = git.repository;
+        btnStash.dataset.action = 'git-stash';
+        btnStash.disabled = !git.dirty;
+        btnStash.title = git.dirty
+          ? `Stash uncommitted and untracked changes in Repository ${git.repository}`
+          : `Working tree for ${git.repository} is clean`;
+        btnStash.addEventListener('click', () =>
+          runAction([btnStash], () => gitStash({ targets: [git.repository], includeUntracked: true })),
+        );
+        actionsWrap.append(btnStash);
+      }
+    }
 
     if (buildRunState === 'RUNNING') {
       const btnCancelBuild = el('button', 'btn btn-danger btn-xs', 'Cancel Build');
@@ -820,7 +949,7 @@ function renderServices() {
 
     tdActions.append(actionsWrap);
 
-    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdPort, tdPid, tdUptime, tdStale, tdActions);
+    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdGit, tdPort, tdPid, tdUptime, tdStale, tdActions);
     dom.servicesTbody.append(tr);
   }
 }
@@ -1162,10 +1291,11 @@ function switchAppView(view) {
   }
 }
 
-function openLogsView(targetType, serviceName = null, { build = null, err = null } = {}) {
+function openLogsView(targetType, serviceName = null, { build = null, git = null, err = null } = {}) {
   const prevTargetType = state.logs.targetType;
   const prevTargetService = state.logs.targetService;
   const prevBuild = state.logs.build;
+  const prevGit = state.logs.git;
   const prevErr = state.logs.err;
 
   state.logs.targetType = targetType;
@@ -1173,8 +1303,16 @@ function openLogsView(targetType, serviceName = null, { build = null, err = null
 
   if (targetType === 'gateway') {
     state.logs.build = false;
-  } else if (build !== null) {
-    state.logs.build = Boolean(build);
+    state.logs.git = false;
+  } else {
+    if (build !== null) {
+      state.logs.build = Boolean(build);
+      if (state.logs.build) state.logs.git = false;
+    }
+    if (git !== null) {
+      state.logs.git = Boolean(git);
+      if (state.logs.git) state.logs.build = false;
+    }
   }
   if (err !== null) {
     state.logs.err = Boolean(err);
@@ -1192,6 +1330,7 @@ function openLogsView(targetType, serviceName = null, { build = null, err = null
     prevTargetType !== state.logs.targetType ||
     prevTargetService !== state.logs.targetService ||
     prevBuild !== state.logs.build ||
+    prevGit !== state.logs.git ||
     prevErr !== state.logs.err ||
     !state.logs.stream;
 
@@ -1206,10 +1345,13 @@ function renderLogsHeader() {
   dom.logsTargetName.textContent = isGateway ? 'gateway' : (state.logs.targetService || '—');
   dom.logsSourceGroup.hidden = isGateway;
 
-  dom.btnLogsSourceService.classList.toggle('active', !state.logs.build);
-  dom.btnLogsSourceService.setAttribute('aria-pressed', String(!state.logs.build));
+  const isServiceSource = !state.logs.build && !state.logs.git;
+  dom.btnLogsSourceService.classList.toggle('active', isServiceSource);
+  dom.btnLogsSourceService.setAttribute('aria-pressed', String(isServiceSource));
   dom.btnLogsSourceBuild.classList.toggle('active', state.logs.build);
   dom.btnLogsSourceBuild.setAttribute('aria-pressed', String(state.logs.build));
+  dom.btnLogsSourceGit.classList.toggle('active', state.logs.git);
+  dom.btnLogsSourceGit.setAttribute('aria-pressed', String(state.logs.git));
   dom.btnLogsStdout.classList.toggle('active', !state.logs.err);
   dom.btnLogsStdout.setAttribute('aria-pressed', String(!state.logs.err));
   dom.btnLogsStderr.classList.toggle('active', state.logs.err);
@@ -1365,6 +1507,28 @@ function renderInspection(report) {
     }
     if (report.buildRun.stderrLog) {
       items.push(['Build Stderr Log', report.buildRun.stderrLog]);
+    }
+  }
+  if (report.git) {
+    items.push(['Repository', `${report.git.repository} (${report.git.root})`]);
+    items.push(['Git Status', report.git.compact || report.git.state]);
+    if (report.git.upstream) {
+      items.push(['Git Upstream', `${report.git.upstream} (↑${report.git.ahead} ↓${report.git.behind})`]);
+    }
+    if (report.git.lastFetchedAt) {
+      items.push(['Last Fetched', report.git.lastFetchedAt]);
+    }
+    if (report.git.latestRun) {
+      items.push(['Latest Git Run', `${report.git.latestRun.status} (${report.git.latestRun.operation})`]);
+      if (report.git.latestRun.reason) {
+        items.push(['Git Run Reason', report.git.latestRun.reason]);
+      }
+      if (report.git.latestRun.stdoutLog) {
+        items.push(['Git Stdout Log', report.git.latestRun.stdoutLog]);
+      }
+      if (report.git.latestRun.stderrLog) {
+        items.push(['Git Stderr Log', report.git.latestRun.stderrLog]);
+      }
     }
   }
 
@@ -1541,6 +1705,176 @@ function buildBadgeClass(displayState) {
   }
 }
 
+function gitBadgeClass(git) {
+  if (!git) return 'badge-neutral';
+  if (git.latestRun?.status === 'RUNNING') return 'badge-starting';
+  if (git.latestRun?.status === 'UNKNOWN' || git.state === 'NOT_GIT') return 'badge-danger';
+  if (git.state === 'NOT_CLONED') return 'badge-neutral';
+  if (git.dirty || git.fetchAgeWarning) return 'badge-stale';
+  if (git.behind > 0) return 'badge-starting';
+  return 'badge-healthy';
+}
+
+async function openGitSwitchDialog(repoName, serviceName) {
+  state.gitSwitch.repository = repoName;
+  state.gitSwitch.services = [];
+  state.gitSwitch.dirty = false;
+  state.gitSwitch.branches = [];
+  state.gitSwitch.selectedBranch = null;
+  state.gitSwitch.filter = '';
+
+  dom.gitSwitchRepoName.textContent = repoName;
+  dom.gitSwitchServices.textContent = '';
+  dom.gitSwitchFetched.textContent = '';
+  dom.gitSwitchFilter.value = '';
+  dom.gitSwitchError.hidden = true;
+  dom.gitSwitchDirtyBanner.hidden = true;
+  dom.gitSwitchBranchList.replaceChildren();
+  dom.gitSwitchLoading.hidden = false;
+  dom.btnGitSwitchConfirm.disabled = true;
+
+  if (!dom.gitSwitchDialog.open) {
+    dom.gitSwitchDialog.showModal();
+  }
+  await loadGitSwitchBranches(repoName);
+}
+
+async function loadGitSwitchBranches(repoName) {
+  dom.gitSwitchLoading.hidden = false;
+  dom.gitSwitchError.hidden = true;
+  try {
+    const payload = await fetchGitBranches(repoName);
+    if (payload.cliCommand) {
+      setCliCommand(payload.cliCommand, { explicit: true });
+    }
+    const data = payload.data;
+    state.gitSwitch.services = data.services || [];
+    state.gitSwitch.dirty = Boolean(data.dirty);
+    state.gitSwitch.branches = data.branches || [];
+
+    dom.gitSwitchServices.textContent =
+      state.gitSwitch.services.length > 0
+        ? ` (shared by: ${state.gitSwitch.services.join(', ')})`
+        : '';
+    dom.gitSwitchFetched.textContent = data.lastFetchedAt
+      ? `Fetched: ${data.lastFetchedAt.replace('T', ' ').slice(0, 16)}Z`
+      : 'Never fetched';
+
+    if (state.gitSwitch.dirty) {
+      dom.gitSwitchDirtySummary.textContent =
+        `Working tree has uncommitted or untracked changes (${data.stagedCount || 0} staged, ${data.unstagedCount || 0} modified, ${data.untrackedCount || 0} untracked). Stash before switching.`;
+      dom.gitSwitchDirtyBanner.hidden = false;
+    } else {
+      dom.gitSwitchDirtyBanner.hidden = true;
+    }
+    dom.btnGitSwitchDefault.disabled = state.gitSwitch.dirty;
+    renderGitSwitchBranchList();
+  } catch (err) {
+    dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
+    dom.gitSwitchError.hidden = false;
+  } finally {
+    dom.gitSwitchLoading.hidden = true;
+  }
+}
+
+function renderGitSwitchBranchList() {
+  dom.gitSwitchBranchList.replaceChildren();
+  const q = state.gitSwitch.filter.trim().toLowerCase();
+  const filtered = state.gitSwitch.branches.filter((b) =>
+    !q || b.name.toLowerCase().includes(q) || (b.shortSubject || '').toLowerCase().includes(q),
+  );
+  if (filtered.length === 0) {
+    dom.gitSwitchBranchList.append(el('div', 'muted git-branch-empty', 'No matching branches.'));
+  } else {
+    for (const b of filtered) {
+      const isSelected = state.gitSwitch.selectedBranch === b.name;
+      const btn = el('button', `git-branch-item${isSelected ? ' selected' : ''}${b.current ? ' current' : ''}`);
+      btn.type = 'button';
+      btn.setAttribute('role', 'option');
+      btn.setAttribute('aria-selected', String(isSelected));
+      const top = el('div', 'git-branch-top');
+      top.append(
+        el('span', 'mono git-branch-name', (b.current ? '* ' : '') + b.name),
+        el('span', 'badge badge-neutral git-branch-origin', b.origin),
+        el('span', 'mono muted git-branch-date', (b.lastCommitAt || '').replace('T', ' ').slice(0, 16) + 'Z'),
+      );
+      btn.append(top);
+      if (b.shortSubject) {
+        btn.append(el('div', 'muted git-branch-subject', b.shortSubject));
+      }
+      btn.addEventListener('click', () => {
+        state.gitSwitch.selectedBranch = b.name;
+        renderGitSwitchBranchList();
+      });
+      dom.gitSwitchBranchList.append(btn);
+    }
+  }
+  dom.btnGitSwitchConfirm.disabled = state.gitSwitch.dirty || !state.gitSwitch.selectedBranch;
+}
+
+function closeGitSwitchDialog() {
+  if (dom.gitSwitchDialog.open) {
+    dom.gitSwitchDialog.close();
+  }
+  state.gitSwitch.repository = null;
+}
+
+async function handleGitSwitchFetch() {
+  const repo = state.gitSwitch.repository;
+  if (!repo) return;
+  dom.btnGitSwitchFetch.disabled = true;
+  dom.gitSwitchError.hidden = true;
+  try {
+    const payload = await gitFetch([repo]);
+    if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
+    await loadGitSwitchBranches(repo);
+    await refreshStatus({ explicit: false });
+  } catch (err) {
+    dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
+    dom.gitSwitchError.hidden = false;
+  } finally {
+    dom.btnGitSwitchFetch.disabled = false;
+  }
+}
+
+async function handleGitSwitchStash() {
+  const repo = state.gitSwitch.repository;
+  if (!repo) return;
+  dom.btnGitSwitchStash.disabled = true;
+  dom.gitSwitchError.hidden = true;
+  try {
+    const payload = await gitStash({ targets: [repo], includeUntracked: true });
+    if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
+    await loadGitSwitchBranches(repo);
+    await refreshStatus({ explicit: false });
+  } catch (err) {
+    dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
+    dom.gitSwitchError.hidden = false;
+  } finally {
+    dom.btnGitSwitchStash.disabled = false;
+  }
+}
+
+async function handleGitSwitchExecute(useDefault) {
+  const repo = state.gitSwitch.repository;
+  if (!repo) return;
+  const branch = useDefault ? null : state.gitSwitch.selectedBranch;
+  if (!useDefault && !branch) return;
+  dom.btnGitSwitchConfirm.disabled = true;
+  dom.btnGitSwitchDefault.disabled = true;
+  dom.gitSwitchError.hidden = true;
+  try {
+    const payload = await gitSwitch({ branch, useDefault, targets: [repo] });
+    if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
+    closeGitSwitchDialog();
+    await refreshStatus({ explicit: false });
+  } catch (err) {
+    dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
+    dom.gitSwitchError.hidden = false;
+    await loadGitSwitchBranches(repo);
+  }
+}
+
 function handleBuildService(serviceName, force, button) {
   return runAction([button], () => buildService(serviceName, { force }));
 }
@@ -1565,6 +1899,7 @@ function startActiveLogStream() {
     lines: 100,
     err: state.logs.err,
     build: state.logs.build,
+    git: state.logs.git,
     onOpen() {
       if (seq !== state.logs.streamSeq) {
         return;
@@ -1892,8 +2227,9 @@ function init() {
   });
 
   dom.btnLogsSourceService.addEventListener('click', () => {
-    if (state.logs.build) {
+    if (state.logs.build || state.logs.git) {
       state.logs.build = false;
+      state.logs.git = false;
       startActiveLogStream();
     }
   });
@@ -1901,9 +2237,35 @@ function init() {
   dom.btnLogsSourceBuild.addEventListener('click', () => {
     if (!state.logs.build) {
       state.logs.build = true;
+      state.logs.git = false;
       startActiveLogStream();
     }
   });
+
+  dom.btnLogsSourceGit.addEventListener('click', () => {
+    if (!state.logs.git) {
+      state.logs.git = true;
+      state.logs.build = false;
+      startActiveLogStream();
+    }
+  });
+
+  dom.btnGitFetchLocal.addEventListener('click', () =>
+    runAction([dom.btnGitFetchLocal], () => gitFetch([])),
+  );
+  dom.btnGitPullLocal.addEventListener('click', () =>
+    runAction([dom.btnGitPullLocal], () => gitPull([])),
+  );
+
+  dom.gitSwitchFilter.addEventListener('input', () => {
+    state.gitSwitch.filter = dom.gitSwitchFilter.value;
+    renderGitSwitchBranchList();
+  });
+  dom.btnGitSwitchFetch.addEventListener('click', handleGitSwitchFetch);
+  dom.btnGitSwitchStash.addEventListener('click', handleGitSwitchStash);
+  dom.btnGitSwitchDefault.addEventListener('click', () => handleGitSwitchExecute(true));
+  dom.btnGitSwitchConfirm.addEventListener('click', () => handleGitSwitchExecute(false));
+  dom.btnGitSwitchCancel.addEventListener('click', closeGitSwitchDialog);
 
   dom.btnLogsStdout.addEventListener('click', () => {
     if (state.logs.err) {

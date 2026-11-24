@@ -353,6 +353,45 @@ public final class ProjectResolver {
             }
         }
 
+        // Validate canonical Repository names (derived from root basename) for ambiguity:
+        // 1. No two distinct Repository roots may share the same basename.
+        // 2. No Repository name may collide with a different Service's name (1:1 Service/Repo equality is allowed).
+        Map<String, RepositoryRef> repoByName = new LinkedHashMap<>();
+        for (RepositoryRef ref : repoByRoot.values()) {
+            if (!ProjectConfigParser.isPathSafeIdentifier(ref.name())) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Repository root '" + ref.root() + "' has invalid basename '" + ref.name() + "'",
+                    Map.of("root", ref.root().toString(), "repository", ref.name())
+                ));
+            }
+            RepositoryRef previous = repoByName.putIfAbsent(ref.name(), ref);
+            if (previous != null) {
+                return Result.err(DomainError.of(
+                    "CONFIG_REPOSITORY_NAME_COLLISION",
+                    "Distinct Repositories '" + previous.root() + "' and '" + ref.root()
+                        + "' share the same basename '" + ref.name() + "'",
+                    Map.of("repository", ref.name(), "root1", previous.root().toString(), "root2", ref.root().toString())
+                ));
+            }
+        }
+        for (RepositoryRef ref : repoByRoot.values()) {
+            ServiceDefinition sameNameService = services.get(ref.name());
+            if (sameNameService != null) {
+                boolean pointsToSameRepo = sameNameService.repository()
+                    .map(r -> r.root().equals(ref.root()))
+                    .orElse(false);
+                if (!pointsToSameRepo) {
+                    return Result.err(DomainError.of(
+                        "CONFIG_REPOSITORY_NAME_COLLISION",
+                        "Repository name '" + ref.name() + "' (root '" + ref.root()
+                            + "') collides with Service '" + sameNameService.name() + "' pointing to a different Repository",
+                        Map.of("repository", ref.name(), "service", sameNameService.name())
+                    ));
+                }
+            }
+        }
+
         for (ProfileDefinition profile : rawConfig.profiles().values()) {
             for (String svcName : profile.localServices()) {
                 if (!services.containsKey(svcName)) {
@@ -370,6 +409,7 @@ public final class ProjectResolver {
             plan.configPath(),
             plan.configDir(),
             plan.repositoriesRoot(),
+            rawConfig.repositories(),
             resolvedBuilders,
             resolvedRuntimes,
             gateway,
