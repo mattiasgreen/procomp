@@ -76,7 +76,7 @@ Uptime is displayed alongside `Health State` so a human can tell whether a `STAR
 
 ### Inspection (Deep Read-Only Diagnostics)
 
-`Inspection` (`procomp inspect <service>`) examines a `Process` in detail: PID, ownership, full command line, arguments, parent process chain (with parent command lines), RAM, health endpoint status/response, log paths, and whether a `Managed` `Process` is `Stale` (started before the latest `Artifact`).
+`Inspection` (`procomp inspect <service>`) examines a `Process` in detail: PID, ownership, full command line, arguments, parent process chain (with parent command lines), RSS, health endpoint status/response, log paths, context-aware copy-pasteable diagnostic commands (e.g., `jcmd <pid> ...` for live JVMs), and whether a `Managed` `Process` is `Stale` (started before the latest `Artifact`).
 
 ---
 
@@ -106,8 +106,8 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp build [service...]` | Runs tracked in-place `Build Run`(s) sequentially (fail-fast) using each target's configured `Builder`. Bare `build` targets all `LOCAL`-routed Services with a `Builder`. Rejects overlapping `RUNNING` or `UNKNOWN` (dead-PID) runs unless `--force` is passed; supports `--cancel <service...>`, `--timeout <seconds>`, and `--json`. Never mutates the `Routing Table` or starts/restarts Services. |
 | `procomp start [service...]` | Runs pre-start `Discovery` per target (`None`/`CRASHED` → spawn `Managed`; `Managed`/`Unmanaged` → reuse without duplicating; `Conflict` → fail fast with `Inspection` details). Bare `start` targets all `LOCAL`-routed Services. Waits for `HEALTHY` by default (`-d`/`--detach` to return immediately). Never auto-builds or mutates the `Routing Table`. |
 | `procomp stop [service...]` | Stops `Managed` Service `Process`(es) cleanly. Bare `stop` stops all `Managed` Services while leaving the `Gateway` running (`--all` also stops a `Managed` `Gateway`). Never kills `Unmanaged` Processes. Killing a `Conflict` requires explicit consent. |
-| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `GIT`, `PORT`, `PID`, `UPTIME`, `STALE`) plus a one-line `Gateway` summary. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). `GIT` shows compact zero-network `Repository` state (branch, `*` dirty, `↑`/`↓`, fetch-age warning, `DETACHED@sha`, `NOT_CLONED`, `NO_REPO`, or active `Git Run`). |
-| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process`, latest `Build Run`, and `Repository` / latest `Git Run`. |
+| `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `GIT`, `PORT`, `PID`, `UPTIME`, `RSS`, `STALE`) plus a one-line `Gateway` summary and a `Total RSS` summary when any Process is running. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). `GIT` shows compact zero-network `Repository` state (branch, `*` dirty, `↑`/`↓`, fetch-age warning, `DETACHED@sha`, `NOT_CLONED`, `NO_REPO`, or active `Git Run`). |
+| `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process` (including `RSS` and context-aware diagnostic commands), latest `Build Run`, and `Repository` / latest `Git Run`. |
 | `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`, build logs with `--build`, or Git logs with `--git`). Supports `-n <lines>`, `-f` (follow), `--err`, `--build`, `--git`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
 
 ### Git (`Repository` Lifecycle — Non-Authoring)
