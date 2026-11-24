@@ -163,8 +163,7 @@ final class WebUiPlaywrightE2ETest {
                 page.locator("#btn-drift-reconcile").click();
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
 
-                pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Start")).click();
+                clickHealthMenuAction(pricingRow, "Start");
                 assertThat(pricingRow).containsText("HEALTHY");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp start pricing");
 
@@ -215,15 +214,15 @@ final class WebUiPlaywrightE2ETest {
 
                 Locator pricingRow = serviceRow("pricing");
                 assertThat(pricingRow).containsText("UNMANAGED");
-                assertThat(pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                pricingRow.locator("button[data-pill='health']").click();
+                assertThat(page.locator("#pill-action-menu").getByRole(com.microsoft.playwright.options.AriaRole.MENUITEM,
                     new Locator.GetByRoleOptions().setName("Stop"))).isDisabled();
 
                 Locator ordersRow = serviceRow("orders");
                 assertThat(ordersRow).containsText("CONFLICT");
 
                 // Trigger Kill Conflict -> native <dialog> must show Inspection details + verbatim CLI command
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Kill Conflict…")).click();
+                clickHealthMenuAction(ordersRow, "Kill Conflict…");
 
                 Locator dialog = page.locator("#conflict-dialog");
                 assertThat(dialog).isVisible();
@@ -238,8 +237,7 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(ordersRow).containsText("CONFLICT");
 
                 // Confirming kills the Conflict Process and echoes the verbatim CLI command
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Kill Conflict…")).click();
+                clickHealthMenuAction(ordersRow, "Kill Conflict…");
                 assertThat(dialog).isVisible();
                 page.locator("#btn-conflict-confirm").click();
 
@@ -262,20 +260,18 @@ final class WebUiPlaywrightE2ETest {
                 Locator ordersRow = serviceRow("orders");
                 assertThat(ordersRow).containsText("CRASHED");
 
-                // Recover CRASHED orders right from the Web UI Start button
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Start")).click();
+                // Recover CRASHED orders right from the Web UI HEALTH pill menu
+                clickHealthMenuAction(ordersRow, "Start");
                 assertThat(ordersRow).containsText("HEALTHY");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp start orders");
 
-                // Rebuild Artifact externally -> Refresh -> orders displays STALE
+                // Rebuild Artifact externally -> Refresh -> orders displays inline STALE badge beside HEALTH
                 world.triggerActor(new ExternalActorEvent.RebuildArtifact("orders"));
                 page.locator("#btn-refresh").click();
                 assertThat(ordersRow).containsText("STALE");
 
                 // Open Inspect drawer on orders -> verify STALE details and secret hygiene
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Inspect")).click();
+                clickHealthMenuAction(ordersRow, "Inspect");
 
                 assertThat(page.locator("#detail-drawer")).isVisible();
                 assertThat(page.locator("#drawer-service-name")).hasText("orders");
@@ -287,8 +283,7 @@ final class WebUiPlaywrightE2ETest {
                 );
 
                 // Open fullscreen Logs view for orders and push a live line while connected
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Logs")).click();
+                clickHealthMenuAction(ordersRow, "Logs");
                 assertThat(page.locator("#view-logs")).isVisible();
                 assertThat(page.locator("#logs-target-name")).hasText("orders");
                 assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
@@ -382,6 +377,13 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(page.locator("#view-logs")).isHidden();
             }
         }
+    }
+
+    private void clickHealthMenuAction(Locator row, String actionName) {
+        row.locator("button[data-pill='health']").click();
+        page.locator("#pill-action-menu")
+            .getByRole(com.microsoft.playwright.options.AriaRole.MENUITEM, new Locator.GetByRoleOptions().setName(actionName))
+            .click();
     }
 
     private Locator serviceRow(String serviceName) {
