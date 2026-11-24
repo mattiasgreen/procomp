@@ -23,12 +23,13 @@ Summary: 3 started, 0 reused.
 
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL   MANAGED  HEALTHY  16161  10001  5s      no
-orders         LOCAL   MANAGED  HEALTHY  18101  10002  5s      no
-pricing        REMOTE  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL   MANAGED  HEALTHY  18103  10003  5s      no
-Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
+SERVICE        ROUTE   OWNER    HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+broker         LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  16161  10001  5s      128 MB  no
+orders         LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18101  10002  5s      128 MB  no
+pricing        REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18102  -      -       -       no
+notifications  LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18103  10003  5s      128 MB  no
+Gateway: port 18080, MANAGED, HEALTHY, PID 10000, 96 MB RSS, IN SYNC
+Total RSS: 480 MB (3 services + Gateway)
 ```
 
 ## Step 2: An externally killed Managed Process is surfaced as CRASHED in status
@@ -36,12 +37,13 @@ Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
 ```console
 $ procomp status
 Project: procomp-e2e
-SERVICE        ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-broker         LOCAL   MANAGED  HEALTHY  16161  10001  10s     no
-orders         LOCAL   MANAGED  CRASHED  18101  10002  -       no
-pricing        REMOTE  NONE     STOPPED  18102  -      -       no
-notifications  LOCAL   MANAGED  HEALTHY  18103  10003  10s     no
-Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
+SERVICE        ROUTE   OWNER    HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+broker         LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  16161  10001  10s     128 MB  no
+orders         LOCAL   MANAGED  CRASHED  NO_BUILDER  NO_REPO  18101  10002  -       -       no
+pricing        REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18102  -      -       -       no
+notifications  LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18103  10003  10s     128 MB  no
+Gateway: port 18080, MANAGED, HEALTHY, PID 10000, 96 MB RSS, IN SYNC
+Total RSS: 352 MB (2 services + Gateway)
 ```
 
 ## Step 3: Recovering orders and rebuilding its Artifact flags Stale: YES in status and inspect
@@ -61,7 +63,7 @@ Health:          HEALTHY
 PID:             10004
 Uptime:          6s
 Stale:           YES
-RAM:             128 MB
+RSS:             128 MB
 Command Line:    java -Xmx256m -Dserver.port=18101 -jar /in-memory-project/e2e/orders/build/libs/orders-1.0.0.jar
 Arguments:       -Xmx256m -Dserver.port=18101 -jar /in-memory-project/e2e/orders/build/libs/orders-1.0.0.jar
 Parent Chain:
@@ -70,6 +72,11 @@ Health Endpoint: http://127.0.0.1:18101/actuator/health
 Health Response: HTTP 200 (GET http://127.0.0.1:18101/actuator/health)
 Stdout Log:      /in-memory-state/procomp-e2e/logs/orders.out.log
 Stderr Log:      /in-memory-state/procomp-e2e/logs/orders.err.log
+Diagnostic Commands:
+  - JVM heap summary: jcmd 10004 GC.heap_info
+  - Effective JVM flags: jcmd 10004 VM.flags
+  - JVM native memory: jcmd 10004 VM.native_memory summary  (requires -XX:NativeMemoryTracking=summary in jvmArgs)
+Build Run:       NO_BUILDER
 ```
 
 ## Step 4: Raw stdout/stderr log inspection via logs -n, --err, and --path

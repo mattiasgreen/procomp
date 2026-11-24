@@ -15,9 +15,15 @@ public final class InMemoryConfigSource implements ConfigSource {
     private final Path cwd;
     private final Map<Path, String> files = new LinkedHashMap<>();
     private final Map<String, String> envVars = new LinkedHashMap<>();
+    private Optional<String> user = Optional.empty();
 
     public InMemoryConfigSource(Path cwd) {
         this.cwd = cwd.toAbsolutePath().normalize();
+    }
+
+    public InMemoryConfigSource withUser(String username) {
+        this.user = Optional.ofNullable(username).filter(s -> !s.isBlank());
+        return this;
     }
 
     public InMemoryConfigSource withFile(Path path, String content) {
@@ -43,6 +49,11 @@ public final class InMemoryConfigSource implements ConfigSource {
     @Override
     public Map<String, String> allEnvVars() {
         return Collections.unmodifiableMap(envVars);
+    }
+
+    @Override
+    public Optional<String> currentUser() {
+        return user;
     }
 
     @Override

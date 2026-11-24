@@ -16,12 +16,32 @@ public record Project(
     Path configPath,
     Path configDir,
     Optional<Path> repositoriesRoot,
+    RepositorySettings repositorySettings,
+    Map<String, BuilderDefinition> builders,
     Map<String, RuntimeDefinition> runtimes,
     Optional<GatewayDefinition> gateway,
     Map<String, ServiceDefinition> services,
     Map<String, ProfileDefinition> profiles,
     List<RepositoryRef> repositories
 ) {
+    public Project(
+        String name,
+        Path configPath,
+        Path configDir,
+        Optional<Path> repositoriesRoot,
+        Map<String, BuilderDefinition> builders,
+        Map<String, RuntimeDefinition> runtimes,
+        Optional<GatewayDefinition> gateway,
+        Map<String, ServiceDefinition> services,
+        Map<String, ProfileDefinition> profiles,
+        List<RepositoryRef> repositories
+    ) {
+        this(
+            name, configPath, configDir, repositoriesRoot, RepositorySettings.DEFAULT,
+            builders, runtimes, gateway, services, profiles, repositories
+        );
+    }
+
     public Project {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Project name must be non-blank");
@@ -29,11 +49,26 @@ public record Project(
         Objects.requireNonNull(configPath);
         Objects.requireNonNull(configDir);
         Objects.requireNonNull(repositoriesRoot);
+        Objects.requireNonNull(repositorySettings);
+        builders = Collections.unmodifiableMap(new LinkedHashMap<>(builders));
         runtimes = Collections.unmodifiableMap(new LinkedHashMap<>(runtimes));
         Objects.requireNonNull(gateway);
         services = Collections.unmodifiableMap(new LinkedHashMap<>(services));
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
         repositories = List.copyOf(repositories);
+    }
+
+    public Optional<RepositoryRef> repository(String repositoryName) {
+        for (RepositoryRef ref : repositories) {
+            if (ref.name().equals(repositoryName)) {
+                return Optional.of(ref);
+            }
+        }
+        return Optional.empty();
+    }
+
+    public Optional<BuilderDefinition> builder(String builderName) {
+        return Optional.ofNullable(builders.get(builderName));
     }
 
     public Optional<ServiceDefinition> service(String serviceName) {

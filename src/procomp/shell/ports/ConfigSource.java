@@ -18,6 +18,10 @@ public interface ConfigSource {
 
     Map<String, String> allEnvVars();
 
+    default Optional<String> currentUser() {
+        return Optional.empty();
+    }
+
     boolean isRegularFile(Path path);
 
     Result<String, DomainError> readFile(Path path);

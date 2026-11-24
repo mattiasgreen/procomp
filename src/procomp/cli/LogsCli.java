@@ -41,12 +41,16 @@ final class LogsCli {
         boolean pathOnly = false;
         int lines = LogsRequest.DEFAULT_LINES;
         boolean follow = false;
+        boolean build = false;
+        boolean git = false;
 
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
             switch (arg) {
                 case "--err" -> stderr = true;
                 case "--path" -> pathOnly = true;
+                case "--build" -> build = true;
+                case "--git" -> git = true;
                 case "-f", "--follow" -> follow = true;
                 case "-n", "--lines" -> {
                     if (i + 1 >= args.size()) {
@@ -67,7 +71,7 @@ final class LogsCli {
                         lines = ((Result.Ok<Integer, String>) parsedLines).value();
                     } else if (arg.startsWith("-")) {
                         return Result.err(
-                            "Unknown option '" + arg + "' for 'logs'. Supported options: -n <lines>, --lines <lines>, -f, --follow, --err, --path."
+                            "Unknown option '" + arg + "' for 'logs'. Supported options: -n <lines>, --lines <lines>, -f, --follow, --err, --path, --build."
                         );
                     } else if (serviceName == null) {
                         if (arg.isBlank()) {
@@ -84,12 +88,15 @@ final class LogsCli {
         }
 
         if (serviceName == null) {
-            return Result.err("Missing required <service> argument. Usage: procomp logs <service> [-n <lines>] [-f] [--err] [--path]");
+            return Result.err("Missing required <service> argument. Usage: procomp logs <service> [-n <lines>] [-f] [--err] [--path] [--build|--git]");
         }
-        return Result.ok(new LogsRequest(serviceName, stderr, pathOnly, lines, follow));
+        if (build && git) {
+            return Result.err("Cannot combine '--build' and '--git' for 'logs'.");
+        }
+        return Result.ok(new LogsRequest(serviceName, stderr, pathOnly, lines, follow, build, git));
     }
 
-    private static Result<Integer, String> parseNonNegativeInt(String raw) {
+    static Result<Integer, String> parseNonNegativeInt(String raw) {
         if (raw == null || raw.isEmpty()) {
             return Result.err("Invalid line count: value must be a non-negative integer.");
         }

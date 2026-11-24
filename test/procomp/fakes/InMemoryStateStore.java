@@ -1,8 +1,10 @@
 package procomp.fakes;
 
+import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitRunRecord;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
 import procomp.shell.ports.ProcessKey;
@@ -21,6 +23,8 @@ public final class InMemoryStateStore implements StateStore {
     private final Map<String, Map<String, String>> routingByProject = new LinkedHashMap<>();
     private final Map<String, Map<String, ManagedProcessRecord>> serviceProcesses = new LinkedHashMap<>();
     private final Map<String, ManagedProcessRecord> gatewayProcesses = new LinkedHashMap<>();
+    private final Map<String, Map<String, BuildRunRecord>> buildRuns = new LinkedHashMap<>();
+    private final Map<String, Map<String, GitRunRecord>> gitRuns = new LinkedHashMap<>();
     private final Map<Path, byte[]> logs = new LinkedHashMap<>();
 
     public InMemoryStateStore() {
@@ -58,6 +62,12 @@ public final class InMemoryStateStore implements StateStore {
                 Optional.ofNullable(serviceProcesses.getOrDefault(project, Map.of()).get(svc))
             );
             case ProcessKey.Gateway _ -> Result.ok(Optional.ofNullable(gatewayProcesses.get(project)));
+            case ProcessKey.Build _ -> throw new IllegalArgumentException(
+                "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
+            );
         };
     }
 
@@ -67,6 +77,12 @@ public final class InMemoryStateStore implements StateStore {
             case ProcessKey.Service(String svc) ->
                 serviceProcesses.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(svc, record);
             case ProcessKey.Gateway _ -> gatewayProcesses.put(project, record);
+            case ProcessKey.Build _ -> throw new IllegalArgumentException(
+                "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
+            );
         }
         return Result.ok(Unit.VALUE);
     }
@@ -81,7 +97,35 @@ public final class InMemoryStateStore implements StateStore {
                 }
             }
             case ProcessKey.Gateway _ -> gatewayProcesses.remove(project);
+            case ProcessKey.Build _ -> throw new IllegalArgumentException(
+                "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
+            );
         }
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
+    public synchronized Result<Optional<BuildRunRecord>, DomainError> readBuildRun(String project, String serviceName) {
+        return Result.ok(Optional.ofNullable(buildRuns.getOrDefault(project, Map.of()).get(serviceName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeBuildRun(String project, String serviceName, BuildRunRecord record) {
+        buildRuns.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(serviceName, record);
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
+    public synchronized Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName) {
+        return Result.ok(Optional.ofNullable(gitRuns.getOrDefault(project, Map.of()).get(repositoryName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record) {
+        gitRuns.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(repositoryName, record);
         return Result.ok(Unit.VALUE);
     }
 
@@ -90,6 +134,8 @@ public final class InMemoryStateStore implements StateStore {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
             case ProcessKey.Gateway _ -> "gateway";
+            case ProcessKey.Build(String svc) -> svc + ".build";
+            case ProcessKey.Git(String repo) -> repo + ".git";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix);

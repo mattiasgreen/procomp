@@ -42,6 +42,7 @@ public final class ProjectResolver {
         Path configPath,
         Path configDir,
         Optional<Path> repositoriesRoot,
+        Optional<String> currentUser,
         RawProjectConfig rawConfig,
         Map<String, VarValue> expandedDefaultsVars,
         List<EnvFileTarget> topEnvFiles,
@@ -64,6 +65,17 @@ public final class ProjectResolver {
         FileLookup fileLookup,
         Map<String, String> hostEnv
     ) {
+        return resolve(configPath, rawConfigJson, fileLookup, hostEnv, Optional.empty());
+    }
+
+    public static Result<Project, DomainError> resolve(
+        Path configPath,
+        String rawConfigJson,
+        FileLookup fileLookup,
+        Map<String, String> hostEnv,
+        Optional<String> currentUser
+    ) {
+        Objects.requireNonNull(currentUser, "currentUser must not be null");
         Result<RawProjectConfig, DomainError> rawCfgRes = ProjectConfigParser.parse(rawConfigJson);
         if (rawCfgRes.isErr()) {
             return rawCfgRes.castError();
@@ -83,7 +95,7 @@ public final class ProjectResolver {
         }
 
         Result<ResolutionPlan, DomainError> planRes =
-            planResolution(normalizedConfigPath, configDir, rawConfig, okVal(catalogRes), hostEnv);
+            planResolution(normalizedConfigPath, configDir, rawConfig, okVal(catalogRes), hostEnv, currentUser);
         if (planRes.isErr()) {
             return planRes.castError();
         }
@@ -153,7 +165,8 @@ public final class ProjectResolver {
         Path configDir,
         RawProjectConfig rawConfig,
         Map<String, RawProjectConfig.RawServiceConfig> catalogServices,
-        Map<String, String> hostEnv
+        Map<String, String> hostEnv,
+        Optional<String> currentUser
     ) {
         Result<Optional<Path>, DomainError> reposRootRes = resolveRepositoriesRoot(configDir, rawConfig);
         if (reposRootRes.isErr()) return reposRootRes.castError();
@@ -167,6 +180,7 @@ public final class ProjectResolver {
         Map<String, VarValue> baseVars = new LinkedHashMap<>(expandedDefaultsVars);
         baseVars.put("configDir", new VarValue.Scalar(configDir.toString()));
         reposRoot.ifPresent(p -> baseVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        currentUser.filter(s -> !s.isBlank()).ifPresent(u -> baseVars.put("user", new VarValue.Scalar(u)));
 
         List<EnvFileTarget> topEnvTargets = new ArrayList<>();
         for (int i = 0; i < rawConfig.envFiles().size(); i++) {
@@ -211,6 +225,7 @@ public final class ProjectResolver {
             effectiveVars.putAll(okVal(svcVarsRes));
             effectiveVars.put("configDir", new VarValue.Scalar(configDir.toString()));
             reposRoot.ifPresent(p -> effectiveVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+            currentUser.filter(s -> !s.isBlank()).ifPresent(u -> effectiveVars.put("user", new VarValue.Scalar(u)));
             effectiveVars.put("service", new VarValue.Scalar(svcName));
             svc.port().ifPresent(p -> effectiveVars.put("port", new VarValue.Scalar(Integer.toString(p))));
 
@@ -240,7 +255,7 @@ public final class ProjectResolver {
         }
 
         return Result.ok(new ResolutionPlan(
-            normalizedConfigPath, configDir, reposRoot, rawConfig, expandedDefaultsVars, topEnvTargets, drafts
+            normalizedConfigPath, configDir, reposRoot, currentUser, rawConfig, expandedDefaultsVars, topEnvTargets, drafts
         ));
     }
 
@@ -266,6 +281,30 @@ public final class ProjectResolver {
         );
         if (defaultsCheck.isErr()) return defaultsCheck.castError();
 
+        if (rawConfig.defaults().builder().isPresent()) {
+            String defaultBuilder = rawConfig.defaults().builder().get();
+            if (!rawConfig.builders().containsKey(defaultBuilder)) {
+                return Result.err(DomainError.of(
+                    "CONFIG_UNKNOWN_BUILDER",
+                    "defaults.builder references unknown builder '" + defaultBuilder + "'",
+                    Map.of("field", "defaults.builder", "builder", defaultBuilder)
+                ));
+            }
+        }
+
+        Map<String, BuilderDefinition> resolvedBuilders = new LinkedHashMap<>();
+        for (Map.Entry<String, RawProjectConfig.RawBuilderConfig> entry : rawConfig.builders().entrySet()) {
+            String builderName = entry.getKey();
+            RawProjectConfig.RawBuilderConfig b = entry.getValue();
+            Result<Map<String, String>, DomainError> bEnvRes = validateBuilderTemplates(
+                builderName, b, validationVars, hostEnv
+            );
+            if (bEnvRes.isErr()) return bEnvRes.castError();
+            resolvedBuilders.put(builderName, new BuilderDefinition(
+                builderName, b.command(), b.workingDir(), SecretEnv.of(okVal(bEnvRes))
+            ));
+        }
+
         Map<String, RuntimeDefinition> resolvedRuntimes = new LinkedHashMap<>();
         for (Map.Entry<String, RawProjectConfig.RawRuntimeConfig> entry : rawConfig.runtimes().entrySet()) {
             String rtName = entry.getKey();
@@ -289,7 +328,7 @@ public final class ProjectResolver {
 
         for (ServiceDraft draft : plan.serviceDrafts()) {
             Result<ServiceDefinition, DomainError> svcRes = resolveService(
-                draft, rawConfig, parsedEnvFiles, topEnvFileOverlay, hostEnv
+                draft, plan.configDir(), rawConfig, parsedEnvFiles, topEnvFileOverlay, hostEnv
             );
             if (svcRes.isErr()) return svcRes.castError();
             ServiceDefinition svc = okVal(svcRes);
@@ -314,6 +353,45 @@ public final class ProjectResolver {
             }
         }
 
+        // Validate canonical Repository names (derived from root basename) for ambiguity:
+        // 1. No two distinct Repository roots may share the same basename.
+        // 2. No Repository name may collide with a different Service's name (1:1 Service/Repo equality is allowed).
+        Map<String, RepositoryRef> repoByName = new LinkedHashMap<>();
+        for (RepositoryRef ref : repoByRoot.values()) {
+            if (!ProjectConfigParser.isPathSafeIdentifier(ref.name())) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Repository root '" + ref.root() + "' has invalid basename '" + ref.name() + "'",
+                    Map.of("root", ref.root().toString(), "repository", ref.name())
+                ));
+            }
+            RepositoryRef previous = repoByName.putIfAbsent(ref.name(), ref);
+            if (previous != null) {
+                return Result.err(DomainError.of(
+                    "CONFIG_REPOSITORY_NAME_COLLISION",
+                    "Distinct Repositories '" + previous.root() + "' and '" + ref.root()
+                        + "' share the same basename '" + ref.name() + "'",
+                    Map.of("repository", ref.name(), "root1", previous.root().toString(), "root2", ref.root().toString())
+                ));
+            }
+        }
+        for (RepositoryRef ref : repoByRoot.values()) {
+            ServiceDefinition sameNameService = services.get(ref.name());
+            if (sameNameService != null) {
+                boolean pointsToSameRepo = sameNameService.repository()
+                    .map(r -> r.root().equals(ref.root()))
+                    .orElse(false);
+                if (!pointsToSameRepo) {
+                    return Result.err(DomainError.of(
+                        "CONFIG_REPOSITORY_NAME_COLLISION",
+                        "Repository name '" + ref.name() + "' (root '" + ref.root()
+                            + "') collides with Service '" + sameNameService.name() + "' pointing to a different Repository",
+                        Map.of("repository", ref.name(), "service", sameNameService.name())
+                    ));
+                }
+            }
+        }
+
         for (ProfileDefinition profile : rawConfig.profiles().values()) {
             for (String svcName : profile.localServices()) {
                 if (!services.containsKey(svcName)) {
@@ -331,6 +409,8 @@ public final class ProjectResolver {
             plan.configPath(),
             plan.configDir(),
             plan.repositoriesRoot(),
+            rawConfig.repositories(),
+            resolvedBuilders,
             resolvedRuntimes,
             gateway,
             services,
@@ -354,15 +434,19 @@ public final class ProjectResolver {
             return Result.ok(service.command());
         }
         if (artifactPath == null || artifactPath.isEmpty()) {
+            Map<String, String> details = new LinkedHashMap<>();
+            details.put("service", service.name());
+            details.put("workingDir", service.workingDir().toString());
+            details.put("artifactGlob", service.artifactGlob().orElse(""));
+            service.buildConfig().ifPresent(cfg -> details.put("builder", cfg.builder()));
+            String suffix = service.buildConfig().isPresent()
+                ? " — build the Service before starting it"
+                : "";
             return Result.err(DomainError.of(
                 "ARTIFACT_NOT_FOUND",
                 "No runnable artifact found for service '" + service.name() + "' (glob: '"
-                    + service.artifactGlob().orElse("none") + "', workingDir: '" + service.workingDir() + "')",
-                Map.of(
-                    "service", service.name(),
-                    "workingDir", service.workingDir().toString(),
-                    "artifactGlob", service.artifactGlob().orElse("")
-                )
+                    + service.artifactGlob().orElse("none") + "', workingDir: '" + service.workingDir() + "')" + suffix,
+                details
             ));
         }
         String artifact = artifactPath.get().toString();
@@ -375,6 +459,7 @@ public final class ProjectResolver {
 
     private static Result<ServiceDefinition, DomainError> resolveService(
         ServiceDraft draft,
+        Path configDir,
         RawProjectConfig rawConfig,
         Map<Path, Map<String, String>> parsedEnvFiles,
         Map<String, String> topEnvFileOverlay,
@@ -460,10 +545,16 @@ public final class ProjectResolver {
             finalEnv.put(entry.getKey(), okVal(hostExpanded));
         }
 
+        Result<Optional<ServiceBuildConfig>, DomainError> buildConfigRes = resolveServiceBuildConfig(
+            name, svc, draft, configDir, rawConfig, envFromFiles, hostEnv
+        );
+        if (buildConfigRes.isErr()) return buildConfigRes.castError();
+
         return Result.ok(new ServiceDefinition(
             name,
             svc.port(),
             rtName,
+            okVal(buildConfigRes),
             draft.repository(),
             draft.workingDir(),
             normalizeHealthPath(okVal(healthRes)),
@@ -475,6 +566,77 @@ public final class ProjectResolver {
             SecretEnv.of(finalEnv),
             svc.envFiles()
         ));
+    }
+
+    private static Result<Optional<ServiceBuildConfig>, DomainError> resolveServiceBuildConfig(
+        String name,
+        RawProjectConfig.RawServiceConfig svc,
+        ServiceDraft draft,
+        Path configDir,
+        RawProjectConfig rawConfig,
+        Map<String, String> envFromFiles,
+        Map<String, String> hostEnv
+    ) {
+        Optional<String> effectiveBuilderName = svc.builder().or(() -> rawConfig.defaults().builder());
+        if (effectiveBuilderName.isEmpty()) {
+            return Result.ok(Optional.empty());
+        }
+        String builderName = effectiveBuilderName.get();
+        RawProjectConfig.RawBuilderConfig builderCfg = rawConfig.builders().get(builderName);
+        if (builderCfg == null) {
+            return Result.err(DomainError.of(
+                "CONFIG_UNKNOWN_BUILDER",
+                "Service '" + name + "' references unknown builder '" + builderName + "'",
+                Map.of("service", name, "builder", builderName)
+            ));
+        }
+
+        Map<String, VarValue> vars = draft.effectiveVars();
+        Result<List<String>, DomainError> hostExpandedBuildCmd = expandHostEnvInArgv(
+            builderCfg.command(), hostEnv, "services." + name + ".buildCommand"
+        );
+        if (hostExpandedBuildCmd.isErr()) return hostExpandedBuildCmd.castError();
+        Result<List<String>, DomainError> buildCmdRes = TemplateExpander.expandArgv(
+            okVal(hostExpandedBuildCmd), vars, Set.of(), "services." + name + ".buildCommand"
+        );
+        if (buildCmdRes.isErr()) return buildCmdRes.castError();
+
+        Path buildWorkingDir = draft.workingDir();
+        if (builderCfg.workingDir().isPresent()) {
+            String wdCtx = "builders." + builderName + ".workingDir";
+            Result<String, DomainError> hostWd = EnvFileParser.expandHostEnvRefs(
+                builderCfg.workingDir().get(), hostEnv, wdCtx
+            );
+            if (hostWd.isErr()) return hostWd.castError();
+            Result<String, DomainError> expandedWd = TemplateExpander.expandScalar(
+                okVal(hostWd), vars, Set.of(), wdCtx
+            );
+            if (expandedWd.isErr()) return expandedWd.castError();
+            Result<Path, DomainError> resolvedWd = resolvePath(configDir, okVal(expandedWd), wdCtx);
+            if (resolvedWd.isErr()) return resolvedWd.castError();
+            buildWorkingDir = okVal(resolvedWd);
+        }
+
+        Map<String, String> buildConfigEnvLayer = new LinkedHashMap<>(rawConfig.defaults().env());
+        buildConfigEnvLayer.putAll(builderCfg.env());
+        buildConfigEnvLayer.putAll(svc.env());
+
+        Map<String, String> finalBuildEnv = new LinkedHashMap<>(envFromFiles);
+        for (Map.Entry<String, String> entry : buildConfigEnvLayer.entrySet()) {
+            String ctx = "services." + name + ".buildEnv." + entry.getKey();
+            Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(entry.getValue(), vars, Set.of(), ctx);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
+            Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, ctx);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
+            finalBuildEnv.put(entry.getKey(), okVal(hostExpanded));
+        }
+
+        return Result.ok(Optional.of(new ServiceBuildConfig(
+            builderName,
+            okVal(buildCmdRes),
+            buildWorkingDir,
+            SecretEnv.of(finalBuildEnv)
+        )));
     }
 
     private static Result<Optional<GatewayDefinition>, DomainError> resolveGateway(
@@ -489,6 +651,7 @@ public final class ProjectResolver {
         Map<String, VarValue> gwVars = new LinkedHashMap<>(plan.expandedDefaultsVars());
         gwVars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
         plan.repositoriesRoot().ifPresent(p -> gwVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> gwVars.put("user", new VarValue.Scalar(u)));
         gwVars.put("port", new VarValue.Scalar(Integer.toString(gw.port())));
 
         Result<List<String>, DomainError> hostExpandedGwCmd = expandHostEnvInArgv(
@@ -530,13 +693,55 @@ public final class ProjectResolver {
             gwEnv.put(entry.getKey(), okVal(hostExpanded));
         }
 
+        Map<String, String> resolvedProxyHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : gw.proxyHeaders().entrySet()) {
+            String ctx = "gateway.proxyHeaders." + entry.getKey();
+            Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(entry.getValue(), gwVars, Set.of(), ctx);
+            if (tplExpanded.isErr()) return tplExpanded.castError();
+            Result<String, DomainError> hostExpanded = EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, ctx);
+            if (hostExpanded.isErr()) return hostExpanded.castError();
+            resolvedProxyHeaders.put(entry.getKey(), okVal(hostExpanded));
+        }
+
+        Optional<FallbackRemote> resolvedFallbackRemote = Optional.empty();
+        if (gw.fallbackRemote().isPresent()) {
+            RawProjectConfig.RawFallbackRemoteConfig rawFb = gw.fallbackRemote().get();
+            Result<String, DomainError> targetRes = expandScalarAndHostEnv(
+                rawFb.targetUrl(), gwVars, hostEnv, "gateway.fallbackRemote.targetUrl"
+            );
+            if (targetRes.isErr()) return targetRes.castError();
+            String targetUrl = okVal(targetRes).trim();
+            if (targetUrl.isBlank()) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Resolved gateway.fallbackRemote.targetUrl must not be blank",
+                    Map.of("field", "gateway.fallbackRemote.targetUrl")
+                ));
+            }
+
+            Optional<String> stripPrefix = Optional.empty();
+            if (rawFb.stripPrefix().isPresent()) {
+                Result<String, DomainError> stripRes = expandScalarAndHostEnv(
+                    rawFb.stripPrefix().get(), gwVars, hostEnv, "gateway.fallbackRemote.stripPrefix"
+                );
+                if (stripRes.isErr()) return stripRes.castError();
+                String trimmedStrip = okVal(stripRes).trim();
+                if (!trimmedStrip.isEmpty()) {
+                    stripPrefix = Optional.of(trimmedStrip);
+                }
+            }
+            resolvedFallbackRemote = Optional.of(new FallbackRemote(targetUrl, stripPrefix));
+        }
+
         return Result.ok(Optional.of(new GatewayDefinition(
             gw.type(),
             gw.port(),
             normalizeHealthPath(okVal(healthRes)),
             okVal(cmdRes),
             workingDir,
-            SecretEnv.of(gwEnv)
+            SecretEnv.of(gwEnv),
+            resolvedProxyHeaders,
+            resolvedFallbackRemote
         )));
     }
 
@@ -608,6 +813,7 @@ public final class ProjectResolver {
                 merged.put(name, new RawProjectConfig.RawServiceConfig(
                     override.port().isPresent() ? override.port() : base.port(),
                     override.runtime().isPresent() ? override.runtime() : base.runtime(),
+                    override.builder().isPresent() ? override.builder() : base.builder(),
                     override.repository().isPresent() ? override.repository() : base.repository(),
                     override.repositoryUrl().isPresent() ? override.repositoryUrl() : base.repositoryUrl(),
                     override.workingDir().isPresent() ? override.workingDir() : base.workingDir(),
@@ -732,6 +938,7 @@ public final class ProjectResolver {
         }
         vars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
         plan.repositoriesRoot().ifPresent(p -> vars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> vars.put("user", new VarValue.Scalar(u)));
         vars.put("service", new VarValue.Scalar("service"));
         vars.put("port", new VarValue.Scalar("0"));
         vars.put("repository", new VarValue.Scalar(plan.configDir().toString()));
@@ -767,6 +974,34 @@ public final class ProjectResolver {
         );
         if (envCheck.isErr()) return envCheck.castError();
         return Result.ok(procomp.core.common.Unit.VALUE);
+    }
+
+    private static Result<Map<String, String>, DomainError> validateBuilderTemplates(
+        String builderName,
+        RawProjectConfig.RawBuilderConfig builder,
+        Map<String, VarValue> validationVars,
+        Map<String, String> hostEnv
+    ) {
+        String prefix = "builders." + builderName;
+        Map<String, VarValue> buildValidationVars = new LinkedHashMap<>(validationVars);
+        buildValidationVars.remove("artifact");
+        Result<List<String>, DomainError> hostCmd = expandHostEnvInArgv(builder.command(), hostEnv, prefix + ".command");
+        if (hostCmd.isErr()) return hostCmd.castError();
+        Result<List<String>, DomainError> cmdCheck = TemplateExpander.expandArgv(
+            okVal(hostCmd), buildValidationVars, Set.of(), prefix + ".command"
+        );
+        if (cmdCheck.isErr()) return cmdCheck.castError();
+        if (builder.workingDir().isPresent()) {
+            Result<String, DomainError> hostWd = EnvFileParser.expandHostEnvRefs(
+                builder.workingDir().get(), hostEnv, prefix + ".workingDir"
+            );
+            if (hostWd.isErr()) return hostWd.castError();
+            Result<String, DomainError> wdCheck = TemplateExpander.expandScalar(
+                okVal(hostWd), buildValidationVars, Set.of(), prefix + ".workingDir"
+            );
+            if (wdCheck.isErr()) return wdCheck.castError();
+        }
+        return expandAndValidateEnvMap(builder.env(), buildValidationVars, hostEnv, prefix + ".env");
     }
 
     private static Result<Map<String, String>, DomainError> validateRuntimeTemplates(
@@ -867,6 +1102,17 @@ public final class ProjectResolver {
 
     private static Optional<String> normalizeHealthPath(Optional<String> raw) {
         return raw.map(String::trim).filter(s -> !s.isEmpty());
+    }
+
+    private static Result<String, DomainError> expandScalarAndHostEnv(
+        String raw,
+        Map<String, VarValue> vars,
+        Map<String, String> hostEnv,
+        String context
+    ) {
+        Result<String, DomainError> tplExpanded = TemplateExpander.expandScalar(raw, vars, Set.of(), context);
+        if (tplExpanded.isErr()) return tplExpanded.castError();
+        return EnvFileParser.expandHostEnvRefs(okVal(tplExpanded), hostEnv, context);
     }
 
     private static Result<Optional<String>, DomainError> expandOptionalScalar(

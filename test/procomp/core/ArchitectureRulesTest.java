@@ -79,11 +79,13 @@ public final class ArchitectureRulesTest {
 
     public static void testCoreDomainsRemainDecoupled() throws IOException {
         List<String> violations = new ArrayList<>();
-        checkForbiddenImports(Path.of("src/procomp/core/common"), List.of("procomp.core.project.", "procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway."), violations);
-        checkForbiddenImports(Path.of("src/procomp/core/project"), List.of("procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway."), violations);
-        checkForbiddenImports(Path.of("src/procomp/core/routing"), List.of("procomp.core.process.", "procomp.core.gateway."), violations);
-        checkForbiddenImports(Path.of("src/procomp/core/process"), List.of("procomp.core.routing.", "procomp.core.gateway."), violations);
-        checkForbiddenImports(Path.of("src/procomp/core/gateway"), List.of("procomp.core.process."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/common"), List.of("procomp.core.project.", "procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway.", "procomp.core.build.", "procomp.core.git."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/project"), List.of("procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway.", "procomp.core.build.", "procomp.core.git."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/routing"), List.of("procomp.core.process.", "procomp.core.gateway.", "procomp.core.build.", "procomp.core.git."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/process"), List.of("procomp.core.routing.", "procomp.core.gateway.", "procomp.core.build.", "procomp.core.git."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/build"), List.of("procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway.", "procomp.core.git."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/git"), List.of("procomp.core.routing.", "procomp.core.process.", "procomp.core.gateway.", "procomp.core.build."), violations);
+        checkForbiddenImports(Path.of("src/procomp/core/gateway"), List.of("procomp.core.process.", "procomp.core.build.", "procomp.core.git."), violations);
         Assert.assertTrue(violations.isEmpty(), "Core domain decoupling violations:\n" + String.join("\n", violations));
     }
 

@@ -1,14 +1,19 @@
 package procomp.web;
 
+import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.DomainError;
 import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
+import procomp.core.common.Unit;
 import procomp.core.process.InspectionReport;
 import procomp.core.project.ProfileDefinition;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
+import procomp.shell.BuildShell;
+import procomp.shell.BuildShell.BuildRequest;
+import procomp.shell.BuildShell.CancelResult;
 import procomp.shell.CliCommandFormatter;
 import procomp.shell.DomainJson;
 import procomp.shell.GatewayShell;
@@ -17,7 +22,9 @@ import procomp.shell.GatewayShell.GatewayStartRequest;
 import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
+import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
+import procomp.shell.LogsShell.GatewayLogsRequest;
 import procomp.shell.LogsShell.LogsRequest;
 import procomp.shell.LogsShell.LogsResult;
 import procomp.shell.ProcessShell;
@@ -45,6 +52,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -61,6 +71,7 @@ public final class ApiRouter {
 
     private static final String SERVICES_PREFIX = "/api/services/";
     private static final String PROFILES_PREFIX = "/api/profiles/";
+    private static final String GIT_BRANCHES_PREFIX = "/api/git/branches/";
 
     private final ProcompRuntime runtime;
     private final LiveProjectHolder projectHolder;
@@ -68,6 +79,8 @@ public final class ApiRouter {
     private final int boundPort;
     private final Duration logsPollInterval;
     private final ReentrantLock mutationLock = new ReentrantLock();
+    private final ConcurrentHashMap<String, Boolean> launchingBuilds = new ConcurrentHashMap<>();
+    private final Executor buildExecutor;
 
     public ApiRouter(ProcompRuntime runtime, LiveProjectHolder projectHolder, int boundPort) {
         this(runtime, projectHolder, boundPort, LogsShell.DEFAULT_POLL_INTERVAL);
@@ -79,6 +92,16 @@ public final class ApiRouter {
         int boundPort,
         Duration logsPollInterval
     ) {
+        this(runtime, projectHolder, boundPort, logsPollInterval, defaultBuildExecutor());
+    }
+
+    public ApiRouter(
+        ProcompRuntime runtime,
+        LiveProjectHolder projectHolder,
+        int boundPort,
+        Duration logsPollInterval,
+        Executor buildExecutor
+    ) {
         this.runtime = Objects.requireNonNull(runtime, "runtime must not be null");
         this.projectHolder = Objects.requireNonNull(projectHolder, "projectHolder must not be null");
         this.cli = projectHolder.configOverride()
@@ -89,6 +112,15 @@ public final class ApiRouter {
         }
         this.boundPort = boundPort;
         this.logsPollInterval = Objects.requireNonNull(logsPollInterval, "logsPollInterval must not be null");
+        this.buildExecutor = Objects.requireNonNull(buildExecutor, "buildExecutor must not be null");
+    }
+
+    private static Executor defaultBuildExecutor() {
+        return Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "procomp-web-build");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
@@ -101,7 +133,8 @@ public final class ApiRouter {
             return "POST".equalsIgnoreCase(method);
         }
         if ("GET".equalsIgnoreCase(method)) {
-            return extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
+            return "/api/gateway/logs/stream".equals(path)
+                || extractSegment(path, SERVICES_PREFIX, "/logs/stream").isPresent();
         }
         return false;
     }
@@ -200,12 +233,95 @@ public final class ApiRouter {
             return handleGatewayReconcile();
         }
 
+        if ("/api/gateway/logs".equals(path)) {
+            if (!"GET".equals(method)) {
+                return methodNotAllowed(method, "GET");
+            }
+            return handleGatewayLogs(request.rawQuery());
+        }
+
+        if ("/api/gateway/logs/stream".equals(path)) {
+            return methodNotAllowed(method, "GET");
+        }
+
+        if ("/api/git/status".equals(path)) {
+            if (!"GET".equals(method)) {
+                return methodNotAllowed(method, "GET");
+            }
+            return handleGitStatus(request.rawQuery());
+        }
+
+        if (path.startsWith(GIT_BRANCHES_PREFIX) && path.length() > GIT_BRANCHES_PREFIX.length()) {
+            if (!"GET".equals(method)) {
+                return methodNotAllowed(method, "GET");
+            }
+            return handleGitBranches(path.substring(GIT_BRANCHES_PREFIX.length()));
+        }
+
+        if ("/api/git/clone".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitBatchOp("clone", request);
+        }
+
+        if ("/api/git/fetch".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitBatchOp("fetch", request);
+        }
+
+        if ("/api/git/pull".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitBatchOp("pull", request);
+        }
+
+        if ("/api/git/switch".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitSwitch(request);
+        }
+
+        if ("/api/git/stash".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitStash(request);
+        }
+
+        if ("/api/git/cancel".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitCancel(request);
+        }
+
         Optional<String> profileUseSegment = extractSegment(path, PROFILES_PREFIX, "/use");
         if (profileUseSegment.isPresent()) {
             if (!"POST".equals(method)) {
                 return methodNotAllowed(method, "POST");
             }
             return handleUseProfile(profileUseSegment.get());
+        }
+
+        Optional<String> buildCancelSegment = extractSegment(path, SERVICES_PREFIX, "/build/cancel");
+        if (buildCancelSegment.isPresent()) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleCancelBuild(buildCancelSegment.get());
+        }
+
+        Optional<String> buildSegment = extractSegment(path, SERVICES_PREFIX, "/build");
+        if (buildSegment.isPresent()) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleBuildService(buildSegment.get(), request);
         }
 
         Optional<String> inspectSegment = extractSegment(path, SERVICES_PREFIX, "/inspect");
@@ -246,6 +362,10 @@ public final class ApiRouter {
         try {
             if ("/api/services/start/stream".equals(path)) {
                 handleStartServicesStream(request, sink);
+                return;
+            }
+            if ("/api/gateway/logs/stream".equals(path)) {
+                handleGatewayLogsStream(request, sink);
                 return;
             }
             Optional<String> logsStreamSegment = extractSegment(path, SERVICES_PREFIX, "/logs/stream");
@@ -318,11 +438,118 @@ public final class ApiRouter {
             return domainErrorResponse(err, cliCommand);
         }
         InspectionReport report = ((Result.Ok<InspectionReport, DomainError>) inspectRes).value();
+        Result<ObservedBuildRun, DomainError> buildRes =
+            runtime.buildShell().flatMap(b -> b.inspectBuild(project, serviceName));
+        Optional<ObservedBuildRun> buildRun = buildRes instanceof Result.Ok<ObservedBuildRun, DomainError>(ObservedBuildRun obs)
+            ? Optional.of(obs)
+            : Optional.empty();
+        Optional<GitShell.RepositoryStatusRow> gitRow = Optional.empty();
+        var repoOpt = project.service(serviceName).flatMap(procomp.core.project.ServiceDefinition::repository);
+        if (repoOpt.isPresent()) {
+            Result<GitShell.RepositoryStatusRow, DomainError> gitRes =
+                runtime.gitShell().flatMap(g -> g.observeRepository(project, repoOpt.get()));
+            if (gitRes instanceof Result.Ok<GitShell.RepositoryStatusRow, DomainError>(var gr)) {
+                gitRow = Optional.of(gr);
+            }
+        }
         Map<String, JsonValue> envelope = new LinkedHashMap<>();
-        envelope.put("data", DomainJson.inspectionReport(project, report));
+        envelope.put("data", DomainJson.inspectionReport(project, report, buildRun, gitRow));
         envelope.put("cliCommand", Json.str(cliCommand));
         envelope.put("killConflictCliCommand", Json.str(killConflictCliCommand));
         return ApiResponse.json(200, Json.obj(envelope));
+    }
+
+    private ApiResponse handleBuildService(String rawName, ApiRequest request) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "service");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String serviceName = ((Result.Ok<String, DomainError>) nameRes).value();
+
+        Result<JsonValue.JsonObject, DomainError> objRes = parseJsonObject(request.body(), true);
+        if (objRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject obj = ((Result.Ok<JsonValue.JsonObject, DomainError>) objRes).value();
+        Result<Boolean, DomainError> forceRes = readOptionalBoolean(obj, "force", false);
+        if (forceRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        boolean force = ((Result.Ok<Boolean, DomainError>) forceRes).value();
+        String cliCommand = cli.build(List.of(serviceName), force);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<BuildShell, DomainError> shellRes = runtime.buildShell();
+        if (shellRes instanceof Result.Err<BuildShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        BuildShell buildShell = ((Result.Ok<BuildShell, DomainError>) shellRes).value();
+
+        Result<Unit, DomainError> validRes = buildShell.validateCanBuild(project, serviceName, force);
+        if (validRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+
+        String launchKey = project.name() + "\0" + serviceName;
+        if (!force && launchingBuilds.putIfAbsent(launchKey, Boolean.TRUE) != null) {
+            return domainErrorResponse(
+                DomainError.of("BUILD_ALREADY_RUNNING", "Build Run for service '" + serviceName + "' is already starting"),
+                cliCommand
+            );
+        }
+        if (force) {
+            launchingBuilds.put(launchKey, Boolean.TRUE);
+        }
+
+        buildExecutor.execute(() -> {
+            try {
+                buildShell.build(project, new BuildRequest(List.of(serviceName), force, Optional.empty()));
+            } finally {
+                launchingBuilds.remove(launchKey);
+            }
+        });
+
+        Map<String, JsonValue> data = new LinkedHashMap<>();
+        data.put("service", Json.str(serviceName));
+        data.put("status", Json.str("ACCEPTED"));
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", Json.obj(data));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(202, Json.obj(envelope));
+    }
+
+    private ApiResponse handleCancelBuild(String rawName) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "service");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String serviceName = ((Result.Ok<String, DomainError>) nameRes).value();
+        String cliCommand = cli.buildCancel(serviceName);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<BuildShell, DomainError> shellRes = runtime.buildShell();
+        if (shellRes instanceof Result.Err<BuildShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<CancelResult, DomainError> cancelRes =
+            ((Result.Ok<BuildShell, DomainError>) shellRes).value().cancel(project, serviceName);
+        if (cancelRes instanceof Result.Err<CancelResult, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        return okEnvelope(
+            DomainJson.cancelResult(project, ((Result.Ok<CancelResult, DomainError>) cancelRes).value()),
+            cliCommand
+        );
     }
 
     private ApiResponse handleUpdateRoutes(ApiRequest request) {
@@ -733,10 +960,25 @@ public final class ApiRouter {
         if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
+        Result<Boolean, DomainError> buildFlagRes = parseOptionalQueryBoolean(query, "build", false);
+        if (buildFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> gitFlagRes = parseOptionalQueryBoolean(query, "git", false);
+        if (gitFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = cli.logs(serviceName, stderr, false, lines, false);
+        boolean build = ((Result.Ok<Boolean, DomainError>) buildFlagRes).value();
+        boolean git = ((Result.Ok<Boolean, DomainError>) gitFlagRes).value();
+        if (build && git) {
+            return errorResponse(400, DomainError.of("INVALID_REQUEST", "Cannot combine 'build=true' and 'git=true'"), "");
+        }
+        String cliCommand = git
+            ? cli.gitLogs(serviceName, stderr, false, lines, false)
+            : cli.logs(serviceName, stderr, false, lines, false, build);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
@@ -749,7 +991,7 @@ public final class ApiRouter {
             return domainErrorResponse(err, cliCommand);
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, false));
+            .run(project, new LogsRequest(serviceName, stderr, false, lines, false, build, git));
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
@@ -793,10 +1035,28 @@ public final class ApiRouter {
             sendSseError(sink, err, "");
             return;
         }
+        Result<Boolean, DomainError> buildFlagRes = parseOptionalQueryBoolean(query, "build", false);
+        if (buildFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+        Result<Boolean, DomainError> gitFlagRes = parseOptionalQueryBoolean(query, "git", false);
+        if (gitFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
-        String cliCommand = cli.logs(serviceName, stderr, false, lines, true);
+        boolean build = ((Result.Ok<Boolean, DomainError>) buildFlagRes).value();
+        boolean git = ((Result.Ok<Boolean, DomainError>) gitFlagRes).value();
+        if (build && git) {
+            sendSseError(sink, DomainError.of("INVALID_REQUEST", "Cannot combine 'build=true' and 'git=true'"), "");
+            return;
+        }
+        String cliCommand = git
+            ? cli.gitLogs(serviceName, stderr, false, lines, true)
+            : cli.logs(serviceName, stderr, false, lines, true, build);
 
         sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
 
@@ -818,7 +1078,106 @@ public final class ApiRouter {
             return;
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, true), logsPollInterval, sink::isOpen);
+            .run(project, new LogsRequest(serviceName, stderr, false, lines, true, build, git), logsPollInterval, sink::isOpen);
+        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+        }
+    }
+
+    private ApiResponse handleGatewayLogs(String rawQuery) {
+        Result<Map<String, String>, DomainError> queryRes = parseQuery(rawQuery);
+        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+
+        Result<Integer, DomainError> linesRes = parseOptionalQueryNonNegativeInt(query, "lines", LogsRequest.DEFAULT_LINES);
+        if (linesRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> errFlagRes = parseOptionalQueryBoolean(query, "err", false);
+        if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+
+        int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
+        boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
+        String cliCommand = cli.gatewayLogs(stderr, false, lines, false);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<LogsShell, DomainError> shellRes = runtime.logsShell();
+        if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, false));
+        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        LogsResult result = ((Result.Ok<LogsResult, DomainError>) logsRes).value();
+        if (!(result instanceof LogsResult.RawTail(Path path, String text))) {
+            return errorResponse(
+                500,
+                DomainError.of("LOGS_UNEXPECTED_RESULT", "Unexpected LogsShell result for non-follow request"),
+                cliCommand
+            );
+        }
+
+        Map<String, JsonValue> data = new LinkedHashMap<>();
+        data.put("path", Json.str(path.toString()));
+        data.put("text", Json.str(text));
+        return okEnvelope(Json.obj(data), cliCommand);
+    }
+
+    private void handleGatewayLogsStream(ApiRequest request, SseSink sink) {
+        Result<Map<String, String>, DomainError> queryRes = parseQuery(request.rawQuery());
+        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+
+        Result<Integer, DomainError> linesRes = parseOptionalQueryNonNegativeInt(query, "lines", LogsRequest.DEFAULT_LINES);
+        if (linesRes instanceof Result.Err<Integer, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+        Result<Boolean, DomainError> errFlagRes = parseOptionalQueryBoolean(query, "err", false);
+        if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            sendSseError(sink, err, "");
+            return;
+        }
+
+        int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
+        boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
+        String cliCommand = cli.gatewayLogs(stderr, false, lines, true);
+
+        sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+            return;
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        ProcompRuntime streamRuntime = runtime.withObserver(event -> {
+            if (event instanceof ProgressEvent.LogLine) {
+                sink.send("log", Json.stringify(DomainJson.progressEvent(event)));
+            }
+        });
+        Result<LogsShell, DomainError> shellRes = streamRuntime.logsShell();
+        if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
+            sendSseError(sink, err, cliCommand);
+            return;
+        }
+        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, true), logsPollInterval, sink::isOpen);
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
         }
@@ -942,15 +1301,294 @@ public final class ApiRouter {
         sink.send("error", Json.stringify(Json.obj(envelope)));
     }
 
+    private ApiResponse handleGitStatus(String rawQuery) {
+        Result<Map<String, String>, DomainError> queryRes = parseQuery(rawQuery);
+        if (queryRes instanceof Result.Err<Map<String, String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Map<String, String> query = ((Result.Ok<Map<String, String>, DomainError>) queryRes).value();
+        Result<Boolean, DomainError> localRes = parseOptionalQueryBoolean(query, "local", false);
+        if (localRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> fetchRes = parseOptionalQueryBoolean(query, "fetch", false);
+        if (fetchRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> allRes = parseOptionalQueryBoolean(query, "all", false);
+        if (allRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        boolean localOnly = ((Result.Ok<Boolean, DomainError>) localRes).value();
+        boolean fetch = ((Result.Ok<Boolean, DomainError>) fetchRes).value();
+        boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
+        String cliCommand = cli.gitStatus(localOnly, fetch, all, false);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitShell.GitStatusReport, DomainError> statusRes = ((Result.Ok<GitShell, DomainError>) shellRes).value()
+            .status(project, List.of(), localOnly, fetch, all, false, Optional.empty());
+        if (statusRes instanceof Result.Err<GitShell.GitStatusReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        return okEnvelope(DomainJson.gitStatusReport(((Result.Ok<GitShell.GitStatusReport, DomainError>) statusRes).value()), cliCommand);
+    }
+
+    private ApiResponse handleGitBranches(String rawTarget) {
+        Result<String, DomainError> targetRes = decodeSegment(rawTarget, "target");
+        if (targetRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String target = ((Result.Ok<String, DomainError>) targetRes).value();
+        String cliCommand = cli.gitBranches(target, false);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitShell.BranchesReport, DomainError> brRes = ((Result.Ok<GitShell, DomainError>) shellRes).value()
+            .branches(project, target);
+        if (brRes instanceof Result.Err<GitShell.BranchesReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        return okEnvelope(DomainJson.gitBranchesReport(((Result.Ok<GitShell.BranchesReport, DomainError>) brRes).value()), cliCommand);
+    }
+
+    private ApiResponse handleGitBatchOp(String op, ApiRequest request) {
+        Result<JsonValue.JsonObject, DomainError> bodyRes = parseJsonObject(request.body(), true);
+        if (bodyRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject body = ((Result.Ok<JsonValue.JsonObject, DomainError>) bodyRes).value();
+        Result<List<String>, DomainError> targetsRes = readStringList(body, "targets", false);
+        if (targetsRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> allRes = readOptionalBoolean(body, "all", false);
+        if (allRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> forceRes = readOptionalBoolean(body, "force", false);
+        if (forceRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        List<String> targets = ((Result.Ok<List<String>, DomainError>) targetsRes).value();
+        boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
+        boolean force = ((Result.Ok<Boolean, DomainError>) forceRes).value();
+        String cliCommand = cli.gitOp(op, targets, all, force);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        GitShell shell = ((Result.Ok<GitShell, DomainError>) shellRes).value();
+        Result<GitShell.GitBatchReport, DomainError> batchRes = switch (op) {
+            case "clone" -> shell.cloneRepositories(project, targets, all, force, Optional.empty());
+            case "fetch" -> shell.fetch(project, targets, all, force, Optional.empty());
+            case "pull" -> shell.pull(project, targets, all, force, Optional.empty());
+            default -> Result.err(DomainError.of("INVALID_REQUEST", "Unsupported git op: " + op));
+        };
+        if (batchRes instanceof Result.Err<GitShell.GitBatchReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        GitShell.GitBatchReport report = ((Result.Ok<GitShell.GitBatchReport, DomainError>) batchRes).value();
+        int httpStatus = report.hasFailures() ? 409 : 200;
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", DomainJson.gitBatchReport(report));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(httpStatus, Json.obj(envelope));
+    }
+
+    private ApiResponse handleGitSwitch(ApiRequest request) {
+        Result<JsonValue.JsonObject, DomainError> bodyRes = parseJsonObject(request.body(), true);
+        if (bodyRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject body = ((Result.Ok<JsonValue.JsonObject, DomainError>) bodyRes).value();
+        Result<List<String>, DomainError> targetsRes = readStringList(body, "targets", false);
+        if (targetsRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> useDefaultRes = readOptionalBoolean(body, "default", false);
+        if (useDefaultRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> allRes = readOptionalBoolean(body, "all", false);
+        if (allRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> forceRes = readOptionalBoolean(body, "force", false);
+        if (forceRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Optional<String> branch = Optional.empty();
+        Optional<JsonValue> branchVal = body.get("branch");
+        if (branchVal.isPresent() && !(branchVal.get() instanceof JsonValue.JsonNull)) {
+            if (!(branchVal.get() instanceof JsonValue.JsonString(String b)) || b.isBlank()) {
+                return errorResponse(400, DomainError.of("INVALID_REQUEST", "Field 'branch' must be a non-blank string"), "");
+            }
+            branch = Optional.of(b);
+        }
+        List<String> targets = ((Result.Ok<List<String>, DomainError>) targetsRes).value();
+        boolean useDefault = ((Result.Ok<Boolean, DomainError>) useDefaultRes).value();
+        boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
+        boolean force = ((Result.Ok<Boolean, DomainError>) forceRes).value();
+        if (useDefault == branch.isPresent()) {
+            return errorResponse(400, DomainError.of("INVALID_REQUEST", "Provide either 'branch' or 'default: true'"), "");
+        }
+        String cliCommand = cli.gitSwitch(branch.orElse(""), useDefault, targets, all, force);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitShell.GitBatchReport, DomainError> res = ((Result.Ok<GitShell, DomainError>) shellRes).value()
+            .switchBranch(project, branch, useDefault, targets, all, force, Optional.empty());
+        if (res instanceof Result.Err<GitShell.GitBatchReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        GitShell.GitBatchReport report = ((Result.Ok<GitShell.GitBatchReport, DomainError>) res).value();
+        int httpStatus = report.hasFailures() ? 409 : 200;
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", DomainJson.gitBatchReport(report));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(httpStatus, Json.obj(envelope));
+    }
+
+    private ApiResponse handleGitStash(ApiRequest request) {
+        Result<JsonValue.JsonObject, DomainError> bodyRes = parseJsonObject(request.body(), true);
+        if (bodyRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject body = ((Result.Ok<JsonValue.JsonObject, DomainError>) bodyRes).value();
+        Result<List<String>, DomainError> targetsRes = readStringList(body, "targets", false);
+        if (targetsRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> allRes = readOptionalBoolean(body, "all", false);
+        if (allRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> includeUntrackedRes = readOptionalBoolean(body, "includeUntracked", true);
+        if (includeUntrackedRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> forceRes = readOptionalBoolean(body, "force", false);
+        if (forceRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Optional<String> message = Optional.empty();
+        Optional<JsonValue> msgVal = body.get("message");
+        if (msgVal.isPresent() && !(msgVal.get() instanceof JsonValue.JsonNull)) {
+            if (!(msgVal.get() instanceof JsonValue.JsonString(String m))) {
+                return errorResponse(400, DomainError.of("INVALID_REQUEST", "Field 'message' must be a string"), "");
+            }
+            if (!m.isBlank()) {
+                message = Optional.of(m);
+            }
+        }
+        List<String> targets = ((Result.Ok<List<String>, DomainError>) targetsRes).value();
+        boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
+        boolean includeUntracked = ((Result.Ok<Boolean, DomainError>) includeUntrackedRes).value();
+        boolean force = ((Result.Ok<Boolean, DomainError>) forceRes).value();
+        String cliCommand = cli.gitStashPush(targets, all, message.orElse(""), includeUntracked, force);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitShell.GitBatchReport, DomainError> res = ((Result.Ok<GitShell, DomainError>) shellRes).value()
+            .stashPush(project, targets, all, message, includeUntracked, force, Optional.empty());
+        if (res instanceof Result.Err<GitShell.GitBatchReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        GitShell.GitBatchReport report = ((Result.Ok<GitShell.GitBatchReport, DomainError>) res).value();
+        int httpStatus = report.hasFailures() ? 409 : 200;
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", DomainJson.gitBatchReport(report));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(httpStatus, Json.obj(envelope));
+    }
+
+    private ApiResponse handleGitCancel(ApiRequest request) {
+        Result<JsonValue.JsonObject, DomainError> bodyRes = parseJsonObject(request.body(), true);
+        if (bodyRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject body = ((Result.Ok<JsonValue.JsonObject, DomainError>) bodyRes).value();
+        Result<List<String>, DomainError> targetsRes = readStringList(body, "targets", false);
+        if (targetsRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        Result<Boolean, DomainError> allRes = readOptionalBoolean(body, "all", false);
+        if (allRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        List<String> targets = ((Result.Ok<List<String>, DomainError>) targetsRes).value();
+        boolean all = ((Result.Ok<Boolean, DomainError>) allRes).value();
+        String cliCommand = cli.gitCancel(targets, all);
+
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+        Result<GitShell, DomainError> shellRes = runtime.gitShell();
+        if (shellRes instanceof Result.Err<GitShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitShell.GitCancelReport, DomainError> res = ((Result.Ok<GitShell, DomainError>) shellRes).value()
+            .cancel(project, targets, all);
+        if (res instanceof Result.Err<GitShell.GitCancelReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        GitShell.GitCancelReport report = ((Result.Ok<GitShell.GitCancelReport, DomainError>) res).value();
+        int httpStatus = report.hasFailures() ? 409 : 200;
+        Map<String, JsonValue> envelope = new LinkedHashMap<>();
+        envelope.put("data", DomainJson.gitCancelReport(report));
+        envelope.put("cliCommand", Json.str(cliCommand));
+        return ApiResponse.json(httpStatus, Json.obj(envelope));
+    }
+
     public static int httpStatusFor(DomainError error) {
         String code = error.code();
         return switch (code) {
             case "FORBIDDEN_ORIGIN" -> 403;
             case "METHOD_NOT_ALLOWED" -> 405;
-            case "UNKNOWN_SERVICE", "UNKNOWN_PROFILE", "LOG_NOT_FOUND", "CONFIG_NOT_FOUND", "NOT_FOUND" -> 404;
-            case "PORT_CONFLICT", "GATEWAY_CONFLICT", "GATEWAY_UNMANAGED", "GATEWAY_NOT_HEALTHY", "CONFLICT_PID_UNKNOWN" -> 409;
+            case "UNKNOWN_SERVICE", "UNKNOWN_PROFILE", "LOG_NOT_FOUND", "CONFIG_NOT_FOUND", "NOT_FOUND", "GIT_UNKNOWN_TARGET" -> 404;
+            case "PORT_CONFLICT", "GATEWAY_CONFLICT", "GATEWAY_UNMANAGED", "GATEWAY_NOT_HEALTHY", "CONFLICT_PID_UNKNOWN",
+                "BUILD_ALREADY_RUNNING", "BUILD_RUN_UNKNOWN",
+                "GIT_RUN_IN_PROGRESS", "GIT_RUN_UNKNOWN_STATE", "GIT_DIRTY_WORKING_TREE", "GIT_NOT_CLONED", "GIT_NOT_A_REPOSITORY" -> 409;
             case "INVALID_REQUEST",
                 "INVALID_STOP_OPTIONS",
+                "NO_BUILDER_CONFIGURED",
                 "ROUTE_INVALID_VALUE",
                 "ROUTE_MISSING_SERVICES",
                 "GATEWAY_NOT_CONFIGURED",
@@ -960,6 +1598,11 @@ public final class ApiRouter {
                 "WORKING_DIR_NOT_FOUND",
                 "ARTIFACT_NOT_FOUND",
                 "REPOSITORY_NOT_FOUND",
+                "GIT_NO_REPOSITORY",
+                "GIT_NO_REMOTE_URL",
+                "GIT_INVALID_BRANCH",
+                "GIT_INVALID_ARGUMENTS",
+                "GIT_DEFAULT_BRANCH_UNKNOWN",
                 "JSON_PARSE_ERROR",
                 "ENV_FILE_PARSE_ERROR" -> 400;
             default -> {

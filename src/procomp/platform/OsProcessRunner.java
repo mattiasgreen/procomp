@@ -29,17 +29,79 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Cross-platform OS {@link ProcessRunner} adapter backed by {@link ProcessBuilder} and {@link ProcessHandle}.
- * Note: {@code rssBytes} is reported as {@link Optional#empty()} because {@link ProcessHandle} does not
- * expose resident memory size portably across OSes without external per-process tool shelling.
+ * Cross-platform OS {@link ProcessRunner} adapter backed by {@link ProcessBuilder} and {@link ProcessHandle},
+ * with best-effort batch RSS snapshots via {@code tasklist /FO CSV /NH} (Windows) or {@code ps -eo pid=,rss=} (POSIX).
  */
 public final class OsProcessRunner implements ProcessRunner {
 
     private static final int MAX_PARENT_DEPTH = 64;
     private static final Duration FORCE_KILL_WAIT = Duration.ofSeconds(5);
+    private static final long RSS_COMMAND_TIMEOUT_SECONDS = 5L;
 
     @Override
     public Result<SpawnedProcess, DomainError> spawnDetached(SpawnRequest request) {
+        return startProcess(request).map(started ->
+            new SpawnedProcess(started.process().pid(), started.startedAt(), started.commandLine())
+        );
+    }
+
+    @Override
+    public Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+        return startProcess(request).map(started -> new OsRunningProcess(
+            started.process(), started.startedAt(), started.commandLine()
+        ));
+    }
+
+    private record StartedProcess(Process process, Instant startedAt, String commandLine) {}
+
+    private static final class OsRunningProcess implements RunningProcess {
+        private final Process process;
+        private final Instant startedAt;
+        private final String commandLine;
+
+        OsRunningProcess(Process process, Instant startedAt, String commandLine) {
+            this.process = process;
+            this.startedAt = startedAt;
+            this.commandLine = commandLine;
+        }
+
+        @Override
+        public long pid() {
+            return process.pid();
+        }
+
+        @Override
+        public Instant startedAt() {
+            return startedAt;
+        }
+
+        @Override
+        public String commandLine() {
+            return commandLine;
+        }
+
+        @Override
+        public ExitOutcome awaitExit(Optional<Duration> timeout) {
+            Objects.requireNonNull(timeout, "timeout must not be null");
+            try {
+                if (timeout.isEmpty()) {
+                    int code = process.waitFor();
+                    return new ExitOutcome.Exited(code);
+                }
+                long millis = Math.max(0L, timeout.get().toMillis());
+                boolean exited = process.waitFor(millis, TimeUnit.MILLISECONDS);
+                if (!exited) {
+                    return ExitOutcome.TimedOut.INSTANCE;
+                }
+                return new ExitOutcome.Exited(process.exitValue());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ExitOutcome.Interrupted.INSTANCE;
+            }
+        }
+    }
+
+    private Result<StartedProcess, DomainError> startProcess(SpawnRequest request) {
         Objects.requireNonNull(request, "request must not be null");
         if (!Files.isDirectory(request.workingDir())) {
             return Result.err(DomainError.of(
@@ -69,7 +131,7 @@ public final class OsProcessRunner implements ProcessRunner {
             ProcessHandle.Info info = process.toHandle().info();
             Instant startedAt = info.startInstant().orElseGet(Instant::now);
             String commandLine = info.commandLine().orElseGet(() -> String.join(" ", effectiveCommand));
-            return Result.ok(new SpawnedProcess(process.pid(), startedAt, commandLine));
+            return Result.ok(new StartedProcess(process, startedAt, commandLine));
         } catch (IOException e) {
             return Result.err(DomainError.of(
                 "PROCESS_SPAWN_ERROR",
@@ -112,6 +174,59 @@ public final class OsProcessRunner implements ProcessRunner {
     @Override
     public boolean isAlive(long pid) {
         return pid > 0 && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+    }
+
+    @Override
+    public Map<Long, Long> snapshotRssBytes() {
+        boolean isWindows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+        List<String> cmd = isWindows
+            ? List.of("tasklist", "/FO", "CSV", "/NH")
+            : List.of("ps", "-eo", "pid=,rss=");
+        Optional<String> out = runCommandQuiet(cmd);
+        if (out.isEmpty()) {
+            return Map.of();
+        }
+        return isWindows
+            ? OsRssParser.parseWindowsTasklistCsv(out.get())
+            : OsRssParser.parsePosixPsRss(out.get());
+    }
+
+    private static Optional<String> runCommandQuiet(List<String> command) {
+        Process process = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            process = pb.start();
+            Process proc = process;
+            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return proc.getInputStream().readAllBytes();
+                } catch (IOException ignored) {
+                    return new byte[0];
+                }
+            });
+            boolean finished = process.waitFor(RSS_COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return Optional.empty();
+            }
+            if (process.exitValue() != 0) {
+                return Optional.empty();
+            }
+            byte[] bytes = outputFuture.get(1, TimeUnit.SECONDS);
+            return Optional.of(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (process != null) {
+                process.destroyForcibly();
+            }
+            return Optional.empty();
+        } catch (IOException | ExecutionException | TimeoutException ignored) {
+            if (process != null) {
+                process.destroyForcibly();
+            }
+            return Optional.empty();
+        }
     }
 
     @Override

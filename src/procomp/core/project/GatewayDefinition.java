@@ -1,7 +1,10 @@
 package procomp.core.project;
 
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -14,8 +17,21 @@ public record GatewayDefinition(
     Optional<String> healthPath,
     List<String> command,
     Optional<Path> workingDir,
-    SecretEnv env
+    SecretEnv env,
+    Map<String, String> proxyHeaders,
+    Optional<FallbackRemote> fallbackRemote
 ) {
+    public GatewayDefinition(
+        String type,
+        int port,
+        Optional<String> healthPath,
+        List<String> command,
+        Optional<Path> workingDir,
+        SecretEnv env
+    ) {
+        this(type, port, healthPath, command, workingDir, env, Map.of(), Optional.empty());
+    }
+
     public GatewayDefinition {
         if (type == null || type.isBlank()) {
             throw new IllegalArgumentException("GatewayDefinition type must be non-blank");
@@ -27,6 +43,9 @@ public record GatewayDefinition(
         command = List.copyOf(command);
         Objects.requireNonNull(workingDir);
         Objects.requireNonNull(env);
+        Objects.requireNonNull(proxyHeaders);
+        proxyHeaders = Collections.unmodifiableMap(new LinkedHashMap<>(proxyHeaders));
+        Objects.requireNonNull(fallbackRemote);
     }
 
     public String adminUrl() {

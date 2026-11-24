@@ -12,6 +12,7 @@ public record ServiceDefinition(
     String name,
     Optional<Integer> port,
     String runtime,
+    Optional<ServiceBuildConfig> buildConfig,
     Optional<RepositoryRef> repository,
     Path workingDir,
     Optional<String> healthPath,
@@ -36,6 +37,7 @@ public record ServiceDefinition(
         if (runtime == null || runtime.isBlank()) {
             throw new IllegalArgumentException("ServiceDefinition runtime must be non-blank");
         }
+        Objects.requireNonNull(buildConfig);
         Objects.requireNonNull(repository);
         Objects.requireNonNull(workingDir);
         Objects.requireNonNull(healthPath);

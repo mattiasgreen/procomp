@@ -6,6 +6,7 @@ import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.Ownership;
+import procomp.core.process.PortBinding;
 import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.core.project.ServiceDefinition;
@@ -98,6 +99,23 @@ public final class ProcessShell {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle must not be null");
     }
 
+    Result<Map<Integer, PortBinding>, DomainError> snapshotServicePorts(Project project) {
+        Objects.requireNonNull(project, "project must not be null");
+        Set<Integer> ports = new LinkedHashSet<>();
+        for (ServiceDefinition service : project.services().values()) {
+            service.port().ifPresent(ports::add);
+        }
+        return lifecycle.snapshotPorts(ports);
+    }
+
+    Map<Long, Long> snapshotRssBytes() {
+        return lifecycle.snapshotRssBytes();
+    }
+
+    Optional<Long> resolveRssBytes(DiscoveryResult discovery, Map<Long, Long> rssSnapshot) {
+        return lifecycle.resolveRssBytes(discovery, rssSnapshot);
+    }
+
     /**
      * Performs read-only Discovery for a named Service without modifying any state or killing processes.
      */
@@ -108,6 +126,20 @@ public final class ProcessShell {
             return Result.err(unknownServiceError(project, serviceName));
         }
         return lifecycle.discoverService(project.name(), svcOpt.get()).map(DiscoveryContext::discovery);
+    }
+
+    Result<DiscoveryResult, DomainError> discoverService(
+        Project project,
+        String serviceName,
+        Map<Integer, PortBinding> portSnapshot
+    ) {
+        Objects.requireNonNull(project, "project must not be null");
+        Optional<ServiceDefinition> svcOpt = requireService(project, serviceName);
+        if (svcOpt.isEmpty()) {
+            return Result.err(unknownServiceError(project, serviceName));
+        }
+        return lifecycle.discoverService(project.name(), svcOpt.get(), Optional.of(portSnapshot))
+            .map(DiscoveryContext::discovery);
     }
 
     /**
@@ -130,7 +162,8 @@ public final class ProcessShell {
 
         Optional<String> liveGatewayRoute = Optional.empty();
         if (project.gateway().isPresent()) {
-            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes = gatewayShell.status(project, routing);
+            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes =
+                gatewayShell.status(project, routing, Map.of());
             if (gwStatusRes instanceof Result.Err<GatewayShell.GatewayStatusReport, DomainError>(DomainError err)) {
                 return Result.err(err);
             }

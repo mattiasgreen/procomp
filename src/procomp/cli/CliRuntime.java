@@ -6,10 +6,13 @@ import procomp.platform.FsConfigSource;
 import procomp.platform.FsProjectFiles;
 import procomp.platform.FsStateStore;
 import procomp.platform.JdkHttpClient;
+import procomp.platform.OsGitRepositoryReader;
 import procomp.platform.OsPortScanner;
 import procomp.platform.OsProcessRunner;
 import procomp.platform.SystemClock;
+import procomp.shell.BuildShell;
 import procomp.shell.GatewayShell;
+import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
 import procomp.shell.ProcessShell;
 import procomp.shell.ProcompRuntime;
@@ -18,6 +21,7 @@ import procomp.shell.RoutingShell;
 import procomp.shell.StatusShell;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.GitRepositoryReader;
 import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
 import procomp.shell.ports.ProcessRunner;
@@ -75,6 +79,7 @@ public final class CliRuntime {
             .portScanner(new OsPortScanner())
             .httpClient(new JdkHttpClient())
             .projectFiles(new FsProjectFiles())
+            .gitRepositoryReader(new OsGitRepositoryReader())
             .clock(new SystemClock())
             .observer(ProgressObserver.noop())
             .build();
@@ -164,6 +169,14 @@ public final class CliRuntime {
         return logsRuntime.logsShell();
     }
 
+    Result<BuildShell, DomainError> buildShell() {
+        return runtime.buildShell();
+    }
+
+    Result<GitShell, DomainError> gitShell() {
+        return runtime.gitShell();
+    }
+
     Result<ProcessShell, DomainError> processShell() {
         return runtime.processShell();
     }
@@ -216,6 +229,11 @@ public final class CliRuntime {
 
         Builder projectFiles(ProjectFiles projectFiles) {
             runtimeBuilder.projectFiles(projectFiles);
+            return this;
+        }
+
+        Builder gitRepositoryReader(GitRepositoryReader gitRepositoryReader) {
+            runtimeBuilder.gitRepositoryReader(gitRepositoryReader);
             return this;
         }
 

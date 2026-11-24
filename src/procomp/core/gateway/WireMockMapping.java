@@ -2,11 +2,15 @@ package procomp.core.gateway;
 
 import procomp.core.routing.Route;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Immutable WireMock reverse-proxy stub mapping descriptor for a single Service.
+ * Immutable WireMock reverse-proxy stub mapping descriptor for a single Service or catch-all fallbackRemote.
  */
 public record WireMockMapping(
     String id,
@@ -17,7 +21,10 @@ public record WireMockMapping(
     Route route,
     String urlPathPattern,
     String targetUrl,
-    Optional<String> proxyUrlPrefixToRemove
+    Optional<String> proxyUrlPrefixToRemove,
+    Map<String, String> additionalProxyRequestHeaders,
+    List<String> removeProxyRequestHeaders,
+    boolean fallbackRemote
 ) {
     public WireMockMapping {
         if (id == null || id.isBlank()) {
@@ -40,5 +47,9 @@ public record WireMockMapping(
             throw new IllegalArgumentException("WireMockMapping targetUrl must be non-blank");
         }
         Objects.requireNonNull(proxyUrlPrefixToRemove, "proxyUrlPrefixToRemove must not be null");
+        Objects.requireNonNull(additionalProxyRequestHeaders, "additionalProxyRequestHeaders must not be null");
+        additionalProxyRequestHeaders = Collections.unmodifiableMap(new LinkedHashMap<>(additionalProxyRequestHeaders));
+        Objects.requireNonNull(removeProxyRequestHeaders, "removeProxyRequestHeaders must not be null");
+        removeProxyRequestHeaders = List.copyOf(removeProxyRequestHeaders);
     }
 }

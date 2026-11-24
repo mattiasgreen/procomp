@@ -41,33 +41,34 @@ Summary: 8 started, 0 reused.
 
 $ procomp status
 Project: large-estate
-SERVICE  ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-svc-01   LOCAL   MANAGED  HEALTHY  18201  10001  5s      no
-svc-02   LOCAL   MANAGED  HEALTHY  18202  10002  5s      no
-svc-03   LOCAL   MANAGED  HEALTHY  18203  10003  5s      no
-svc-04   LOCAL   MANAGED  HEALTHY  18204  10004  5s      no
-svc-05   LOCAL   MANAGED  HEALTHY  18205  10005  5s      no
-svc-06   LOCAL   MANAGED  HEALTHY  18206  10006  5s      no
-svc-07   LOCAL   MANAGED  HEALTHY  18207  10007  5s      no
-svc-08   LOCAL   MANAGED  HEALTHY  18208  10008  5s      no
-svc-09   REMOTE  NONE     STOPPED  18209  -      -       no
-svc-10   REMOTE  NONE     STOPPED  18210  -      -       no
-svc-11   REMOTE  NONE     STOPPED  18211  -      -       no
-svc-12   REMOTE  NONE     STOPPED  18212  -      -       no
-svc-13   REMOTE  NONE     STOPPED  18213  -      -       no
-svc-14   REMOTE  NONE     STOPPED  18214  -      -       no
-svc-15   REMOTE  NONE     STOPPED  18215  -      -       no
-svc-16   REMOTE  NONE     STOPPED  18216  -      -       no
-svc-17   REMOTE  NONE     STOPPED  18217  -      -       no
-svc-18   REMOTE  NONE     STOPPED  18218  -      -       no
-svc-19   REMOTE  NONE     STOPPED  18219  -      -       no
-svc-20   REMOTE  NONE     STOPPED  18220  -      -       no
-svc-21   REMOTE  NONE     STOPPED  18221  -      -       no
-svc-22   REMOTE  NONE     STOPPED  18222  -      -       no
-svc-23   REMOTE  NONE     STOPPED  18223  -      -       no
-svc-24   REMOTE  NONE     STOPPED  18224  -      -       no
-svc-25   REMOTE  NONE     STOPPED  18225  -      -       no
-Gateway: port 18080, MANAGED, HEALTHY, PID 10000, IN SYNC
+SERVICE  ROUTE   OWNER    HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+svc-01   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18201  10001  5s      128 MB  no
+svc-02   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18202  10002  5s      128 MB  no
+svc-03   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18203  10003  5s      128 MB  no
+svc-04   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18204  10004  5s      128 MB  no
+svc-05   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18205  10005  5s      128 MB  no
+svc-06   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18206  10006  5s      128 MB  no
+svc-07   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18207  10007  5s      128 MB  no
+svc-08   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18208  10008  5s      128 MB  no
+svc-09   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18209  -      -       -       no
+svc-10   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18210  -      -       -       no
+svc-11   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18211  -      -       -       no
+svc-12   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18212  -      -       -       no
+svc-13   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18213  -      -       -       no
+svc-14   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18214  -      -       -       no
+svc-15   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18215  -      -       -       no
+svc-16   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18216  -      -       -       no
+svc-17   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18217  -      -       -       no
+svc-18   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18218  -      -       -       no
+svc-19   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18219  -      -       -       no
+svc-20   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18220  -      -       -       no
+svc-21   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18221  -      -       -       no
+svc-22   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18222  -      -       -       no
+svc-23   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18223  -      -       -       no
+svc-24   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18224  -      -       -       no
+svc-25   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18225  -      -       -       no
+Gateway: port 18080, MANAGED, HEALTHY, PID 10000, 96 MB RSS, IN SYNC
+Total RSS: 1.1 GB (8 services + Gateway)
 ```
 
 ## Step 3: Changing a single Route in a 25-service estate surfaces Gateway DRIFTED immediately
@@ -78,31 +79,32 @@ Updated route: svc-09 -> LOCAL
 
 $ procomp status
 Project: large-estate
-SERVICE  ROUTE   OWNER    HEALTH   PORT   PID    UPTIME  STALE
-svc-01   LOCAL   MANAGED  HEALTHY  18201  10001  10s     no
-svc-02   LOCAL   MANAGED  HEALTHY  18202  10002  10s     no
-svc-03   LOCAL   MANAGED  HEALTHY  18203  10003  10s     no
-svc-04   LOCAL   MANAGED  HEALTHY  18204  10004  10s     no
-svc-05   LOCAL   MANAGED  HEALTHY  18205  10005  10s     no
-svc-06   LOCAL   MANAGED  HEALTHY  18206  10006  10s     no
-svc-07   LOCAL   MANAGED  HEALTHY  18207  10007  10s     no
-svc-08   LOCAL   MANAGED  HEALTHY  18208  10008  10s     no
-svc-09   LOCAL   NONE     STOPPED  18209  -      -       no
-svc-10   REMOTE  NONE     STOPPED  18210  -      -       no
-svc-11   REMOTE  NONE     STOPPED  18211  -      -       no
-svc-12   REMOTE  NONE     STOPPED  18212  -      -       no
-svc-13   REMOTE  NONE     STOPPED  18213  -      -       no
-svc-14   REMOTE  NONE     STOPPED  18214  -      -       no
-svc-15   REMOTE  NONE     STOPPED  18215  -      -       no
-svc-16   REMOTE  NONE     STOPPED  18216  -      -       no
-svc-17   REMOTE  NONE     STOPPED  18217  -      -       no
-svc-18   REMOTE  NONE     STOPPED  18218  -      -       no
-svc-19   REMOTE  NONE     STOPPED  18219  -      -       no
-svc-20   REMOTE  NONE     STOPPED  18220  -      -       no
-svc-21   REMOTE  NONE     STOPPED  18221  -      -       no
-svc-22   REMOTE  NONE     STOPPED  18222  -      -       no
-svc-23   REMOTE  NONE     STOPPED  18223  -      -       no
-svc-24   REMOTE  NONE     STOPPED  18224  -      -       no
-svc-25   REMOTE  NONE     STOPPED  18225  -      -       no
-Gateway: port 18080, MANAGED, HEALTHY, PID 10000, DRIFTED (1)
+SERVICE  ROUTE   OWNER    HEALTH   BUILD       GIT      PORT   PID    UPTIME  RSS     STALE
+svc-01   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18201  10001  10s     128 MB  no
+svc-02   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18202  10002  10s     128 MB  no
+svc-03   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18203  10003  10s     128 MB  no
+svc-04   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18204  10004  10s     128 MB  no
+svc-05   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18205  10005  10s     128 MB  no
+svc-06   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18206  10006  10s     128 MB  no
+svc-07   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18207  10007  10s     128 MB  no
+svc-08   LOCAL   MANAGED  HEALTHY  NO_BUILDER  NO_REPO  18208  10008  10s     128 MB  no
+svc-09   LOCAL   NONE     STOPPED  NO_BUILDER  NO_REPO  18209  -      -       -       no
+svc-10   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18210  -      -       -       no
+svc-11   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18211  -      -       -       no
+svc-12   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18212  -      -       -       no
+svc-13   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18213  -      -       -       no
+svc-14   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18214  -      -       -       no
+svc-15   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18215  -      -       -       no
+svc-16   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18216  -      -       -       no
+svc-17   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18217  -      -       -       no
+svc-18   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18218  -      -       -       no
+svc-19   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18219  -      -       -       no
+svc-20   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18220  -      -       -       no
+svc-21   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18221  -      -       -       no
+svc-22   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18222  -      -       -       no
+svc-23   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18223  -      -       -       no
+svc-24   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18224  -      -       -       no
+svc-25   REMOTE  NONE     STOPPED  NO_BUILDER  NO_REPO  18225  -      -       -       no
+Gateway: port 18080, MANAGED, HEALTHY, PID 10000, 96 MB RSS, DRIFTED (1)
+Total RSS: 1.1 GB (8 services + Gateway)
 ```

@@ -269,6 +269,78 @@ public final class StatusShellTest {
         Assert.assertEquals("GATEWAY_ADMIN_ERROR", err.code(), "GATEWAY_ADMIN_ERROR code");
     }
 
+    public static void testStatusAggregatesRssAcrossManagedUnmanagedConflictAndGatewayInSingleBatch() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Project project = loadRichProject(root, "sec");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient();
+        var projectFiles = new FakeProjectFiles();
+
+        // Stopped estate -> totalRssBytes is empty
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock);
+        StatusShell.EstateStatus stopped = Assert.assertOk(statusShell.status(project), "stopped status succeeds");
+        Assert.assertEquals(Optional.empty(), stopped.totalRssBytes(), "stopped estate has empty totalRssBytes");
+
+        long mb = 1024L * 1024L;
+        // 1. orders: MANAGED (PID 4100, 200 MB via batch snapshot; ObservedProcess rssBytes empty)
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+            4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders.jar"),
+            Optional.empty(), stateStore.logPath("acme", ProcessKey.service("orders"), false),
+            stateStore.logPath("acme", ProcessKey.service("orders"), true)
+        )), "seed orders");
+        processRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
+            Optional.of("java -jar orders.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(4100L, 200L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
+
+        // 2. billing: UNMANAGED (PID 5200, 150 MB)
+        portScanner.bind(9002, 5200L);
+        processRunner.registerProcess(new ObservedProcess(
+            5200L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
+            Optional.of("java -jar billing.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(5200L, 150L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
+
+        // 3. payments: CONFLICT (PID 6300, 40 MB)
+        portScanner.bind(9003, 6300L);
+        processRunner.registerProcess(new ObservedProcess(
+            6300L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
+            Optional.of("python -m http.server 9003"), List.of(), List.of(), Optional.empty(), Optional.of("python")
+        ));
+        processRunner.setRssBytes(6300L, 40L * mb);
+
+        // 4. gateway: UNMANAGED (PID 8800, 90 MB)
+        portScanner.bind(8080, 8800L);
+        processRunner.registerProcess(new ObservedProcess(
+            8800L, true, Optional.of(Instant.parse("2026-11-20T11:00:00Z")),
+            Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(8800L, 90L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 200, "{\"mappings\":[]}");
+
+        int callsBefore = processRunner.rssSnapshotCalls();
+        StatusShell.EstateStatus running = Assert.assertOk(statusShell.status(project), "running status succeeds");
+        Assert.assertEquals(callsBefore + 1, processRunner.rssSnapshotCalls(), "status performs exactly one batch RSS snapshot");
+
+        Map<String, StatusShell.ServiceStatusRow> byName = new LinkedHashMap<>();
+        for (StatusShell.ServiceStatusRow row : running.services()) {
+            byName.put(row.service(), row);
+        }
+        Assert.assertEquals(Optional.of(200L * mb), byName.get("orders").rssBytes(), "managed orders RSS");
+        Assert.assertEquals(Optional.of(150L * mb), byName.get("billing").rssBytes(), "unmanaged billing RSS");
+        Assert.assertEquals(Optional.of(40L * mb), byName.get("payments").rssBytes(), "conflict payments RSS");
+        Assert.assertEquals(Optional.empty(), byName.get("shipping").rssBytes(), "stopped shipping RSS empty");
+        Assert.assertEquals(Optional.of(90L * mb), running.gateway().report().orElseThrow().rssBytes(), "gateway RSS");
+        Assert.assertEquals(Optional.of(480L * mb), running.totalRssBytes(), "total RSS sums all running services + gateway");
+    }
+
     private static Project loadRichProject(Path root, String secret) {
         var configSource = new InMemoryConfigSource(root)
             .withEnv("ESTATE_SECRET", secret)

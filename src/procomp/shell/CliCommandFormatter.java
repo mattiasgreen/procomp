@@ -121,12 +121,43 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String build(List<String> services, boolean force) {
+        Objects.requireNonNull(services, "services must not be null");
+        List<String> tokens = base("build");
+        for (String svc : services) {
+            tokens.add(quoteArg(svc));
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String buildCancel(String service) {
+        Objects.requireNonNull(service, "service must not be null");
+        List<String> tokens = base("build");
+        tokens.add(quoteArg(service));
+        tokens.add("--cancel");
+        return join(tokens);
+    }
+
     public String logs(
         String service,
         boolean stderr,
         boolean pathOnly,
         int lines,
         boolean follow
+    ) {
+        return logs(service, stderr, pathOnly, lines, follow, false);
+    }
+
+    public String logs(
+        String service,
+        boolean stderr,
+        boolean pathOnly,
+        int lines,
+        boolean follow,
+        boolean build
     ) {
         Objects.requireNonNull(service, "service must not be null");
         List<String> tokens = base("logs");
@@ -143,6 +174,9 @@ public final class CliCommandFormatter {
         }
         if (pathOnly) {
             tokens.add("--path");
+        }
+        if (build) {
+            tokens.add("--build");
         }
         return join(tokens);
     }
@@ -179,6 +213,150 @@ public final class CliCommandFormatter {
     public String gatewayReconcile() {
         List<String> tokens = base("gateway");
         tokens.add("reconcile");
+        return join(tokens);
+    }
+
+    public String gatewayLogs(boolean stderr, boolean pathOnly, int lines, boolean follow) {
+        List<String> tokens = base("gateway");
+        tokens.add("logs");
+        if (!pathOnly && lines != LogsRequest.DEFAULT_LINES) {
+            tokens.add("-n");
+            tokens.add(Integer.toString(lines));
+        }
+        if (follow) {
+            tokens.add("-f");
+        }
+        if (stderr) {
+            tokens.add("--err");
+        }
+        if (pathOnly) {
+            tokens.add("--path");
+        }
+        return join(tokens);
+    }
+
+    public String gitStatus(boolean localOnly, boolean fetch, boolean all, boolean json) {
+        List<String> tokens = base("git");
+        tokens.add("status");
+        if (localOnly) {
+            tokens.add("--local");
+        }
+        if (fetch) {
+            tokens.add("--fetch");
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitBranches(String target, boolean json) {
+        Objects.requireNonNull(target, "target must not be null");
+        List<String> tokens = base("git");
+        tokens.add("branches");
+        tokens.add(quoteArg(target));
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitOp(String subcommand, List<String> targets, boolean all, boolean force) {
+        Objects.requireNonNull(subcommand, "subcommand must not be null");
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add(subcommand);
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitSwitch(String branch, boolean useDefault, List<String> targets, boolean all, boolean force) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("switch");
+        if (useDefault) {
+            tokens.add("--default");
+        } else {
+            tokens.add(quoteArg(Objects.requireNonNull(branch, "branch must not be null")));
+        }
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitStashPush(List<String> targets, boolean all, String message, boolean includeUntracked, boolean force) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("stash");
+        tokens.add("push");
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (includeUntracked) {
+            tokens.add("-u");
+        }
+        if (message != null && !message.isBlank()) {
+            tokens.add("-m");
+            tokens.add(quoteArg(message));
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitCancel(List<String> targets, boolean all) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("cancel");
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        return join(tokens);
+    }
+
+    public String gitLogs(String target, boolean stderr, boolean pathOnly, int lines, boolean follow) {
+        Objects.requireNonNull(target, "target must not be null");
+        List<String> tokens = base("git");
+        tokens.add("logs");
+        tokens.add(quoteArg(target));
+        if (stderr) {
+            tokens.add("--err");
+        }
+        if (pathOnly) {
+            tokens.add("--path");
+        }
+        if (lines != LogsRequest.DEFAULT_LINES) {
+            tokens.add("-n");
+            tokens.add(Integer.toString(lines));
+        }
+        if (follow) {
+            tokens.add("-f");
+        }
         return join(tokens);
     }
 

@@ -20,12 +20,21 @@ public final class FakeProcessRunner implements ProcessRunner {
     private final Clock clock;
     private long nextPid = 10000;
     private final Map<Long, ObservedProcess> processes = new LinkedHashMap<>();
+    private final Map<Long, Long> rssOverrides = new LinkedHashMap<>();
+    private int rssSnapshotCalls = 0;
     private final List<SpawnRequest> spawnedRequests = new ArrayList<>();
     private final List<Long> stoppedPids = new ArrayList<>();
     private DomainError spawnError;
+    private java.util.function.Function<SpawnRequest, ExitOutcome> attachedOutcomeHandler =
+        _ -> new ExitOutcome.Exited(0);
 
     public FakeProcessRunner(Clock clock) {
         this.clock = clock;
+    }
+
+    public FakeProcessRunner onAttachedExit(java.util.function.Function<SpawnRequest, ExitOutcome> handler) {
+        this.attachedOutcomeHandler = handler;
+        return this;
     }
 
     public FakeProcessRunner registerProcess(ObservedProcess snapshot) {
@@ -33,8 +42,18 @@ public final class FakeProcessRunner implements ProcessRunner {
         return this;
     }
 
+    public FakeProcessRunner setRssBytes(long pid, long rssBytes) {
+        rssOverrides.put(pid, rssBytes);
+        return this;
+    }
+
+    public int rssSnapshotCalls() {
+        return rssSnapshotCalls;
+    }
+
     public FakeProcessRunner markExited(long pid) {
         processes.remove(pid);
+        rssOverrides.remove(pid);
         return this;
     }
 
@@ -76,6 +95,40 @@ public final class FakeProcessRunner implements ProcessRunner {
     }
 
     @Override
+    public Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+        Result<SpawnedProcess, DomainError> spawnedRes = spawnDetached(request);
+        if (spawnedRes.isErr()) {
+            return spawnedRes.castError();
+        }
+        SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnedRes).value();
+        return Result.ok(new RunningProcess() {
+            @Override
+            public long pid() {
+                return spawned.pid();
+            }
+
+            @Override
+            public Instant startedAt() {
+                return spawned.startedAt();
+            }
+
+            @Override
+            public String commandLine() {
+                return spawned.commandLine();
+            }
+
+            @Override
+            public ExitOutcome awaitExit(Optional<Duration> timeout) {
+                ExitOutcome outcome = attachedOutcomeHandler.apply(request);
+                if (outcome instanceof ExitOutcome.Exited) {
+                    processes.remove(spawned.pid());
+                }
+                return outcome;
+            }
+        });
+    }
+
+    @Override
     public Result<Optional<ObservedProcess>, DomainError> inspect(long pid) {
         return Result.ok(Optional.ofNullable(processes.get(pid)));
     }
@@ -90,6 +143,20 @@ public final class FakeProcessRunner implements ProcessRunner {
     public Result<Unit, DomainError> stopTree(long pid, Duration gracefulTimeout) {
         stoppedPids.add(pid);
         processes.remove(pid);
+        rssOverrides.remove(pid);
         return Result.ok(Unit.VALUE);
+    }
+
+    @Override
+    public Map<Long, Long> snapshotRssBytes() {
+        rssSnapshotCalls++;
+        Map<Long, Long> snapshot = new LinkedHashMap<>();
+        for (ObservedProcess proc : processes.values()) {
+            if (proc.alive() && proc.rssBytes().isPresent()) {
+                snapshot.put(proc.pid(), proc.rssBytes().get());
+            }
+        }
+        snapshot.putAll(rssOverrides);
+        return Map.copyOf(snapshot);
     }
 }
