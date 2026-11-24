@@ -86,6 +86,7 @@
 | :--- | :--- | :--- | :--- |
 | `project` | `string` | Yes | Explicit `Project` identifier used to scope local state and logs (`~/.local/state/procomp/<project>/` or `%LOCALAPPDATA%\procomp\<project>\`). |
 | `repositoriesRoot` | `string` | No | Base folder for local `Repository` checkouts (resolved relative to `configDir` if relative). Exposed as `{{repositoriesRoot}}`. |
+| `repositories` | `object` | No | Optional `Repository` Git settings: `fetchWarnAfterHours` (non-negative integer, default `24`; `0` disables fetch-age warnings) and `timeoutSeconds` (positive integer, default `120`; overridable via `--timeout`). |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Explicit `.env` files loaded into `Process` environments. Missing files fail fast unless `optional: true`. |
 | `defaults` | `object` | No | Default `builder`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all `Service`s unless overridden. |
 | `builders` | `map<string, Builder>` | No | Named `Builder` templates referenced by `Service`s or `defaults.builder`. |
@@ -181,7 +182,7 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `port` | `integer` | No* | Local TCP port the `Service` listens on (*required if `proxyPath` is routed `LOCAL`). |
 | `runtime` | `string` | Yes* | Key in top-level `runtimes` (validated strictly; *optional when overriding a `Service` already imported with a `runtime` from `catalog`). |
 | `builder` | `string` | No | Key in top-level `builders` (defaults to `defaults.builder` if omitted). |
-| `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). |
+| `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). Each `Repository`'s canonical name is derived from its root folder basename; validation fails fast if two distinct `Repository` paths share a basename or if a `Repository` name collides with a different `Service`'s name. |
 | `repositoryUrl` | `string` | No | Remote Git URL used to derive `<repositoriesRoot>/<basename>` when `repository` is omitted. |
 | `workingDir` | `string` | No* | Working directory for the `Service`'s `Process`. Defaults to `{{repository}}` when a `Repository` is configured (*required if the `Service` has no `Repository`). |
 | `healthPath` | `string` | No | Overrides `runtime.healthPath`. |

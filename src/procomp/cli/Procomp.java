@@ -21,10 +21,11 @@ public final class Procomp {
     private Procomp() {}
 
     private sealed interface CliCommand permits
-        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
+        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Git, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
         record Routing(RoutingCli.Action action) implements CliCommand {}
         record ProcessCommand(ProcessCli.Action action) implements CliCommand {}
         record Build(BuildCli.Action action) implements CliCommand {}
+        record Git(GitCli.Action action) implements CliCommand {}
         record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
@@ -86,6 +87,7 @@ public final class Procomp {
             case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
             case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "build" -> BuildCli.parse(subArgs).map(CliCommand.Build::new);
+            case "git" -> GitCli.parse(subArgs).map(CliCommand.Git::new);
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
             case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
@@ -99,6 +101,7 @@ public final class Procomp {
             case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, project, runtime);
             case CliCommand.ProcessCommand(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
             case CliCommand.Build(BuildCli.Action action) -> BuildCli.execute(action, project, runtime);
+            case CliCommand.Git(GitCli.Action action) -> GitCli.execute(action, project, runtime);
             case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
             case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
             case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);
@@ -168,11 +171,13 @@ public final class Procomp {
 
             Commands:
               build [service...]                  Build Service(s) with their Builder (--force, --cancel, --timeout <sec>, --json)
+              git <status|branches|clone|fetch|pull|switch|stash|cancel|logs>
+                                                  Manage Repository checkouts (non-authoring; tracked Git Runs)
               start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
-              status [--json]                     Show estate Routing Table, Process ownership, Health, Build, and Gateway
-              inspect <service>                   Deep read-only Inspection of a Service's local Process & Build Run (--json)
-              logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build)
+              status [--json]                     Show estate Routing Table, Process ownership, Health, Build, Git, and Gateway
+              inspect <service>                   Deep read-only Inspection of a Service's Process, Build Run & Repository (--json)
+              logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build|--git)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
               profile <list|use <name>>           List or apply named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile|logs>

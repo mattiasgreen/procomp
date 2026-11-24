@@ -43,6 +43,7 @@ public final class StatusShell {
     private final ProcessShell processShell;
     private final GatewayShell gatewayShell;
     private final Optional<BuildShell> buildShell;
+    private final Optional<GitShell> gitShell;
     private final Clock clock;
 
     public StatusShell(
@@ -65,10 +66,24 @@ public final class StatusShell {
         Clock clock,
         ProgressObserver observer
     ) {
+        this(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer, Optional.empty());
+    }
+
+    public StatusShell(
+        StateStore stateStore,
+        ProcessRunner processRunner,
+        PortScanner portScanner,
+        HttpClient httpClient,
+        ProjectFiles projectFiles,
+        Clock clock,
+        ProgressObserver observer,
+        Optional<GitShell> gitShell
+    ) {
         this(
             new RoutingShell(stateStore),
             new ProcessLifecycle(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
             new BuildShell(stateStore, processRunner, projectFiles, clock, observer),
+            gitShell,
             httpClient,
             projectFiles,
             clock,
@@ -80,6 +95,7 @@ public final class StatusShell {
         RoutingShell routingShell,
         ProcessLifecycle lifecycle,
         BuildShell buildShell,
+        Optional<GitShell> gitShell,
         HttpClient httpClient,
         ProjectFiles projectFiles,
         Clock clock,
@@ -89,6 +105,7 @@ public final class StatusShell {
             routingShell,
             new GatewayShell(httpClient, projectFiles, clock, observer, routingShell, lifecycle),
             buildShell,
+            gitShell,
             projectFiles,
             lifecycle,
             clock
@@ -99,6 +116,7 @@ public final class StatusShell {
         RoutingShell routingShell,
         GatewayShell gatewayShell,
         BuildShell buildShell,
+        Optional<GitShell> gitShell,
         ProjectFiles projectFiles,
         ProcessLifecycle lifecycle,
         Clock clock
@@ -108,6 +126,7 @@ public final class StatusShell {
             new ProcessShell(projectFiles, routingShell, gatewayShell, lifecycle),
             gatewayShell,
             Optional.of(buildShell),
+            gitShell,
             clock
         );
     }
@@ -118,7 +137,7 @@ public final class StatusShell {
         GatewayShell gatewayShell,
         Clock clock
     ) {
-        this(routingShell, processShell, gatewayShell, Optional.empty(), clock);
+        this(routingShell, processShell, gatewayShell, Optional.empty(), Optional.empty(), clock);
     }
 
     private StatusShell(
@@ -126,12 +145,14 @@ public final class StatusShell {
         ProcessShell processShell,
         GatewayShell gatewayShell,
         Optional<BuildShell> buildShell,
+        Optional<GitShell> gitShell,
         Clock clock
     ) {
         this.routingShell = Objects.requireNonNull(routingShell, "routingShell must not be null");
         this.processShell = Objects.requireNonNull(processShell, "processShell must not be null");
         this.gatewayShell = Objects.requireNonNull(gatewayShell, "gatewayShell must not be null");
         this.buildShell = Objects.requireNonNull(buildShell, "buildShell must not be null");
+        this.gitShell = Objects.requireNonNull(gitShell, "gitShell must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
@@ -154,13 +175,24 @@ public final class StatusShell {
         }
         Map<Integer, PortBinding> portSnapshot = ((Result.Ok<Map<Integer, PortBinding>, DomainError>) portSnapRes).value();
 
+        Map<java.nio.file.Path, GitShell.RepositoryStatusRow> repoSnapshot = Map.of();
+        if (gitShell.isPresent()) {
+            Result<Map<java.nio.file.Path, GitShell.RepositoryStatusRow>, DomainError> repoSnapRes =
+                gitShell.get().snapshotRepositories(project);
+            if (repoSnapRes.isErr()) {
+                return repoSnapRes.castError();
+            }
+            repoSnapshot = ((Result.Ok<Map<java.nio.file.Path, GitShell.RepositoryStatusRow>, DomainError>) repoSnapRes).value();
+        }
+        final Map<java.nio.file.Path, GitShell.RepositoryStatusRow> finalRepoSnapshot = repoSnapshot;
+
         Instant now = clock.now();
         List<ServiceDefinition> serviceList = List.copyOf(project.services().values());
         List<ServiceStatusRow> rows = new ArrayList<>(serviceList.size());
         if (serviceList.size() <= 1) {
             for (ServiceDefinition service : serviceList) {
                 Result<ServiceStatusRow, DomainError> rowRes =
-                    discoverServiceRow(project, service, routing, portSnapshot, now);
+                    discoverServiceRow(project, service, routing, portSnapshot, finalRepoSnapshot, now);
                 if (rowRes.isErr()) {
                     return rowRes.castError();
                 }
@@ -171,7 +203,7 @@ public final class StatusShell {
                 List<Future<Result<ServiceStatusRow, DomainError>>> futures = new ArrayList<>(serviceList.size());
                 for (ServiceDefinition service : serviceList) {
                     futures.add(executor.submit(() ->
-                        discoverServiceRow(project, service, routing, portSnapshot, now)
+                        discoverServiceRow(project, service, routing, portSnapshot, finalRepoSnapshot, now)
                     ));
                 }
                 for (Future<Result<ServiceStatusRow, DomainError>> future : futures) {
@@ -216,6 +248,7 @@ public final class StatusShell {
         ServiceDefinition service,
         RoutingTable routing,
         Map<Integer, PortBinding> portSnapshot,
+        Map<java.nio.file.Path, GitShell.RepositoryStatusRow> repoSnapshot,
         Instant now
     ) {
         Result<DiscoveryResult, DomainError> discRes = processShell.discoverService(project, service.name(), portSnapshot);
@@ -242,6 +275,9 @@ public final class StatusShell {
             buildRun = new ObservedBuildRun(fallback, Optional.empty(), Optional.empty());
         }
 
+        Optional<GitShell.RepositoryStatusRow> gitRow = service.repository()
+            .map(ref -> repoSnapshot.get(ref.root()));
+
         return Result.ok(new ServiceStatusRow(
             service.name(),
             route,
@@ -255,7 +291,8 @@ public final class StatusShell {
             disc.stale(),
             disc.healthEndpoint(),
             healthNote,
-            buildRun
+            buildRun,
+            gitRow
         ));
     }
 
@@ -304,7 +341,8 @@ public final class StatusShell {
         boolean stale,
         Optional<String> healthEndpoint,
         Optional<String> healthNote,
-        ObservedBuildRun build
+        ObservedBuildRun build,
+        Optional<GitShell.RepositoryStatusRow> git
     ) {
         public ServiceStatusRow(
             String service,
@@ -323,7 +361,29 @@ public final class StatusShell {
             this(
                 service, route, ownership, provenance, health, port, pid, startedAt, uptime, stale,
                 healthEndpoint, healthNote,
-                new ObservedBuildRun(BuildDisplayState.NO_BUILDER, Optional.empty(), Optional.empty())
+                new ObservedBuildRun(BuildDisplayState.NO_BUILDER, Optional.empty(), Optional.empty()),
+                Optional.empty()
+            );
+        }
+
+        public ServiceStatusRow(
+            String service,
+            Route route,
+            Ownership ownership,
+            Optional<String> provenance,
+            HealthState health,
+            Optional<Integer> port,
+            Optional<Long> pid,
+            Optional<Instant> startedAt,
+            Optional<Duration> uptime,
+            boolean stale,
+            Optional<String> healthEndpoint,
+            Optional<String> healthNote,
+            ObservedBuildRun build
+        ) {
+            this(
+                service, route, ownership, provenance, health, port, pid, startedAt, uptime, stale,
+                healthEndpoint, healthNote, build, Optional.empty()
             );
         }
 
@@ -342,6 +402,7 @@ public final class StatusShell {
             Objects.requireNonNull(healthEndpoint, "healthEndpoint must not be null");
             Objects.requireNonNull(healthNote, "healthNote must not be null");
             Objects.requireNonNull(build, "build must not be null");
+            Objects.requireNonNull(git, "git must not be null");
         }
     }
 }
