@@ -270,7 +270,7 @@ body {
 .app-main {
   flex: 1;
   width: 100%;
-  max-width: 1440px;
+  max-width: none;
   margin: 0 auto;
   padding: 16px 20px 24px;
   display: flex;
@@ -1719,14 +1719,14 @@ button.badge-clickable:focus-visible {
   width: min(680px, 94vw);
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface);
-  color: var(--text);
+  background: var(--bg-surface);
+  color: var(--text-primary);
   padding: 0;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.65);
 }
 
 .git-switch-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(1, 4, 9, 0.72);
 }
 
 .git-switch-meta {
@@ -1751,8 +1751,8 @@ button.badge-clickable:focus-visible {
   padding: 10px 12px;
   margin-bottom: 12px;
   border-radius: 8px;
-  border: 1px solid var(--danger, #e5534b);
-  background: rgba(229, 83, 75, 0.12);
+  border: 1px solid var(--red-border);
+  background: var(--red-bg);
 }
 
 .git-dirty-banner-text {
@@ -1767,6 +1767,7 @@ button.badge-clickable:focus-visible {
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
+  background: var(--bg-inset);
   margin-top: 10px;
   display: flex;
   flex-direction: column;
@@ -1775,9 +1776,9 @@ button.badge-clickable:focus-visible {
 .git-branch-item {
   text-align: left;
   background: transparent;
-  color: inherit;
+  color: var(--text-primary);
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   padding: 8px 12px;
   cursor: pointer;
   display: flex;
@@ -1790,11 +1791,11 @@ button.badge-clickable:focus-visible {
 }
 
 .git-branch-item:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-hover);
 }
 
 .git-branch-item.selected {
-  background: rgba(88, 166, 255, 0.18);
+  background: var(--accent-subtle);
 }
 
 .git-branch-top {
@@ -1819,4 +1820,95 @@ button.badge-clickable:focus-visible {
 .git-branch-empty {
   padding: 16px;
   text-align: center;
+}
+
+
+/* ---------- Pill Action Popover & Inline Stale ---------- */
+.health-cell-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge-pill-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-pill-trigger::after {
+  content: '▾';
+  font-size: 0.7em;
+  opacity: 0.75;
+}
+
+.pill-action-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 170px;
+  max-width: 260px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pill-action-menu[hidden] {
+  display: none;
+}
+
+.pill-menu-header {
+  padding: 4px 8px 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pill-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.pill-menu-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pill-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.pill-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pill-menu-item-danger {
+  color: var(--red, #f85149);
+}
+
+.pill-menu-item-danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.14);
 }

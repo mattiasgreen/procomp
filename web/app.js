@@ -77,6 +77,11 @@ const state = {
     selectedBranch: null,
     filter: '',
   },
+  pillMenu: {
+    open: false,
+    kind: null,
+    service: null,
+  },
 };
 
 const dom = {
@@ -190,6 +195,7 @@ const dom = {
   gitSwitchBranchList: document.getElementById('git-switch-branch-list'),
   btnGitSwitchCancel: document.getElementById('btn-git-switch-cancel'),
   btnGitSwitchConfirm: document.getElementById('btn-git-switch-confirm'),
+  pillActionMenu: document.getElementById('pill-action-menu'),
   conflictServiceName: document.getElementById('conflict-service-name'),
   conflictLoading: document.getElementById('conflict-loading'),
   conflictError: document.getElementById('conflict-error'),
@@ -670,7 +676,7 @@ function renderServices() {
   if (filtered.length === 0) {
     const tr = el('tr');
     const td = el('td', 'empty-cell', 'No Services match the current filter.');
-    td.colSpan = 12;
+    td.colSpan = 10;
     tr.append(td);
     dom.servicesTbody.append(tr);
     return;
@@ -729,62 +735,69 @@ function renderServices() {
       tdOwner.append(el('span', 'provenance-tag', row.provenance));
     }
 
-    // HEALTH
+    // HEALTH (+ inline STALE tag) — clickable pill opens Process actions popover
     const tdHealth = el('td');
-    const healthBadge = el('span', `badge ${healthBadgeClass(row.health)}`, row.health);
+    const healthWrap = el('div', 'health-cell-wrap');
+    const healthBtn = el('button', `badge badge-clickable badge-pill-trigger ${healthBadgeClass(row.health)}`, row.health);
+    healthBtn.type = 'button';
+    healthBtn.dataset.service = row.service;
+    healthBtn.dataset.pill = 'health';
+    healthBtn.setAttribute('aria-haspopup', 'menu');
     const healthTip = [row.healthEndpoint, row.healthNote].filter(Boolean).join(' — ');
-    if (healthTip) {
-      healthBadge.title = healthTip;
+    healthBtn.title = healthTip
+      ? `${healthTip} — Click for Process actions`
+      : `Click for Process actions (${row.service})`;
+    healthBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openPillMenu('health', row, healthBtn);
+    });
+    healthWrap.append(healthBtn);
+    if (row.stale) {
+      const staleBadge = el('span', 'badge badge-stale', 'STALE');
+      staleBadge.title = 'Managed Process was started before the latest Artifact was built — restart Process';
+      healthWrap.append(staleBadge);
     }
-    tdHealth.append(healthBadge);
+    tdHealth.append(healthWrap);
 
-    // BUILD
+    // BUILD — clickable pill opens Build actions popover (NO_BUILDER stays static)
     const tdBuild = el('td');
     const buildRunState = row.buildRun?.displayState || 'NO_BUILDER';
-    if (hasBuildRunLogs(buildRunState)) {
-      const buildBtn = el('button', `badge badge-clickable ${buildBadgeClass(buildRunState)}`, buildRunState);
+    if (buildRunState !== 'NO_BUILDER') {
+      const buildBtn = el('button', `badge badge-clickable badge-pill-trigger ${buildBadgeClass(buildRunState)}`, buildRunState);
       buildBtn.type = 'button';
       buildBtn.dataset.service = row.service;
-      buildBtn.dataset.action = 'build-logs';
+      buildBtn.dataset.pill = 'build';
+      buildBtn.setAttribute('aria-haspopup', 'menu');
       buildBtn.title = row.buildRun?.reason
-        ? `${row.buildRun.reason} — Click to view Build logs`
-        : `View Build logs for ${row.service}`;
-      buildBtn.addEventListener('click', () =>
-        openLogsView('service', row.service, { build: true, err: false }),
-      );
+        ? `${row.buildRun.reason} — Click for Build actions`
+        : `Click for Build actions (${row.service})`;
+      buildBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openPillMenu('build', row, buildBtn);
+      });
       tdBuild.append(buildBtn);
     } else {
-      const buildBadge = el('span', `badge ${buildBadgeClass(buildRunState)}`, buildRunState);
-      if (row.buildRun?.reason) {
-        buildBadge.title = row.buildRun.reason;
-      }
-      tdBuild.append(buildBadge);
+      tdBuild.append(el('span', `badge ${buildBadgeClass(buildRunState)}`, buildRunState));
     }
 
-    // GIT
+    // GIT — clickable pill opens Git actions popover (NO_REPO stays static)
     const tdGit = el('td');
     const git = row.git;
     if (!git) {
       tdGit.append(el('span', 'badge badge-neutral', 'NO_REPO'));
     } else {
       const gitLabel = git.compact || git.state || 'NO_REPO';
-      const gitBtn = el('button', `badge badge-clickable ${gitBadgeClass(git)}`, gitLabel);
+      const gitBtn = el('button', `badge badge-clickable badge-pill-trigger ${gitBadgeClass(git)}`, gitLabel);
       gitBtn.type = 'button';
       gitBtn.dataset.service = row.service;
       gitBtn.dataset.repository = git.repository;
-      gitBtn.dataset.action = 'git-badge';
-      if (git.latestRun) {
-        gitBtn.title = `Repository ${git.repository} (${git.latestRun.status} ${git.latestRun.operation}) — Click for Git logs`;
-        gitBtn.addEventListener('click', () =>
-          openLogsView('service', row.service, { build: false, git: true, err: false }),
-        );
-      } else if (git.state === 'CLONED') {
-        gitBtn.title = `Repository ${git.repository} — Click to switch branch`;
-        gitBtn.addEventListener('click', () => openGitSwitchDialog(git.repository, row.service));
-      } else {
-        gitBtn.title = `Repository ${git.repository} (${git.state})`;
-        gitBtn.addEventListener('click', () => openInspectDrawer(row.service));
-      }
+      gitBtn.dataset.pill = 'git';
+      gitBtn.setAttribute('aria-haspopup', 'menu');
+      gitBtn.title = `Repository ${git.repository} — Click for Git actions`;
+      gitBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openPillMenu('git', row, gitBtn);
+      });
       tdGit.append(gitBtn);
     }
 
@@ -794,171 +807,7 @@ function renderServices() {
     const tdUptime = el('td', 'mono', formatUptime(row.uptimeSeconds));
     const tdRss = el('td', 'mono', formatBytes(row.rssBytes));
 
-    // STALE
-    const tdStale = el('td');
-    if (row.stale) {
-      const staleBadge = el('span', 'badge badge-stale', 'STALE');
-      staleBadge.title = 'Managed Process was started before the latest Artifact was built';
-      tdStale.append(staleBadge);
-    } else {
-      tdStale.append(el('span', 'muted', '—'));
-    }
-
-    // ACTIONS
-    const tdActions = el('td', 'col-actions');
-    const actionsWrap = el('div', 'row-actions');
-
-    if (git) {
-      const gitRunning = git.latestRun?.status === 'RUNNING';
-      if (gitRunning) {
-        const btnCancelGit = el('button', 'btn btn-danger btn-xs', 'Cancel Git');
-        btnCancelGit.type = 'button';
-        btnCancelGit.dataset.repository = git.repository;
-        btnCancelGit.dataset.action = 'git-cancel';
-        btnCancelGit.addEventListener('click', () =>
-          runAction([btnCancelGit], () => gitCancel([git.repository])),
-        );
-        actionsWrap.append(btnCancelGit);
-      } else if (git.state === 'NOT_CLONED') {
-        const btnClone = el('button', 'btn btn-primary btn-xs', 'Clone');
-        btnClone.type = 'button';
-        btnClone.dataset.repository = git.repository;
-        btnClone.dataset.action = 'git-clone';
-        btnClone.title = `Clone Repository ${git.repository}`;
-        btnClone.addEventListener('click', () =>
-          runAction([btnClone], () => gitClone([git.repository])),
-        );
-        actionsWrap.append(btnClone);
-      } else if (git.state === 'CLONED') {
-        const btnFetch = el('button', 'btn btn-secondary btn-xs', 'Fetch');
-        btnFetch.type = 'button';
-        btnFetch.dataset.repository = git.repository;
-        btnFetch.dataset.action = 'git-fetch';
-        btnFetch.title = `Fetch Repository ${git.repository}`;
-        btnFetch.addEventListener('click', () =>
-          runAction([btnFetch], () => gitFetch([git.repository])),
-        );
-        actionsWrap.append(btnFetch);
-
-        const btnPull = el('button', 'btn btn-secondary btn-xs', 'Pull');
-        btnPull.type = 'button';
-        btnPull.dataset.repository = git.repository;
-        btnPull.dataset.action = 'git-pull';
-        btnPull.disabled = Boolean(git.dirty);
-        btnPull.title = git.dirty
-          ? `Cannot pull ${git.repository}: working tree is dirty`
-          : `Fast-forward pull Repository ${git.repository}`;
-        btnPull.addEventListener('click', () =>
-          runAction([btnPull], () => gitPull([git.repository])),
-        );
-        actionsWrap.append(btnPull);
-
-        const btnSwitch = el('button', 'btn btn-secondary btn-xs', 'Switch…');
-        btnSwitch.type = 'button';
-        btnSwitch.dataset.repository = git.repository;
-        btnSwitch.dataset.action = 'git-switch';
-        btnSwitch.title = `Switch branch for Repository ${git.repository}`;
-        btnSwitch.addEventListener('click', () => openGitSwitchDialog(git.repository, row.service));
-        actionsWrap.append(btnSwitch);
-
-        const btnStash = el('button', 'btn btn-secondary btn-xs', 'Stash');
-        btnStash.type = 'button';
-        btnStash.dataset.repository = git.repository;
-        btnStash.dataset.action = 'git-stash';
-        btnStash.disabled = !git.dirty;
-        btnStash.title = git.dirty
-          ? `Stash uncommitted and untracked changes in Repository ${git.repository}`
-          : `Working tree for ${git.repository} is clean`;
-        btnStash.addEventListener('click', () =>
-          runAction([btnStash], () => gitStash({ targets: [git.repository], includeUntracked: true })),
-        );
-        actionsWrap.append(btnStash);
-      }
-    }
-
-    if (buildRunState === 'RUNNING') {
-      const btnCancelBuild = el('button', 'btn btn-danger btn-xs', 'Cancel Build');
-      btnCancelBuild.type = 'button';
-      btnCancelBuild.dataset.service = row.service;
-      btnCancelBuild.dataset.action = 'cancel-build';
-      btnCancelBuild.title = `Cancel active Build Run for ${row.service}`;
-      btnCancelBuild.addEventListener('click', () => handleCancelBuild(row.service, btnCancelBuild));
-      actionsWrap.append(btnCancelBuild);
-    } else if (buildRunState === 'UNKNOWN') {
-      const btnForceBuild = el('button', 'btn btn-secondary btn-xs', 'Force Build');
-      btnForceBuild.type = 'button';
-      btnForceBuild.dataset.service = row.service;
-      btnForceBuild.dataset.action = 'build';
-      btnForceBuild.title = `Clear UNKNOWN Build Run and rebuild ${row.service}`;
-      btnForceBuild.addEventListener('click', () => handleBuildService(row.service, true, btnForceBuild));
-      actionsWrap.append(btnForceBuild);
-    } else if (buildRunState !== 'NO_BUILDER') {
-      const btnBuild = el('button', 'btn btn-secondary btn-xs', 'Build');
-      btnBuild.type = 'button';
-      btnBuild.dataset.service = row.service;
-      btnBuild.dataset.action = 'build';
-      btnBuild.title = `Build ${row.service}`;
-      btnBuild.addEventListener('click', () => handleBuildService(row.service, false, btnBuild));
-      actionsWrap.append(btnBuild);
-    }
-
-    const starting = isServiceStarting(row.service);
-    const btnStart = el('button', 'btn btn-secondary btn-xs', starting ? 'Starting…' : 'Start');
-    btnStart.type = 'button';
-    btnStart.disabled = starting;
-    btnStart.dataset.service = row.service;
-    btnStart.dataset.action = 'start';
-    btnStart.title = `Start ${row.service}`;
-    btnStart.addEventListener('click', () => handleStartServices([row.service]));
-    actionsWrap.append(btnStart);
-
-    if (row.owner === 'CONFLICT') {
-      const btnKillConflict = el('button', 'btn btn-danger btn-xs', 'Kill Conflict…');
-      btnKillConflict.type = 'button';
-      btnKillConflict.dataset.service = row.service;
-      btnKillConflict.dataset.action = 'kill-conflict';
-      btnKillConflict.title = `Inspect and kill conflicting Process on port ${row.port ?? ''}`;
-      btnKillConflict.addEventListener('click', () => openConflictDialog(row.service));
-      actionsWrap.append(btnKillConflict);
-    } else {
-      const stopPending = state.pendingStops.has(row.service);
-      const btnStop = el('button', 'btn btn-secondary btn-xs', 'Stop');
-      btnStop.type = 'button';
-      btnStop.dataset.service = row.service;
-      btnStop.dataset.action = 'stop';
-      if (row.owner === 'MANAGED') {
-        btnStop.disabled = stopPending;
-        btnStop.title = `Stop Managed Process for ${row.service}`;
-        btnStop.addEventListener('click', () => handleStopServices([row.service], btnStop));
-      } else if (row.owner === 'UNMANAGED') {
-        btnStop.disabled = true;
-        btnStop.title = 'Unmanaged Process — never killed by procomp';
-      } else {
-        btnStop.disabled = true;
-        btnStop.title = 'No running Process';
-      }
-      actionsWrap.append(btnStop);
-    }
-
-    const btnInspect = el('button', 'btn btn-secondary btn-xs', 'Inspect');
-    btnInspect.type = 'button';
-    btnInspect.dataset.service = row.service;
-    btnInspect.dataset.action = 'inspect';
-    btnInspect.title = `Inspect ${row.service}`;
-    btnInspect.addEventListener('click', () => openInspectDrawer(row.service));
-    actionsWrap.append(btnInspect);
-
-    const btnLogs = el('button', 'btn btn-secondary btn-xs', 'Logs');
-    btnLogs.type = 'button';
-    btnLogs.dataset.service = row.service;
-    btnLogs.dataset.action = 'logs';
-    btnLogs.title = `Stream live Logs for ${row.service}`;
-    btnLogs.addEventListener('click', () => openLogsView('service', row.service, { build: false }));
-    actionsWrap.append(btnLogs);
-
-    tdActions.append(actionsWrap);
-
-    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdGit, tdPort, tdPid, tdUptime, tdRss, tdStale, tdActions);
+    tr.append(tdName, tdRoute, tdOwner, tdHealth, tdBuild, tdGit, tdPort, tdPid, tdUptime, tdRss);
     dom.servicesTbody.append(tr);
   }
 }
@@ -1725,6 +1574,179 @@ function closeLogStream() {
   setLogsStreamBadge('Disconnected', 'badge-neutral');
 }
 
+function closePillMenu() {
+  if (!state.pillMenu.open) return;
+  state.pillMenu.open = false;
+  state.pillMenu.kind = null;
+  state.pillMenu.service = null;
+  dom.pillActionMenu.hidden = true;
+  dom.pillActionMenu.replaceChildren();
+}
+
+function addPillMenuItem(label, { danger = false, disabled = false, title = '', action = '', onClick } = {}) {
+  const btn = el('button', `pill-menu-item${danger ? ' pill-menu-item-danger' : ''}`, label);
+  btn.type = 'button';
+  btn.setAttribute('role', 'menuitem');
+  btn.disabled = disabled;
+  if (title) btn.title = title;
+  if (action) btn.dataset.action = action;
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closePillMenu();
+    if (onClick) onClick(btn);
+  });
+  dom.pillActionMenu.append(btn);
+}
+
+function openPillMenu(kind, row, anchorEl) {
+  if (state.pillMenu.open && state.pillMenu.kind === kind && state.pillMenu.service === row.service) {
+    closePillMenu();
+    return;
+  }
+  dom.pillActionMenu.replaceChildren();
+  state.pillMenu.open = true;
+  state.pillMenu.kind = kind;
+  state.pillMenu.service = row.service;
+
+  if (kind === 'health') {
+    dom.pillActionMenu.append(el('div', 'pill-menu-header mono', `Process · ${row.service}`));
+    const starting = isServiceStarting(row.service);
+    addPillMenuItem(starting ? 'Starting…' : 'Start', {
+      disabled: starting,
+      action: 'start',
+      title: `Start ${row.service}`,
+      onClick: () => handleStartServices([row.service]),
+    });
+    if (row.owner === 'CONFLICT') {
+      addPillMenuItem('Kill Conflict…', {
+        danger: true,
+        action: 'kill-conflict',
+        title: `Inspect and kill conflicting Process on port ${row.port ?? ''}`,
+        onClick: () => openConflictDialog(row.service),
+      });
+    } else {
+      const stopPending = state.pendingStops.has(row.service);
+      const canStop = row.owner === 'MANAGED' && !stopPending;
+      const stopTitle =
+        row.owner === 'MANAGED'
+          ? `Stop Managed Process for ${row.service}`
+          : row.owner === 'UNMANAGED'
+            ? 'Unmanaged Process — never killed by procomp'
+            : 'No running Process';
+      addPillMenuItem('Stop', {
+        disabled: !canStop,
+        action: 'stop',
+        title: stopTitle,
+        onClick: (btn) => handleStopServices([row.service], btn),
+      });
+    }
+    dom.pillActionMenu.append(el('div', 'pill-menu-divider'));
+    addPillMenuItem('Inspect', {
+      action: 'inspect',
+      title: `Inspect ${row.service}`,
+      onClick: () => openInspectDrawer(row.service),
+    });
+    addPillMenuItem('Logs', {
+      action: 'logs',
+      title: `Stream live Logs for ${row.service}`,
+      onClick: () => openLogsView('service', row.service, { build: false, git: false }),
+    });
+  } else if (kind === 'build') {
+    const buildRunState = row.buildRun?.displayState || 'NO_BUILDER';
+    dom.pillActionMenu.append(el('div', 'pill-menu-header mono', `Build · ${row.service}`));
+    if (buildRunState === 'RUNNING') {
+      addPillMenuItem('Cancel Build', {
+        danger: true,
+        action: 'cancel-build',
+        title: `Cancel active Build Run for ${row.service}`,
+        onClick: (btn) => handleCancelBuild(row.service, btn),
+      });
+    } else if (buildRunState === 'UNKNOWN') {
+      addPillMenuItem('Force Build', {
+        action: 'build',
+        title: `Clear UNKNOWN Build Run and rebuild ${row.service}`,
+        onClick: (btn) => handleBuildService(row.service, true, btn),
+      });
+    } else {
+      addPillMenuItem('Build', {
+        action: 'build',
+        title: `Build ${row.service}`,
+        onClick: (btn) => handleBuildService(row.service, false, btn),
+      });
+    }
+    if (hasBuildRunLogs(buildRunState)) {
+      dom.pillActionMenu.append(el('div', 'pill-menu-divider'));
+      addPillMenuItem('Build Logs', {
+        action: 'build-logs',
+        title: `View Build logs for ${row.service}`,
+        onClick: () => openLogsView('service', row.service, { build: true, git: false, err: false }),
+      });
+    }
+  } else if (kind === 'git' && row.git) {
+    const git = row.git;
+    const sharedSuffix = git.services && git.services.length > 1 ? ` (${git.services.length} services)` : '';
+    dom.pillActionMenu.append(el('div', 'pill-menu-header mono', `Git · ${git.repository}${sharedSuffix}`));
+    const gitRunning = git.latestRun?.status === 'RUNNING';
+    if (gitRunning) {
+      addPillMenuItem('Cancel Git', {
+        danger: true,
+        action: 'git-cancel',
+        title: `Cancel running Git Run for ${git.repository}`,
+        onClick: (btn) => runAction([btn], () => gitCancel([git.repository])),
+      });
+    } else if (git.state === 'NOT_CLONED') {
+      addPillMenuItem('Clone', {
+        action: 'git-clone',
+        title: `Clone Repository ${git.repository}`,
+        onClick: (btn) => runAction([btn], () => gitClone([git.repository])),
+      });
+    } else if (git.state === 'CLONED') {
+      addPillMenuItem('Fetch', {
+        action: 'git-fetch',
+        title: `Fetch Repository ${git.repository}`,
+        onClick: (btn) => runAction([btn], () => gitFetch([git.repository])),
+      });
+      addPillMenuItem('Pull', {
+        disabled: Boolean(git.dirty),
+        action: 'git-pull',
+        title: git.dirty
+          ? `Cannot pull ${git.repository}: working tree is dirty`
+          : `Fast-forward pull Repository ${git.repository}`,
+        onClick: (btn) => runAction([btn], () => gitPull([git.repository])),
+      });
+      addPillMenuItem('Switch…', {
+        action: 'git-switch',
+        title: `Switch branch for Repository ${git.repository}`,
+        onClick: () => openGitSwitchDialog(git.repository, row.service),
+      });
+      addPillMenuItem('Stash (incl. untracked)', {
+        disabled: !git.dirty,
+        action: 'git-stash',
+        title: git.dirty
+          ? `Stash uncommitted and untracked changes in Repository ${git.repository}`
+          : `Working tree for ${git.repository} is clean`,
+        onClick: (btn) => runAction([btn], () => gitStash({ targets: [git.repository], includeUntracked: true })),
+      });
+    }
+    if (git.latestRun) {
+      dom.pillActionMenu.append(el('div', 'pill-menu-divider'));
+      addPillMenuItem('Git Logs', {
+        action: 'git-logs',
+        title: `View Git logs for ${git.repository}`,
+        onClick: () => openLogsView('service', row.service, { build: false, git: true, err: false }),
+      });
+    }
+  }
+
+  dom.pillActionMenu.hidden = false;
+  const rect = anchorEl.getBoundingClientRect();
+  const menuRect = dom.pillActionMenu.getBoundingClientRect();
+  const top = Math.min(rect.bottom + 4, window.innerHeight - menuRect.height - 8);
+  const left = Math.min(rect.left, window.innerWidth - menuRect.width - 8);
+  dom.pillActionMenu.style.top = `${Math.max(8, top)}px`;
+  dom.pillActionMenu.style.left = `${Math.max(8, left)}px`;
+}
+
 function buildBadgeClass(displayState) {
   switch (displayState) {
     case 'SUCCEEDED':
@@ -2343,7 +2365,17 @@ function init() {
   dom.btnCopyCliHistory.addEventListener('click', copyCliHistory);
   dom.btnClearCliHistory.addEventListener('click', clearCliHistory);
 
+  document.addEventListener('click', (event) => {
+    if (state.pillMenu.open && !dom.pillActionMenu.contains(event.target)) {
+      closePillMenu();
+    }
+  });
+
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.pillMenu.open) {
+      closePillMenu();
+      return;
+    }
     if (event.key === 'Escape' && state.cliHistoryOpen && !dom.conflictDialog.open) {
       setCliHistoryOpen(false);
       dom.btnCliHistory.focus();

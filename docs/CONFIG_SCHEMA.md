@@ -36,7 +36,7 @@
   },
   "builders": {
     "gradle": {
-      "command": ["./gradlew", ":{{subproject}}:bootJar"]
+      "command": ["./gradlew", ":{{subproject}}:bootJar", "--console=plain"]
     }
   },
   "runtimes": {
