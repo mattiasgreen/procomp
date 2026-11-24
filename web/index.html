@@ -72,6 +72,10 @@
             <span id="gateway-uptime" class="mono muted"></span>
           </div>
           <div id="gateway-actions" class="gateway-actions">
+            <label class="checkbox-label gateway-auto-reconcile" title="Automatically reconcile Gateway after Route or Profile changes when Gateway is healthy">
+              <input id="chk-gateway-auto-reconcile" type="checkbox" checked>
+              <span>Auto-reconcile</span>
+            </label>
             <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
             <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
             <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>

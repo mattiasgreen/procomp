@@ -18,11 +18,13 @@ import {
 const POLL_INTERVAL_MS = 2500;
 const MAX_LOG_LINES = 5000;
 const MAX_CLI_HISTORY = 500;
+const STORAGE_KEY_AUTO_RECONCILE = 'procomp.gatewayAutoReconcile';
 
 const state = {
   estate: null,
   profiles: [],
   configPath: '',
+  gatewayAutoReconcile: true,
   pollTimer: null,
   statusInFlightCount: 0,
   statusSeq: 0,
@@ -80,6 +82,7 @@ const dom = {
   gatewayUptime: document.getElementById('gateway-uptime'),
   gatewayActions: document.getElementById('gateway-actions'),
   gatewayUnconfigured: document.getElementById('gateway-unconfigured'),
+  chkGatewayAutoReconcile: document.getElementById('chk-gateway-auto-reconcile'),
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
   btnGatewayStart: document.getElementById('btn-gateway-start'),
   btnGatewayStop: document.getElementById('btn-gateway-stop'),
@@ -816,17 +819,65 @@ function stopPolling() {
   }
 }
 
+/* ---------- Gateway Auto-Reconcile Preference ---------- */
+
+function loadAutoReconcilePreference() {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY_AUTO_RECONCILE);
+    if (stored === 'false') {
+      return false;
+    }
+    if (stored === 'true') {
+      return true;
+    }
+  } catch {
+    // Ignore storage access failures and fall back to default.
+  }
+  return true;
+}
+
+function saveAutoReconcilePreference(enabled) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY_AUTO_RECONCILE, String(enabled));
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
+function canAutoReconcileGateway() {
+  const gw = state.estate?.gateway;
+  return Boolean(
+    state.gatewayAutoReconcile &&
+      gw &&
+      gw.configured &&
+      gw.health === 'HEALTHY',
+  );
+}
+
 /* ---------- Action Handlers ---------- */
 
-async function runAction(controls, actionFn, { onSettled = null } = {}) {
+async function runAction(controls, actionFn, { onSettled = null, autoReconcile = false } = {}) {
   const list = Array.from(controls || []).filter(Boolean);
   for (const control of list) {
     control.disabled = true;
   }
+  let actionSucceeded = false;
   try {
     const payload = await actionFn();
+    actionSucceeded = true;
     if (payload && payload.cliCommand) {
       setCliCommand(payload.cliCommand, { explicit: true });
+    }
+    if (autoReconcile && canAutoReconcileGateway()) {
+      dom.btnGatewayReconcile.disabled = true;
+      try {
+        const reconcilePayload = await reconcileGateway();
+        if (reconcilePayload && reconcilePayload.cliCommand) {
+          setCliCommand(reconcilePayload.cliCommand, { explicit: true });
+        }
+      } finally {
+        dom.btnGatewayReconcile.disabled = false;
+      }
     }
     if (onSettled) {
       onSettled();
@@ -838,6 +889,9 @@ async function runAction(controls, actionFn, { onSettled = null } = {}) {
       onSettled();
     }
     showError(err);
+    if (actionSucceeded) {
+      await refreshStatus({ explicit: false });
+    }
   } finally {
     for (const control of list) {
       control.disabled = false;
@@ -850,6 +904,7 @@ function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
   state.pendingRoutes.add(serviceName);
   return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute), {
     onSettled: () => state.pendingRoutes.delete(serviceName),
+    autoReconcile: true,
   });
 }
 
@@ -857,6 +912,7 @@ function handleUseProfile(profileName, btn) {
   state.pendingProfiles.add(profileName);
   return runAction([btn], () => useProfile(profileName), {
     onSettled: () => state.pendingProfiles.delete(profileName),
+    autoReconcile: true,
   });
 }
 
@@ -1392,6 +1448,13 @@ function closeAllStreams() {
 function init() {
   dom.btnRefresh.addEventListener('click', () => refreshStatus({ explicit: true }));
   dom.btnDismissError.addEventListener('click', clearError);
+
+  state.gatewayAutoReconcile = loadAutoReconcilePreference();
+  dom.chkGatewayAutoReconcile.checked = state.gatewayAutoReconcile;
+  dom.chkGatewayAutoReconcile.addEventListener('change', () => {
+    state.gatewayAutoReconcile = dom.chkGatewayAutoReconcile.checked;
+    saveAutoReconcilePreference(state.gatewayAutoReconcile);
+  });
 
   dom.btnGatewayReconcile.addEventListener('click', () =>
     handleGatewayAction(() => reconcileGateway(), dom.btnGatewayReconcile),

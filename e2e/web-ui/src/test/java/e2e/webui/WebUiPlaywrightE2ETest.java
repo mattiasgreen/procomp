@@ -121,6 +121,14 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
                 assertThat(page.locator("#gateway-drift-alert")).isHidden();
 
+                Locator autoReconcile = page.locator("#chk-gateway-auto-reconcile");
+                assertThat(autoReconcile).isVisible();
+                assertThat(autoReconcile).isChecked();
+
+                // Disable Auto-reconcile to verify UNIX separation (DRIFTED until explicit reconcile)
+                autoReconcile.uncheck();
+                assertThat(autoReconcile).not().isChecked();
+
                 Locator pricingRow = serviceRow("pricing");
                 assertThat(pricingRow).isVisible();
                 assertThat(pricingRow.locator("button.route-remote")).hasAttribute("aria-pressed", "true");
@@ -143,6 +151,74 @@ final class WebUiPlaywrightE2ETest {
     }
 
     @Test
+    void gatewayAutoReconcileReconcilesOnRouteAndProfileMutationsWhenHealthyAndSkipsWhenStopped() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                Locator autoReconcile = page.locator("#chk-gateway-auto-reconcile");
+                assertThat(autoReconcile).isVisible();
+                assertThat(autoReconcile).isChecked();
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+
+                // 1. Route flip with Auto-reconcile checked -> automatically reconciles Gateway
+                Locator pricingRow = serviceRow("pricing");
+                pricingRow.locator("button.route-local").click();
+
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+                assertThat(page.locator("#gateway-drift-alert")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
+
+                // 2. Profile apply with Auto-reconcile checked -> automatically reconciles Gateway
+                page.locator(".profile-pill", new Page.LocatorOptions().setHasText("orders-local")).click();
+
+                assertThat(pricingRow.locator("button.route-remote")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+                assertThat(page.locator("#gateway-drift-alert")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
+
+                // Verify CLI history captured both mutations and both auto-reconcile commands
+                page.locator("#btn-cli-history").click();
+                Locator items = page.locator("#cli-history-list .cli-history-cmd");
+                assertThat(items).hasCount(5);
+                assertThat(items.nth(0)).hasText("procomp gateway reconcile");
+                assertThat(items.nth(1)).hasText("procomp profile use orders-local");
+                assertThat(items.nth(2)).hasText("procomp gateway reconcile");
+                assertThat(items.nth(3)).hasText("procomp route pricing local");
+                assertThat(items.nth(4)).hasText("procomp status");
+                page.locator("#btn-close-cli-history").click();
+
+                // 3. Stopping Gateway -> Route flip must NOT fire a failing auto-reconcile request
+                page.locator("#btn-gateway-stop").click();
+                assertThat(page.locator("#gateway-health")).hasText("STOPPED");
+
+                pricingRow.locator("button.route-local").click();
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing local");
+                assertThat(page.locator("#error-banner")).isHidden();
+
+                // 4. Unchecked preference persists across reload and leaves running Gateway DRIFTED
+                page.locator("#btn-gateway-start").click();
+                assertThat(page.locator("#gateway-health")).hasText("HEALTHY");
+                page.locator("#btn-gateway-reconcile").click();
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+
+                autoReconcile.uncheck();
+                page.reload();
+                assertThat(autoReconcile).not().isChecked();
+
+                pricingRow.locator("button.route-remote").click();
+                assertThat(page.locator("#gateway-sync")).containsText("DRIFTED");
+                assertThat(page.locator("#gateway-drift-alert")).isVisible();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing remote");
+            }
+        }
+    }
+
+    @Test
     void cliFooterHistoryPanelShowsFullCommandHistoryWithoutDuplicatesAndCanBeCleared() {
         try (InMemoryWorld world = new InMemoryWorld()) {
             new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
@@ -155,12 +231,10 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(page.locator("#cli-history-count")).hasText("1");
                 assertThat(page.locator("#cli-history-panel")).isHidden();
 
-                // Flip pricing Route to LOCAL, reconcile Gateway, and start pricing (SSE meta+done)
+                // Flip pricing Route to LOCAL (auto-reconciles Gateway) and start pricing (SSE meta+done)
                 Locator pricingRow = serviceRow("pricing");
                 pricingRow.locator("button.route-local").click();
-                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing local");
-
-                page.locator("#btn-drift-reconcile").click();
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
 
                 pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
