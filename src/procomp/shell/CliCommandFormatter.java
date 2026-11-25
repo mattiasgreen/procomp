@@ -79,6 +79,38 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String saveProfileSnapshot(String profileName) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("save");
+        tokens.add(quoteArg(profileName));
+        return join(tokens);
+    }
+
+    public String saveProfile(String profileName, List<String> localServices) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        Objects.requireNonNull(localServices, "localServices must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("save");
+        tokens.add(quoteArg(profileName));
+        if (localServices.isEmpty()) {
+            tokens.add("--none");
+        } else {
+            for (String svc : localServices) {
+                tokens.add(quoteArg(svc));
+            }
+        }
+        return join(tokens);
+    }
+
+    public String deleteProfile(String profileName) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("delete");
+        tokens.add(quoteArg(profileName));
+        return join(tokens);
+    }
+
     public String start(List<String> services, boolean detach, Duration timeout) {
         Objects.requireNonNull(services, "services must not be null");
         Objects.requireNonNull(timeout, "timeout must not be null");

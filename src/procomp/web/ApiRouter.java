@@ -32,6 +32,9 @@ import procomp.shell.ProcessShell.StartResult;
 import procomp.shell.ProcessShell.StopRequest;
 import procomp.shell.ProcessShell.StopResult;
 import procomp.shell.ProcompRuntime;
+import procomp.shell.ProfileConfigShell;
+import procomp.shell.ProfileConfigShell.DeleteProfileResult;
+import procomp.shell.ProfileConfigShell.SaveProfileResult;
 import procomp.shell.ProjectLoader.LoadedProject;
 import procomp.shell.RoutingShell;
 import procomp.shell.StatusShell;
@@ -248,6 +251,17 @@ public final class ApiRouter {
                 return methodNotAllowed(method, "POST");
             }
             return handleUseProfile(profileUseSegment.get());
+        }
+
+        Optional<String> profileSegment = extractSegment(path, PROFILES_PREFIX, "");
+        if (profileSegment.isPresent()) {
+            if ("PUT".equals(method)) {
+                return handleSaveProfile(profileSegment.get(), request);
+            }
+            if ("DELETE".equals(method)) {
+                return handleDeleteProfile(profileSegment.get());
+            }
+            return methodNotAllowed(method, "PUT, DELETE");
         }
 
         Optional<String> buildCancelSegment = extractSegment(path, SERVICES_PREFIX, "/build/cancel");
@@ -557,6 +571,144 @@ public final class ApiRouter {
             }
             RoutingTable updated = ((Result.Ok<RoutingTable, DomainError>) useRes).value();
             return okEnvelope(DomainJson.routingTable(project, updated), cliCommand);
+        } finally {
+            mutationLock.unlock();
+        }
+    }
+
+    private ApiResponse handleSaveProfile(String rawName, ApiRequest request) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "profile");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String profileName = ((Result.Ok<String, DomainError>) nameRes).value();
+
+        Result<JsonValue.JsonObject, DomainError> objRes = parseJsonObject(request.body(), false);
+        if (objRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject obj = ((Result.Ok<JsonValue.JsonObject, DomainError>) objRes).value();
+
+        Result<Boolean, DomainError> fromCurrentRes = readOptionalBoolean(obj, "fromCurrentRoutes", false);
+        if (fromCurrentRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        boolean fromCurrentRoutes = ((Result.Ok<Boolean, DomainError>) fromCurrentRes).value();
+
+        Optional<List<String>> explicitLocal;
+        String cliCommand;
+        if (fromCurrentRoutes) {
+            if (obj.get("local").isPresent() && !(obj.get("local").get() instanceof JsonValue.JsonNull)) {
+                return errorResponse(
+                    400,
+                    DomainError.of("INVALID_REQUEST", "Request body cannot specify both 'fromCurrentRoutes': true and 'local'"),
+                    ""
+                );
+            }
+            explicitLocal = Optional.empty();
+            cliCommand = cli.saveProfileSnapshot(profileName);
+        } else {
+            if (obj.get("local").isEmpty()) {
+                return errorResponse(
+                    400,
+                    DomainError.of("INVALID_REQUEST", "Request body must specify 'local' array or 'fromCurrentRoutes': true"),
+                    ""
+                );
+            }
+            Result<List<String>, DomainError> localRes = readStringList(obj, "local", false);
+            if (localRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+                return errorResponse(400, err, "");
+            }
+            List<String> locals = ((Result.Ok<List<String>, DomainError>) localRes).value();
+            explicitLocal = Optional.of(locals);
+            cliCommand = cli.saveProfile(profileName, locals);
+        }
+
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            LoadedProject loaded = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value();
+
+            List<String> localServices;
+            if (explicitLocal.isPresent()) {
+                localServices = explicitLocal.get();
+            } else {
+                Result<RoutingShell, DomainError> routingShellRes = runtime.routingShell();
+                if (routingShellRes instanceof Result.Err<RoutingShell, DomainError>(DomainError err)) {
+                    return domainErrorResponse(err, cliCommand);
+                }
+                Result<RoutingTable, DomainError> tableRes =
+                    ((Result.Ok<RoutingShell, DomainError>) routingShellRes).value().showRoutes(loaded.project());
+                if (tableRes instanceof Result.Err<RoutingTable, DomainError>(DomainError err)) {
+                    return domainErrorResponse(err, cliCommand);
+                }
+                localServices = ((Result.Ok<RoutingTable, DomainError>) tableRes).value().localServices();
+            }
+
+            Result<ProfileConfigShell, DomainError> shellRes = runtime.profileConfigShell();
+            if (shellRes instanceof Result.Err<ProfileConfigShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<SaveProfileResult, DomainError> saveRes =
+                ((Result.Ok<ProfileConfigShell, DomainError>) shellRes).value().saveProfile(loaded, profileName, localServices);
+            if (saveRes instanceof Result.Err<SaveProfileResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            SaveProfileResult saved = ((Result.Ok<SaveProfileResult, DomainError>) saveRes).value();
+            projectHolder.invalidate();
+
+            Map<String, JsonValue> profileObj = new LinkedHashMap<>();
+            profileObj.put("name", Json.str(saved.profile().name()));
+            List<JsonValue> localVals = new ArrayList<>(saved.profile().localServices().size());
+            for (String svc : saved.profile().localServices()) {
+                localVals.add(Json.str(svc));
+            }
+            profileObj.put("local", Json.arr(localVals));
+
+            Map<String, JsonValue> data = new LinkedHashMap<>();
+            data.put("profile", Json.obj(profileObj));
+            data.put("profiles", DomainJson.profilesArray(List.copyOf(saved.loaded().project().profiles().values())));
+            return okEnvelope(Json.obj(data), cliCommand);
+        } finally {
+            mutationLock.unlock();
+        }
+    }
+
+    private ApiResponse handleDeleteProfile(String rawName) {
+        Result<String, DomainError> nameRes = decodeSegment(rawName, "profile");
+        if (nameRes instanceof Result.Err<String, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        String profileName = ((Result.Ok<String, DomainError>) nameRes).value();
+        String cliCommand = cli.deleteProfile(profileName);
+
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            LoadedProject loaded = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value();
+
+            Result<ProfileConfigShell, DomainError> shellRes = runtime.profileConfigShell();
+            if (shellRes instanceof Result.Err<ProfileConfigShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<DeleteProfileResult, DomainError> delRes =
+                ((Result.Ok<ProfileConfigShell, DomainError>) shellRes).value().deleteProfile(loaded, profileName);
+            if (delRes instanceof Result.Err<DeleteProfileResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            DeleteProfileResult deleted = ((Result.Ok<DeleteProfileResult, DomainError>) delRes).value();
+            projectHolder.invalidate();
+
+            Map<String, JsonValue> data = new LinkedHashMap<>();
+            data.put("deleted", Json.str(deleted.deletedName()));
+            data.put("profiles", DomainJson.profilesArray(List.copyOf(deleted.loaded().project().profiles().values())));
+            return okEnvelope(Json.obj(data), cliCommand);
         } finally {
             mutationLock.unlock();
         }
@@ -1222,6 +1374,7 @@ public final class ApiRouter {
                 "BUILD_ALREADY_RUNNING", "BUILD_RUN_UNKNOWN" -> 409;
             case "INVALID_REQUEST",
                 "INVALID_STOP_OPTIONS",
+                "PROFILE_INVALID_NAME",
                 "NO_BUILDER_CONFIGURED",
                 "ROUTE_INVALID_VALUE",
                 "ROUTE_MISSING_SERVICES",

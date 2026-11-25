@@ -4,6 +4,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.project.Project;
 import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.ProjectLoader.LoadedProject;
 
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
@@ -70,15 +71,15 @@ public final class Procomp {
             return UiCli.execute(options, parsed.configOverride(), effectiveRuntime);
         }
 
-        Result<Project, DomainError> projRes = effectiveRuntime.projectLoader()
-            .flatMap(loader -> loader.load(parsed.configOverride()));
-        if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
+        Result<LoadedProject, DomainError> projRes = effectiveRuntime.projectLoader()
+            .flatMap(loader -> loader.loadWithPath(parsed.configOverride()));
+        if (projRes instanceof Result.Err<LoadedProject, DomainError>(DomainError error)) {
             effectiveRuntime.err().println("Error: " + error.format());
             return 1;
         }
-        Project project = ((Result.Ok<Project, DomainError>) projRes).value();
+        LoadedProject loaded = ((Result.Ok<LoadedProject, DomainError>) projRes).value();
 
-        return executeCommand(cliCommand, project, effectiveRuntime);
+        return executeCommand(cliCommand, loaded, effectiveRuntime);
     }
 
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
@@ -94,9 +95,10 @@ public final class Procomp {
         };
     }
 
-    private static int executeCommand(CliCommand cliCommand, Project project, CliRuntime runtime) {
+    private static int executeCommand(CliCommand cliCommand, LoadedProject loaded, CliRuntime runtime) {
+        Project project = loaded.project();
         return switch (cliCommand) {
-            case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, project, runtime);
+            case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, loaded, runtime);
             case CliCommand.ProcessCommand(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
             case CliCommand.Build(BuildCli.Action action) -> BuildCli.execute(action, project, runtime);
             case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
@@ -174,7 +176,7 @@ public final class Procomp {
               inspect <service>                   Deep read-only Inspection of a Service's local Process & Build Run (--json)
               logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
-              profile <list|use <name>>           List or apply named routing Profiles (--json on list)
+              profile <list|use|save|delete>      List, apply, save, or delete named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");

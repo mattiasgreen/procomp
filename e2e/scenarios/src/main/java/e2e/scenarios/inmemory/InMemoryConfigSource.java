@@ -3,6 +3,7 @@ package e2e.scenarios.inmemory;
 import e2e.scenarios.engine.EstateSpec;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
+import procomp.core.common.Unit;
 import procomp.shell.ports.ConfigSource;
 
 import java.nio.file.Path;
@@ -268,5 +269,11 @@ public final class InMemoryConfigSource implements ConfigSource {
             ));
         }
         return Result.ok(content);
+    }
+
+    @Override
+    public Result<Unit, DomainError> writeFile(Path path, String content) {
+        files.put(path.toAbsolutePath().normalize(), content);
+        return Result.ok(Unit.VALUE);
     }
 }

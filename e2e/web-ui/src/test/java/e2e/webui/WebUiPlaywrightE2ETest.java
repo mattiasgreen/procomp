@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -372,6 +373,79 @@ final class WebUiPlaywrightE2ETest {
                     page.locator("#logs-output").innerText().contains(InMemoryConfigSource.DEMO_SECRET_VALUE),
                     "Live logs must never leak secret env values"
                 );
+            }
+        }
+    }
+
+    @Test
+    void profileManagementCreatesEditsHighlightsAndDeletesProfilesInProcompJson() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // 1. Existing orders-local profile matches current Routing Table -> highlighted active
+                Locator ordersLocalPill = page.locator(".profile-pill-group[data-profile='orders-local'] .profile-pill");
+                assertThat(ordersLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 2. Flip pricing LOCAL -> orders-local is no longer active
+                serviceRow("pricing").getByRole(
+                    com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("LOCAL")
+                ).click();
+                assertThat(ordersLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 3. Click "+ Save Profile" -> pre-selected with current LOCAL services, overwrite warning on existing name
+                page.locator("#btn-save-profile").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#profile-name-input").fill("orders-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isVisible();
+                assertThat(page.locator("#btn-profile-save")).hasText("Overwrite Profile");
+
+                // Change to new name -> snapshot CLI preview & save
+                page.locator("#profile-name-input").fill("full-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isHidden();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local");
+
+                // New pill appears and is immediately active (matches current Routing Table)
+                Locator fullLocalPill = page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill");
+                assertThat(fullLocalPill).isVisible();
+                assertThat(fullLocalPill).containsText("4 LOCAL");
+                assertThat(fullLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 4. Edit full-local via inline edit icon -> Clear all -> saves as --none without mutating current Routing Table
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                assertThat(page.locator("#profile-name-input")).isDisabled();
+                page.locator("#btn-profile-clear-all").click();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local --none");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local --none");
+                assertThat(fullLocalPill).containsText("0 LOCAL");
+                assertThat(fullLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // Reload page -> persisted in procomp.json
+                page.reload();
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill")).containsText("0 LOCAL");
+
+                // 5. Delete full-local with confirmation inside Edit dialog
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#btn-profile-delete").click();
+                assertThat(page.locator("#profile-delete-confirm")).isVisible();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile delete full-local");
+                page.locator("#btn-profile-delete-confirm").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile delete full-local");
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local']")).hasCount(0);
             }
         }
     }

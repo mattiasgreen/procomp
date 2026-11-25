@@ -2,13 +2,15 @@ package procomp.shell.ports;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
+import procomp.core.common.Unit;
 
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
 
 /**
- * Read-only port for discovering and reading project config, catalog, env files, and host environment.
+ * Port for discovering, reading, and atomically updating project config files alongside
+ * catalog, env files, and host environment.
  */
 public interface ConfigSource {
 
@@ -25,4 +27,12 @@ public interface ConfigSource {
     boolean isRegularFile(Path path);
 
     Result<String, DomainError> readFile(Path path);
+
+    default Result<Unit, DomainError> writeFile(Path path, String content) {
+        return Result.err(DomainError.of(
+            "IO_WRITE_UNSUPPORTED",
+            "ConfigSource does not support writing '" + path + "'",
+            Map.of("path", path.toString())
+        ));
+    }
 }

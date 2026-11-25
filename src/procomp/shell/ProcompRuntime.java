@@ -32,6 +32,7 @@ public final class ProcompRuntime {
     private final ProgressObserver observer;
 
     private Optional<ProjectLoader> projectLoader = Optional.empty();
+    private Optional<ProfileConfigShell> profileConfigShell = Optional.empty();
     private Optional<RoutingShell> routingShell = Optional.empty();
     private Optional<LogsShell> logsShell = Optional.empty();
     private Optional<BuildShell> buildShell = Optional.empty();
@@ -97,6 +98,16 @@ public final class ProcompRuntime {
             projectLoader = Optional.of(new ProjectLoader(configSource.get(), observer));
         }
         return Result.ok(projectLoader.get());
+    }
+
+    public synchronized Result<ProfileConfigShell, DomainError> profileConfigShell() {
+        if (configSource.isEmpty()) {
+            return Result.err(missingPorts("ProfileConfigShell", List.of("ConfigSource")));
+        }
+        if (profileConfigShell.isEmpty()) {
+            profileConfigShell = Optional.of(new ProfileConfigShell(configSource.get(), observer));
+        }
+        return Result.ok(profileConfigShell.get());
     }
 
     public synchronized Result<RoutingShell, DomainError> routingShell() {
