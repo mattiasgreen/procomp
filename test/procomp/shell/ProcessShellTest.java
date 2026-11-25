@@ -240,6 +240,53 @@ public final class ProcessShellTest {
         Assert.assertEquals("GATEWAY_ADMIN_ERROR", adminErr.code(), "GATEWAY_ADMIN_ERROR propagated");
     }
 
+    public static void testInspectResolvesRssInSingleBatchEvenWithRunningGateway() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(root)
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "acme",
+                  "defaults": {
+                    "proxyPathTemplate": "/{{service}}",
+                    "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}"
+                  },
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"], "healthPath": "/actuator/health" } },
+                  "gateway": { "type": "wiremock", "port": 8080, "healthPath": "/__admin/health" },
+                  "services": { "orders": { "runtime": "java", "port": 9001, "workingDir": "." } }
+                }
+                """);
+        Project project = Assert.assertOk(new ProjectLoader(configSource).load(Optional.empty()), "project loads");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner().bind(8080, 8100L).bind(9001, 4100L);
+        processRunner.registerProcess(new ObservedProcess(
+            8100L, true, Optional.of(clock.now()), Optional.of("java -jar wiremock.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(clock.now()), Optional.of("java -XX:NativeMemoryTracking=summary -jar orders.jar"),
+            List.of("-XX:NativeMemoryTracking=summary", "-jar", "orders.jar"), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        long expectedRss = 210L * 1024L * 1024L;
+        processRunner.setRssBytes(8100L, 90L * 1024L * 1024L);
+        processRunner.setRssBytes(4100L, expectedRss);
+        var httpClient = new FakeHttpClient()
+            .stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK")
+            .stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 200, "{\"mappings\":[]}")
+            .stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
+
+        ProcessShell shell = new ProcessShell(
+            stateStore, processRunner, portScanner, httpClient, new FakeProjectFiles(), clock, new RecordingObserver()
+        );
+        int callsBefore = processRunner.rssSnapshotCalls();
+        InspectionReport report = Assert.assertOk(shell.inspect(project, "orders"), "inspect succeeds");
+        Assert.assertEquals(callsBefore + 1, processRunner.rssSnapshotCalls(), "inspect performs exactly one RSS snapshot");
+        Assert.assertEquals(Optional.of(expectedRss), report.rssBytes(), "inspect resolves RSS from batch snapshot");
+        Assert.assertEquals(3, report.diagnosticCommands().size(), "inspect populates JVM diagnostic commands");
+        Assert.assertEquals(Optional.empty(), report.diagnosticCommands().get(2).note(), "NMT flag detected");
+    }
+
     public static void testStartBareTargetsLocalOnlyAndExplicitStartWaitsOrDetaches() {
         Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
         Project project = loadSampleProject(root, "secret-start-val");

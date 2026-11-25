@@ -95,6 +95,11 @@ public final class ApiRouterTest {
         JsonValue.JsonObject data = obj(statusRoot, "data");
         Assert.assertEquals("acme", str(data, "project"), "project name");
         Assert.assertEquals(3, arr(data, "services").elements().size(), "3 services");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) data.get("totalRssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/status totalRssBytes"
+        );
 
         // GET /api/services/billing/inspect
         ApiResponse inspectRes = fx.router.handle(localGet("/api/services/billing/inspect"));
@@ -115,6 +120,18 @@ public final class ApiRouterTest {
         Assert.assertEquals("UNMANAGED", str(inspectData, "owner"), "owner UNMANAGED");
         Assert.assertEquals("IDE", str(inspectData, "provenance"), "provenance IDE");
         Assert.assertEquals(1, arr(inspectData, "parentChain").elements().size(), "parentChain populated");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) inspectData.get("rssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/services/billing/inspect rssBytes"
+        );
+        JsonValue.JsonArray diagCmds = arr(inspectData, "diagnosticCommands");
+        Assert.assertEquals(3, diagCmds.elements().size(), "inspect returns 3 JVM diagnostic commands");
+        Assert.assertEquals(
+            "jcmd 5200 GC.heap_info",
+            str((JsonValue.JsonObject) diagCmds.elements().get(0), "command"),
+            "first diagnostic command uses live PID"
+        );
 
         // Unknown service -> 404
         ApiResponse missingRes = fx.router.handle(localGet("/api/services/ghost/inspect"));

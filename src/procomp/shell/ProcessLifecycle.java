@@ -106,6 +106,27 @@ final class ProcessLifecycle {
         return portScanner.findListeners(ports);
     }
 
+    Map<Long, Long> snapshotRssBytes() {
+        Map<Long, Long> snapshot = processRunner.snapshotRssBytes();
+        if (snapshot.isEmpty()) {
+            observer.diagnostic(DiagnosticCategory.DISCOVERY, "batch RSS snapshot returned no entries");
+        } else {
+            observer.diagnostic(DiagnosticCategory.DISCOVERY, "batch RSS snapshot captured " + snapshot.size() + " processes");
+        }
+        return snapshot;
+    }
+
+    Optional<Long> resolveRssBytes(DiscoveryResult discovery, Map<Long, Long> rssSnapshot) {
+        Optional<Long> resolved = DiscoveryEngine.resolveRssBytes(discovery, rssSnapshot);
+        if (resolved.isEmpty() && discovery.health().isLive() && discovery.pid().isPresent()) {
+            observer.diagnostic(
+                DiagnosticCategory.DISCOVERY,
+                discovery.target() + ": RSS unavailable for PID " + discovery.pid().get()
+            );
+        }
+        return resolved;
+    }
+
     Result<DiscoveryContext, DomainError> discoverService(String projectName, ServiceDefinition service) {
         return discoverService(projectName, service, Optional.empty());
     }
@@ -248,14 +269,29 @@ final class ProcessLifecycle {
         Optional<String> desiredRoute,
         Optional<String> liveGatewayRoute
     ) {
-        return DiscoveryEngine.inspect(
+        DiscoveryResult disc = ctx.discovery();
+        Map<Long, Long> rssMap = Map.of();
+        if (disc.health().isLive()
+            && disc.pid().isPresent()
+            && disc.process().flatMap(ObservedProcess::rssBytes).isEmpty()) {
+            rssMap = snapshotRssBytes();
+        }
+        InspectionReport report = DiscoveryEngine.inspect(
             ctx.target(),
-            ctx.discovery(),
+            disc,
             ctx.managedRecord(),
             desiredRoute,
             liveGatewayRoute,
-            clock.now()
+            clock.now(),
+            rssMap
         );
+        if (report.rssBytes().isEmpty() && disc.health().isLive() && disc.pid().isPresent()) {
+            observer.diagnostic(
+                DiagnosticCategory.DISCOVERY,
+                disc.target() + ": RSS unavailable for PID " + disc.pid().get()
+            );
+        }
+        return report;
     }
 
     /**

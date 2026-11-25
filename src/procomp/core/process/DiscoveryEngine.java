@@ -143,6 +143,19 @@ public final class DiscoveryEngine {
         );
     }
 
+    public static Optional<Long> resolveRssBytes(DiscoveryResult discovery, java.util.Map<Long, Long> rssSnapshot) {
+        Objects.requireNonNull(discovery, "discovery must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
+        if (!discovery.health().isLive()) {
+            return Optional.empty();
+        }
+        Optional<Long> direct = discovery.process().flatMap(ObservedProcess::rssBytes);
+        if (direct.isPresent()) {
+            return direct;
+        }
+        return discovery.pid().map(rssSnapshot::get);
+    }
+
     public static InspectionReport inspect(
         ProcessTarget target,
         DiscoveryResult discovery,
@@ -151,14 +164,26 @@ public final class DiscoveryEngine {
         Optional<String> liveGatewayRoute,
         Instant now
     ) {
+        return inspect(target, discovery, managedRecord, desiredRoute, liveGatewayRoute, now, java.util.Map.of());
+    }
+
+    public static InspectionReport inspect(
+        ProcessTarget target,
+        DiscoveryResult discovery,
+        Optional<ManagedProcessRecord> managedRecord,
+        Optional<String> desiredRoute,
+        Optional<String> liveGatewayRoute,
+        Instant now,
+        java.util.Map<Long, Long> rssSnapshot
+    ) {
         Objects.requireNonNull(target, "target must not be null");
         Objects.requireNonNull(discovery, "discovery must not be null");
         Objects.requireNonNull(managedRecord, "managedRecord must not be null");
         Objects.requireNonNull(desiredRoute, "desiredRoute must not be null");
         Objects.requireNonNull(liveGatewayRoute, "liveGatewayRoute must not be null");
         Objects.requireNonNull(now, "now must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
 
-        boolean inactive = discovery.health() == HealthState.STOPPED || discovery.health() == HealthState.CRASHED;
         Optional<Duration> uptime = discovery.uptime(now);
         Optional<String> commandLine = discovery.process()
             .flatMap(ObservedProcess::commandLine)
@@ -171,9 +196,7 @@ public final class DiscoveryEngine {
         List<ParentProcess> parentChain = discovery.process()
             .map(ObservedProcess::parentChain)
             .orElse(List.of());
-        Optional<Long> rssBytes = inactive
-            ? Optional.empty()
-            : discovery.process().flatMap(ObservedProcess::rssBytes);
+        Optional<Long> rssBytes = resolveRssBytes(discovery, rssSnapshot);
 
         return new InspectionReport(
             target.name(),
@@ -193,7 +216,8 @@ public final class DiscoveryEngine {
             discovery.healthResponse(),
             target.stdoutLog(),
             target.stderrLog(),
-            discovery.stale()
+            discovery.stale(),
+            DiagnosticCommandAdvisor.suggest(discovery)
         );
     }
 
