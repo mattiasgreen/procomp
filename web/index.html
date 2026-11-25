@@ -84,6 +84,10 @@
               <span id="gateway-rss" class="mono muted"></span>
             </div>
             <div id="gateway-actions" class="gateway-actions">
+              <label class="checkbox-label gateway-auto-reconcile" title="Automatically reconcile Gateway after Route or Profile changes when Gateway is healthy">
+                <input id="chk-gateway-auto-reconcile" type="checkbox" checked>
+                <span>Auto-reconcile</span>
+              </label>
               <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
               <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
               <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>
@@ -112,6 +116,14 @@
           <div class="profile-bar">
             <span class="toolbar-label">Profiles</span>
             <div id="profile-list" class="profile-list" role="group" aria-label="Project Profiles"></div>
+            <button
+              id="btn-save-profile"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              title="Save current Routing Table as a Profile in procomp.json"
+            >
+              + Save Profile
+            </button>
           </div>
           <div class="bulk-actions">
             <button id="btn-git-fetch-local" type="button" class="btn btn-secondary" title="Fetch all LOCAL-routed Repositories (procomp git fetch)">
@@ -321,6 +333,61 @@
     </form>
   </dialog>
 
+  <!-- Native <dialog> for Creating, Editing, and Deleting Profiles -->
+  <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title">
+    <form method="dialog" class="profile-dialog-form">
+      <div class="dialog-header">
+        <span class="badge badge-info">PROFILE</span>
+        <h3 id="profile-dialog-title" class="dialog-title">Save Profile</h3>
+      </div>
+      <div class="dialog-body">
+        <div class="profile-form-field">
+          <label for="profile-name-input" class="profile-form-label">Profile Name</label>
+          <input
+            id="profile-name-input"
+            type="text"
+            class="profile-name-input mono"
+            placeholder="e.g. orders-local"
+            autocomplete="off"
+            spellcheck="false"
+          >
+        </div>
+        <div id="profile-overwrite-warning" class="dialog-notice" hidden></div>
+        <div id="profile-dialog-error" class="dialog-error" hidden></div>
+        <div class="profile-services-section">
+          <div class="profile-services-header">
+            <span class="profile-form-label">LOCAL Services <span id="profile-selected-count" class="mono muted"></span></span>
+            <div class="profile-services-bulk">
+              <button id="btn-profile-select-all" type="button" class="btn btn-secondary btn-sm">Select all</button>
+              <button id="btn-profile-clear-all" type="button" class="btn btn-secondary btn-sm">Clear all</button>
+            </div>
+          </div>
+          <div id="profile-services-list" class="profile-services-list" role="group" aria-label="LOCAL Services"></div>
+        </div>
+        <div class="dialog-cli-preview">
+          <span class="dialog-cli-label">Verbatim CLI Command</span>
+          <code id="profile-cli-preview" class="mono"></code>
+        </div>
+        <div id="profile-delete-confirm" class="profile-delete-confirm" hidden>
+          <span id="profile-delete-confirm-text"></span>
+          <div class="profile-delete-confirm-actions">
+            <button id="btn-profile-delete-cancel" type="button" class="btn btn-secondary btn-sm">Keep</button>
+            <button id="btn-profile-delete-confirm" type="button" class="btn btn-danger btn-sm">Confirm Delete</button>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer profile-dialog-footer">
+        <div class="profile-dialog-footer-left">
+          <button id="btn-profile-delete" type="button" class="btn btn-danger" hidden>Delete Profile</button>
+        </div>
+        <div class="profile-dialog-footer-right">
+          <button id="btn-profile-cancel" type="button" class="btn btn-secondary">Cancel</button>
+          <button id="btn-profile-save" type="button" class="btn btn-primary">Save Profile</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Native <dialog> Modal for Non-Destructive Git Branch Switch -->
   <dialog id="git-switch-dialog" class="git-switch-dialog" aria-labelledby="git-switch-dialog-title">
     <form method="dialog" class="git-switch-dialog-form">
@@ -364,7 +431,6 @@
 
   <!-- Anchored Pill Action Popover -->
   <div id="pill-action-menu" class="pill-action-menu" role="menu" hidden></div>
-
   <script type="module" src="/app.js"></script>
 </body>
 </html>

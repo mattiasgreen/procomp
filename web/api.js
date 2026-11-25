@@ -100,6 +100,20 @@ export function useProfile(profileName) {
   });
 }
 
+export function saveProfile(profileName, { local = null, fromCurrentRoutes = false } = {}) {
+  const payload = fromCurrentRoutes ? { fromCurrentRoutes: true } : { local: Array.isArray(local) ? local : [] };
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteProfile(profileName) {
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function startServices(services = [], { detach = false, timeoutSeconds = 30 } = {}) {
   return requestJson('/api/services/start', {
     method: 'POST',

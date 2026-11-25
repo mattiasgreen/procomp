@@ -16,6 +16,7 @@ import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
 import procomp.shell.ProcessShell;
 import procomp.shell.ProcompRuntime;
+import procomp.shell.ProfileConfigShell;
 import procomp.shell.ProjectLoader;
 import procomp.shell.RoutingShell;
 import procomp.shell.StatusShell;
@@ -159,6 +160,10 @@ public final class CliRuntime {
 
     Result<ProjectLoader, DomainError> projectLoader() {
         return runtime.projectLoader();
+    }
+
+    Result<ProfileConfigShell, DomainError> profileConfigShell() {
+        return runtime.profileConfigShell();
     }
 
     Result<RoutingShell, DomainError> routingShell() {

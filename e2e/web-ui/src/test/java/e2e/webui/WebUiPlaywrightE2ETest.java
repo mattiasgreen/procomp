@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -121,6 +122,14 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
                 assertThat(page.locator("#gateway-drift-alert")).isHidden();
 
+                Locator autoReconcile = page.locator("#chk-gateway-auto-reconcile");
+                assertThat(autoReconcile).isVisible();
+                assertThat(autoReconcile).isChecked();
+
+                // Disable Auto-reconcile to verify UNIX separation (DRIFTED until explicit reconcile)
+                autoReconcile.uncheck();
+                assertThat(autoReconcile).not().isChecked();
+
                 Locator pricingRow = serviceRow("pricing");
                 assertThat(pricingRow).isVisible();
                 assertThat(pricingRow.locator("button.route-remote")).hasAttribute("aria-pressed", "true");
@@ -143,6 +152,74 @@ final class WebUiPlaywrightE2ETest {
     }
 
     @Test
+    void gatewayAutoReconcileReconcilesOnRouteAndProfileMutationsWhenHealthyAndSkipsWhenStopped() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                Locator autoReconcile = page.locator("#chk-gateway-auto-reconcile");
+                assertThat(autoReconcile).isVisible();
+                assertThat(autoReconcile).isChecked();
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+
+                // 1. Route flip with Auto-reconcile checked -> automatically reconciles Gateway
+                Locator pricingRow = serviceRow("pricing");
+                pricingRow.locator("button.route-local").click();
+
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+                assertThat(page.locator("#gateway-drift-alert")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
+
+                // 2. Profile apply with Auto-reconcile checked -> automatically reconciles Gateway
+                page.locator(".profile-pill", new Page.LocatorOptions().setHasText("orders-local")).click();
+
+                assertThat(pricingRow.locator("button.route-remote")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+                assertThat(page.locator("#gateway-drift-alert")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
+
+                // Verify CLI history captured both mutations and both auto-reconcile commands
+                page.locator("#btn-cli-history").click();
+                Locator items = page.locator("#cli-history-list .cli-history-cmd");
+                assertThat(items).hasCount(5);
+                assertThat(items.nth(0)).hasText("procomp gateway reconcile");
+                assertThat(items.nth(1)).hasText("procomp profile use orders-local");
+                assertThat(items.nth(2)).hasText("procomp gateway reconcile");
+                assertThat(items.nth(3)).hasText("procomp route pricing local");
+                assertThat(items.nth(4)).hasText("procomp status");
+                page.locator("#btn-close-cli-history").click();
+
+                // 3. Stopping Gateway -> Route flip must NOT fire a failing auto-reconcile request
+                page.locator("#btn-gateway-stop").click();
+                assertThat(page.locator("#gateway-health")).hasText("STOPPED");
+
+                pricingRow.locator("button.route-local").click();
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing local");
+                assertThat(page.locator("#error-banner")).isHidden();
+
+                // 4. Unchecked preference persists across reload and leaves running Gateway DRIFTED
+                page.locator("#btn-gateway-start").click();
+                assertThat(page.locator("#gateway-health")).hasText("HEALTHY");
+                page.locator("#btn-gateway-reconcile").click();
+                assertThat(page.locator("#gateway-sync")).hasText("IN_SYNC");
+
+                autoReconcile.uncheck();
+                page.reload();
+                assertThat(autoReconcile).not().isChecked();
+
+                pricingRow.locator("button.route-remote").click();
+                assertThat(page.locator("#gateway-sync")).containsText("DRIFTED");
+                assertThat(page.locator("#gateway-drift-alert")).isVisible();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing remote");
+            }
+        }
+    }
+
+    @Test
     void cliFooterHistoryPanelShowsFullCommandHistoryWithoutDuplicatesAndCanBeCleared() {
         try (InMemoryWorld world = new InMemoryWorld()) {
             new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
@@ -155,12 +232,10 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(page.locator("#cli-history-count")).hasText("1");
                 assertThat(page.locator("#cli-history-panel")).isHidden();
 
-                // Flip pricing Route to LOCAL, reconcile Gateway, and start pricing (SSE meta+done)
+                // Flip pricing Route to LOCAL (auto-reconciles Gateway) and start pricing (SSE meta+done)
                 Locator pricingRow = serviceRow("pricing");
                 pricingRow.locator("button.route-local").click();
-                assertThat(page.locator("#cli-command-echo")).hasText("procomp route pricing local");
-
-                page.locator("#btn-drift-reconcile").click();
+                assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
 
                 clickHealthMenuAction(pricingRow, "Start");
@@ -301,6 +376,79 @@ final class WebUiPlaywrightE2ETest {
     }
 
     @Test
+    void profileManagementCreatesEditsHighlightsAndDeletesProfilesInProcompJson() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // 1. Existing orders-local profile matches current Routing Table -> highlighted active
+                Locator ordersLocalPill = page.locator(".profile-pill-group[data-profile='orders-local'] .profile-pill");
+                assertThat(ordersLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 2. Flip pricing LOCAL -> orders-local is no longer active
+                serviceRow("pricing").getByRole(
+                    com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("LOCAL")
+                ).click();
+                assertThat(ordersLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 3. Click "+ Save Profile" -> pre-selected with current LOCAL services, overwrite warning on existing name
+                page.locator("#btn-save-profile").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#profile-name-input").fill("orders-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isVisible();
+                assertThat(page.locator("#btn-profile-save")).hasText("Overwrite Profile");
+
+                // Change to new name -> snapshot CLI preview & save
+                page.locator("#profile-name-input").fill("full-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isHidden();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local");
+
+                // New pill appears and is immediately active (matches current Routing Table)
+                Locator fullLocalPill = page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill");
+                assertThat(fullLocalPill).isVisible();
+                assertThat(fullLocalPill).containsText("4 LOCAL");
+                assertThat(fullLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 4. Edit full-local via inline edit icon -> Clear all -> saves as --none without mutating current Routing Table
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                assertThat(page.locator("#profile-name-input")).isDisabled();
+                page.locator("#btn-profile-clear-all").click();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local --none");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local --none");
+                assertThat(fullLocalPill).containsText("0 LOCAL");
+                assertThat(fullLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // Reload page -> persisted in procomp.json
+                page.reload();
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill")).containsText("0 LOCAL");
+
+                // 5. Delete full-local with confirmation inside Edit dialog
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#btn-profile-delete").click();
+                assertThat(page.locator("#profile-delete-confirm")).isVisible();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile delete full-local");
+                page.locator("#btn-profile-delete-confirm").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile delete full-local");
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local']")).hasCount(0);
+            }
+        }
+    }
+
+    @Test
     void fullscreenLogsViewAndServiceTableFilteringSupportOrQueriesWrapAndShortcuts() {
         try (InMemoryWorld world = new InMemoryWorld()) {
             new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
@@ -385,7 +533,6 @@ final class WebUiPlaywrightE2ETest {
             .getByRole(com.microsoft.playwright.options.AriaRole.MENUITEM, new Locator.GetByRoleOptions().setName(actionName))
             .click();
     }
-
     private Locator serviceRow(String serviceName) {
         return page.locator("#services-tbody tr").filter(
             new Locator.FilterOptions().setHas(page.locator("td:first-child", new Page.LocatorOptions().setHasText(serviceName)))

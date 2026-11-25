@@ -2,6 +2,7 @@ import {
   ApiError,
   buildService,
   cancelBuild,
+  deleteProfile,
   fetchGitBranches,
   fetchInspect,
   fetchStatus,
@@ -12,6 +13,7 @@ import {
   gitStash,
   gitSwitch,
   reconcileGateway,
+  saveProfile,
   startGateway,
   stopGateway,
   stopServices,
@@ -25,11 +27,13 @@ import {
 const POLL_INTERVAL_MS = 2500;
 const MAX_LOG_LINES = 5000;
 const MAX_CLI_HISTORY = 500;
+const STORAGE_KEY_AUTO_RECONCILE = 'procomp.gatewayAutoReconcile';
 
 const state = {
   estate: null,
   profiles: [],
   configPath: '',
+  gatewayAutoReconcile: true,
   view: 'services',
   servicesFilter: {
     query: '',
@@ -69,6 +73,11 @@ const state = {
   activeStarts: new Map(),
   startSeq: 0,
   conflictService: null,
+  profileDialog: {
+    mode: 'create',
+    originalName: null,
+    submitting: false,
+  },
   gitSwitch: {
     repository: null,
     services: [],
@@ -119,6 +128,7 @@ const dom = {
   gatewayRss: document.getElementById('gateway-rss'),
   gatewayActions: document.getElementById('gateway-actions'),
   gatewayUnconfigured: document.getElementById('gateway-unconfigured'),
+  chkGatewayAutoReconcile: document.getElementById('chk-gateway-auto-reconcile'),
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
   btnGatewayStart: document.getElementById('btn-gateway-start'),
   btnGatewayStop: document.getElementById('btn-gateway-stop'),
@@ -128,6 +138,7 @@ const dom = {
   btnDriftReconcile: document.getElementById('btn-drift-reconcile'),
 
   profileList: document.getElementById('profile-list'),
+  btnSaveProfile: document.getElementById('btn-save-profile'),
   btnGitFetchLocal: document.getElementById('btn-git-fetch-local'),
   btnGitPullLocal: document.getElementById('btn-git-pull-local'),
   btnStartLocal: document.getElementById('btn-start-local'),
@@ -207,6 +218,24 @@ const dom = {
   conflictCliPreview: document.getElementById('conflict-cli-preview'),
   btnConflictCancel: document.getElementById('btn-conflict-cancel'),
   btnConflictConfirm: document.getElementById('btn-conflict-confirm'),
+
+  profileDialog: document.getElementById('profile-dialog'),
+  profileDialogTitle: document.getElementById('profile-dialog-title'),
+  profileNameInput: document.getElementById('profile-name-input'),
+  profileOverwriteWarning: document.getElementById('profile-overwrite-warning'),
+  profileDialogError: document.getElementById('profile-dialog-error'),
+  profileSelectedCount: document.getElementById('profile-selected-count'),
+  btnProfileSelectAll: document.getElementById('btn-profile-select-all'),
+  btnProfileClearAll: document.getElementById('btn-profile-clear-all'),
+  profileServicesList: document.getElementById('profile-services-list'),
+  profileCliPreview: document.getElementById('profile-cli-preview'),
+  profileDeleteConfirm: document.getElementById('profile-delete-confirm'),
+  profileDeleteConfirmText: document.getElementById('profile-delete-confirm-text'),
+  btnProfileDeleteCancel: document.getElementById('btn-profile-delete-cancel'),
+  btnProfileDeleteConfirm: document.getElementById('btn-profile-delete-confirm'),
+  btnProfileDelete: document.getElementById('btn-profile-delete'),
+  btnProfileCancel: document.getElementById('btn-profile-cancel'),
+  btnProfileSave: document.getElementById('btn-profile-save'),
 };
 
 /* ---------- Pure Display Formatters ---------- */
@@ -604,8 +633,30 @@ function renderGateway() {
   }
 }
 
+function getCurrentLocalServices() {
+  const services = state.estate?.services || [];
+  return services.filter((s) => s.route === 'LOCAL').map((s) => s.service);
+}
+
+function sameServiceSet(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const setA = new Set(a);
+  if (setA.size !== b.length) {
+    return false;
+  }
+  for (const item of b) {
+    if (!setA.has(item)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function renderProfiles() {
   dom.profileList.replaceChildren();
+  const currentLocals = getCurrentLocalServices();
   if (!state.profiles || state.profiles.length === 0) {
     dom.profileList.append(el('span', 'muted', 'No Profiles configured'));
     return;
@@ -613,15 +664,28 @@ function renderProfiles() {
 
   for (const profile of state.profiles) {
     const locals = Array.isArray(profile.local) ? profile.local : [];
-    const btn = el('button', 'profile-pill');
+    const isActive = state.estate !== null && sameServiceSet(locals, currentLocals);
+    const group = el('div', isActive ? 'profile-pill-group active' : 'profile-pill-group');
+    group.dataset.profile = profile.name;
+
+    const btn = el('button', isActive ? 'profile-pill active' : 'profile-pill');
     btn.type = 'button';
+    btn.setAttribute('aria-pressed', String(isActive));
     btn.title = locals.length > 0 ? `LOCAL: ${locals.join(', ')}` : 'All Services REMOTE';
     btn.append(
       el('span', '', profile.name),
       el('span', 'profile-pill-count', `${locals.length} LOCAL`),
     );
     btn.addEventListener('click', () => handleUseProfile(profile.name, btn));
-    dom.profileList.append(btn);
+
+    const editBtn = el('button', 'profile-pill-edit', '✎');
+    editBtn.type = 'button';
+    editBtn.title = `Edit Profile '${profile.name}'`;
+    editBtn.setAttribute('aria-label', `Edit profile ${profile.name}`);
+    editBtn.addEventListener('click', () => openEditProfileDialog(profile));
+
+    group.append(btn, editBtn);
+    dom.profileList.append(group);
   }
 }
 
@@ -949,17 +1013,65 @@ function stopPolling() {
   }
 }
 
+/* ---------- Gateway Auto-Reconcile Preference ---------- */
+
+function loadAutoReconcilePreference() {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY_AUTO_RECONCILE);
+    if (stored === 'false') {
+      return false;
+    }
+    if (stored === 'true') {
+      return true;
+    }
+  } catch {
+    // Ignore storage access failures and fall back to default.
+  }
+  return true;
+}
+
+function saveAutoReconcilePreference(enabled) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY_AUTO_RECONCILE, String(enabled));
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
+function canAutoReconcileGateway() {
+  const gw = state.estate?.gateway;
+  return Boolean(
+    state.gatewayAutoReconcile &&
+      gw &&
+      gw.configured &&
+      gw.health === 'HEALTHY',
+  );
+}
+
 /* ---------- Action Handlers ---------- */
 
-async function runAction(controls, actionFn, { onSettled = null } = {}) {
+async function runAction(controls, actionFn, { onSettled = null, autoReconcile = false } = {}) {
   const list = Array.from(controls || []).filter(Boolean);
   for (const control of list) {
     control.disabled = true;
   }
+  let actionSucceeded = false;
   try {
     const payload = await actionFn();
+    actionSucceeded = true;
     if (payload && payload.cliCommand) {
       setCliCommand(payload.cliCommand, { explicit: true });
+    }
+    if (autoReconcile && canAutoReconcileGateway()) {
+      dom.btnGatewayReconcile.disabled = true;
+      try {
+        const reconcilePayload = await reconcileGateway();
+        if (reconcilePayload && reconcilePayload.cliCommand) {
+          setCliCommand(reconcilePayload.cliCommand, { explicit: true });
+        }
+      } finally {
+        dom.btnGatewayReconcile.disabled = false;
+      }
     }
     if (onSettled) {
       onSettled();
@@ -971,6 +1083,9 @@ async function runAction(controls, actionFn, { onSettled = null } = {}) {
       onSettled();
     }
     showError(err);
+    if (actionSucceeded) {
+      await refreshStatus({ explicit: false });
+    }
   } finally {
     for (const control of list) {
       control.disabled = false;
@@ -983,6 +1098,7 @@ function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
   state.pendingRoutes.add(serviceName);
   return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute), {
     onSettled: () => state.pendingRoutes.delete(serviceName),
+    autoReconcile: true,
   });
 }
 
@@ -990,6 +1106,7 @@ function handleUseProfile(profileName, btn) {
   state.pendingProfiles.add(profileName);
   return runAction([btn], () => useProfile(profileName), {
     onSettled: () => state.pendingProfiles.delete(profileName),
+    autoReconcile: true,
   });
 }
 
@@ -2124,6 +2241,231 @@ function copyCliHistory() {
   return copyTextToClipboard(text, dom.btnCopyCliHistory, 'Copy All');
 }
 
+/* ---------- Profile Create / Edit / Delete Dialog ---------- */
+
+function validateProfileNameClient(name) {
+  if (!name || name.trim().length === 0) {
+    return 'Profile name is required.';
+  }
+  if (name.startsWith('-')) {
+    return "Profile name must not start with '-'.";
+  }
+  if (/[\s/\\]/.test(name)) {
+    return "Profile name must not contain whitespace, '/', or '\\'.";
+  }
+  return null;
+}
+
+function getCheckedProfileServices() {
+  const checked = [];
+  for (const input of dom.profileServicesList.querySelectorAll('input[type="checkbox"]')) {
+    if (input.checked) {
+      checked.push(input.value);
+    }
+  }
+  return checked;
+}
+
+function populateProfileServiceCheckboxes(selectedServices) {
+  dom.profileServicesList.replaceChildren();
+  const selectedSet = new Set(selectedServices);
+  const services = state.estate?.services || [];
+  if (services.length === 0) {
+    dom.profileServicesList.append(el('span', 'muted', 'No Services configured'));
+    return;
+  }
+  for (const svc of services) {
+    const label = el('label', 'profile-service-option');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = svc.service;
+    checkbox.checked = selectedSet.has(svc.service);
+    checkbox.addEventListener('change', updateProfileDialogState);
+    label.append(checkbox, el('span', '', svc.service));
+    dom.profileServicesList.append(label);
+  }
+}
+
+function setAllProfileServiceCheckboxes(checked) {
+  for (const input of dom.profileServicesList.querySelectorAll('input[type="checkbox"]')) {
+    input.checked = checked;
+  }
+  updateProfileDialogState();
+}
+
+function openCreateProfileDialog() {
+  state.profileDialog = {
+    mode: 'create',
+    originalName: null,
+    submitting: false,
+  };
+  dom.profileDialogTitle.textContent = 'Save Profile';
+  dom.profileNameInput.value = '';
+  dom.profileNameInput.disabled = false;
+  dom.btnProfileDelete.hidden = true;
+  hideProfileDeleteConfirm();
+  dom.profileDialogError.hidden = true;
+  populateProfileServiceCheckboxes(getCurrentLocalServices());
+  updateProfileDialogState();
+  if (!dom.profileDialog.open) {
+    dom.profileDialog.showModal();
+  }
+  dom.profileNameInput.focus();
+}
+
+function openEditProfileDialog(profile) {
+  state.profileDialog = {
+    mode: 'edit',
+    originalName: profile.name,
+    submitting: false,
+  };
+  dom.profileDialogTitle.textContent = `Edit Profile: ${profile.name}`;
+  dom.profileNameInput.value = profile.name;
+  dom.profileNameInput.disabled = true;
+  dom.btnProfileDelete.hidden = false;
+  hideProfileDeleteConfirm();
+  dom.profileDialogError.hidden = true;
+  populateProfileServiceCheckboxes(Array.isArray(profile.local) ? profile.local : []);
+  updateProfileDialogState();
+  if (!dom.profileDialog.open) {
+    dom.profileDialog.showModal();
+  }
+}
+
+function closeProfileDialog() {
+  hideProfileDeleteConfirm();
+  if (dom.profileDialog.open) {
+    dom.profileDialog.close();
+  }
+}
+
+function showProfileDeleteConfirm() {
+  const name = state.profileDialog.originalName;
+  if (!name) {
+    return;
+  }
+  dom.profileDeleteConfirmText.textContent = `Delete Profile '${name}' from procomp.json?`;
+  dom.profileDeleteConfirm.hidden = false;
+  dom.profileCliPreview.textContent = `procomp profile delete ${name}`;
+}
+
+function hideProfileDeleteConfirm() {
+  dom.profileDeleteConfirm.hidden = true;
+  if (dom.profileDialog.open) {
+    updateProfileDialogState();
+  }
+}
+
+function isSnapshotMode() {
+  return (
+    state.profileDialog.mode === 'create' &&
+    sameServiceSet(getCheckedProfileServices(), getCurrentLocalServices())
+  );
+}
+
+function updateProfileDialogState() {
+  const rawName = dom.profileNameInput.value;
+  const selected = getCheckedProfileServices();
+  dom.profileSelectedCount.textContent = `(${selected.length} selected)`;
+
+  const nameError = state.profileDialog.mode === 'create' ? validateProfileNameClient(rawName) : null;
+  if (state.profileDialog.mode === 'create' && rawName.length > 0 && nameError !== null) {
+    dom.profileDialogError.textContent = nameError;
+    dom.profileDialogError.hidden = false;
+  } else if (state.profileDialog.mode === 'create' && !state.profileDialog.submitting) {
+    dom.profileDialogError.hidden = true;
+  }
+
+  const existingNames = new Set((state.profiles || []).map((p) => p.name));
+  const willOverwrite =
+    state.profileDialog.mode === 'create' && nameError === null && existingNames.has(rawName);
+  if (willOverwrite) {
+    dom.profileOverwriteWarning.textContent = `Profile '${rawName}' already exists. Saving will overwrite it in procomp.json.`;
+    dom.profileOverwriteWarning.hidden = false;
+  } else {
+    dom.profileOverwriteWarning.hidden = true;
+  }
+
+  const displayName = rawName.length > 0 ? rawName : '<name>';
+  if (!dom.profileDeleteConfirm.hidden && state.profileDialog.originalName) {
+    dom.profileCliPreview.textContent = `procomp profile delete ${state.profileDialog.originalName}`;
+  } else if (isSnapshotMode()) {
+    dom.profileCliPreview.textContent = `procomp profile save ${displayName}`;
+  } else if (selected.length === 0) {
+    dom.profileCliPreview.textContent = `procomp profile save ${displayName} --none`;
+  } else {
+    dom.profileCliPreview.textContent = `procomp profile save ${displayName} ${selected.join(' ')}`;
+  }
+
+  dom.btnProfileSave.disabled = state.profileDialog.submitting || nameError !== null;
+  dom.btnProfileSave.textContent = willOverwrite ? 'Overwrite Profile' : 'Save Profile';
+}
+
+async function runProfileDialogMutation(actionFn, disabledControls) {
+  state.profileDialog.submitting = true;
+  dom.profileDialogError.hidden = true;
+  for (const control of disabledControls) {
+    control.disabled = true;
+  }
+  try {
+    const payload = await actionFn();
+    if (payload && payload.cliCommand) {
+      setCliCommand(payload.cliCommand, { explicit: true });
+    }
+    closeProfileDialog();
+    clearError();
+    await refreshStatus({ explicit: false });
+  } catch (err) {
+    dom.profileDialogError.textContent =
+      err instanceof ApiError ? `[${err.code}] ${err.message}` : String(err);
+    dom.profileDialogError.hidden = false;
+    if (err instanceof ApiError && err.cliCommand) {
+      setCliCommand(err.cliCommand, { explicit: true, errorCode: err.code });
+    }
+  } finally {
+    state.profileDialog.submitting = false;
+    for (const control of disabledControls) {
+      control.disabled = false;
+    }
+    updateProfileDialogState();
+  }
+}
+
+async function submitProfileDialog() {
+  if (state.profileDialog.submitting) {
+    return;
+  }
+  const name =
+    state.profileDialog.mode === 'edit'
+      ? state.profileDialog.originalName
+      : dom.profileNameInput.value;
+
+  const validationError = validateProfileNameClient(name);
+  if (validationError) {
+    dom.profileDialogError.textContent = validationError;
+    dom.profileDialogError.hidden = false;
+    return;
+  }
+
+  const useSnapshot = isSnapshotMode();
+  const selected = getCheckedProfileServices();
+  await runProfileDialogMutation(
+    () => saveProfile(name, useSnapshot ? { fromCurrentRoutes: true } : { local: selected }),
+    [dom.btnProfileSave, dom.btnProfileDelete],
+  );
+}
+
+async function confirmDeleteProfile() {
+  const name = state.profileDialog.originalName;
+  if (!name || state.profileDialog.submitting) {
+    return;
+  }
+  await runProfileDialogMutation(
+    () => deleteProfile(name),
+    [dom.btnProfileDeleteConfirm, dom.btnProfileSave],
+  );
+}
+
 /* ---------- Event Wiring & Lifecycle ---------- */
 
 function closeAllStreams() {
@@ -2233,6 +2575,13 @@ function init() {
 
   dom.btnRefresh.addEventListener('click', () => refreshStatus({ explicit: true }));
   dom.btnDismissError.addEventListener('click', clearError);
+
+  state.gatewayAutoReconcile = loadAutoReconcilePreference();
+  dom.chkGatewayAutoReconcile.checked = state.gatewayAutoReconcile;
+  dom.chkGatewayAutoReconcile.addEventListener('change', () => {
+    state.gatewayAutoReconcile = dom.chkGatewayAutoReconcile.checked;
+    saveAutoReconcilePreference(state.gatewayAutoReconcile);
+  });
 
   dom.btnGatewayReconcile.addEventListener('click', () =>
     handleGatewayAction(() => reconcileGateway(), dom.btnGatewayReconcile),
@@ -2376,7 +2725,7 @@ function init() {
       closePillMenu();
       return;
     }
-    if (event.key === 'Escape' && state.cliHistoryOpen && !dom.conflictDialog.open) {
+    if (event.key === 'Escape' && state.cliHistoryOpen && !dom.conflictDialog.open && !dom.profileDialog.open) {
       setCliHistoryOpen(false);
       dom.btnCliHistory.focus();
     }
@@ -2386,6 +2735,25 @@ function init() {
   dom.btnConflictConfirm.addEventListener('click', confirmConflictKill);
   dom.conflictDialog.addEventListener('cancel', () => {
     state.conflictService = null;
+  });
+
+  dom.btnSaveProfile.addEventListener('click', openCreateProfileDialog);
+  dom.profileNameInput.addEventListener('input', updateProfileDialogState);
+  dom.profileNameInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitProfileDialog();
+    }
+  });
+  dom.btnProfileSelectAll.addEventListener('click', () => setAllProfileServiceCheckboxes(true));
+  dom.btnProfileClearAll.addEventListener('click', () => setAllProfileServiceCheckboxes(false));
+  dom.btnProfileCancel.addEventListener('click', closeProfileDialog);
+  dom.btnProfileSave.addEventListener('click', submitProfileDialog);
+  dom.btnProfileDelete.addEventListener('click', showProfileDeleteConfirm);
+  dom.btnProfileDeleteCancel.addEventListener('click', hideProfileDeleteConfirm);
+  dom.btnProfileDeleteConfirm.addEventListener('click', confirmDeleteProfile);
+  dom.profileDialog.addEventListener('cancel', () => {
+    hideProfileDeleteConfirm();
   });
 
   document.addEventListener('keydown', handleGlobalKeydown);
