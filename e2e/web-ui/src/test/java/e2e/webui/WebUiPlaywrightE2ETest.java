@@ -6,6 +6,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.Route;
 import com.microsoft.playwright.assertions.PlaywrightAssertions;
 import e2e.scenarios.catalog.ScenarioCatalog;
 import e2e.scenarios.engine.ExternalActorEvent;
@@ -372,6 +373,83 @@ final class WebUiPlaywrightE2ETest {
                     page.locator("#logs-output").innerText().contains(InMemoryConfigSource.DEMO_SECRET_VALUE),
                     "Live logs must never leak secret env values"
                 );
+            }
+        }
+    }
+
+    @Test
+    void progressStripDisplaysSpinnerAndDynamicTitleForNonStartAndConcurrentActions() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                Locator progressStrip = page.locator("#progress-strip");
+                Locator progressTitle = page.locator("#progress-strip-title");
+                Locator progressList = page.locator("#progress-list");
+                Locator ordersRow = serviceRow("orders");
+
+                assertThat(ordersRow).containsText("HEALTHY");
+                assertThat(progressStrip).isHidden();
+
+                // Hold both stop and gateway reconcile requests open to verify single + concurrent progress display
+                List<Route> pendingStops = new ArrayList<>();
+                List<Route> pendingReconciles = new ArrayList<>();
+                page.route("**/api/services/stop", pendingStops::add);
+                page.route("**/api/gateway/reconcile", pendingReconciles::add);
+
+                // 1. Trigger Stop on orders -> blue strip shows "Stopping Processes" with [orders]
+                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Stop")).click();
+
+                assertThat(progressStrip).isVisible();
+                assertThat(progressStrip.locator(".spinner")).isVisible();
+                assertThat(progressTitle).hasText("Stopping Processes");
+                assertThat(progressList).containsText("[orders]");
+                assertThat(progressList).containsText("Stopping Process…");
+
+                // 2. While stop is still in flight, trigger Gateway Reconcile -> combined title "Running Actions"
+                page.locator("#btn-gateway-reconcile").click();
+
+                assertThat(progressTitle).hasText("Running Actions");
+                assertThat(progressList.locator("li")).hasCount(2);
+                assertThat(progressList).containsText("[orders]");
+                assertThat(progressList).containsText("[gateway]");
+                assertThat(progressList).containsText("Reconciling Gateway…");
+
+                // 3. Release Stop -> header switches to remaining action's title ("Reconciling Gateway")
+                assertEquals(1, pendingStops.size(), "Expected one intercepted stop request");
+                pendingStops.removeFirst().resume();
+
+                assertThat(ordersRow).containsText("STOPPED");
+                assertThat(progressStrip).isVisible();
+                assertThat(progressTitle).hasText("Reconciling Gateway");
+                assertThat(progressList.locator("li")).hasCount(1);
+                assertThat(progressList).containsText("[gateway]");
+
+                // 4. Release Gateway Reconcile -> strip hides cleanly
+                assertEquals(1, pendingReconciles.size(), "Expected one intercepted reconcile request");
+                pendingReconciles.removeFirst().resume();
+
+                assertThat(progressStrip).isHidden();
+                page.unroute("**/api/services/stop");
+                page.unroute("**/api/gateway/reconcile");
+
+                // 5. Explicit Refresh shows "Running Discovery" while in flight and hides when done
+                List<Route> pendingStatuses = new ArrayList<>();
+                page.route("**/api/status", pendingStatuses::add);
+
+                page.locator("#btn-refresh").click();
+                assertThat(progressStrip).isVisible();
+                assertThat(progressTitle).hasText("Running Discovery");
+                assertThat(progressList).containsText("Running Discovery…");
+
+                while (!pendingStatuses.isEmpty()) {
+                    pendingStatuses.removeFirst().resume();
+                }
+                page.unroute("**/api/status");
+                assertThat(progressStrip).isHidden();
             }
         }
     }

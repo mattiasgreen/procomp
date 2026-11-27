@@ -52,6 +52,8 @@ const state = {
   },
   activeStarts: new Map(),
   startSeq: 0,
+  activeActions: new Map(),
+  actionSeq: 0,
   conflictService: null,
 };
 
@@ -70,6 +72,7 @@ const dom = {
   btnDismissError: document.getElementById('btn-dismiss-error'),
 
   progressStrip: document.getElementById('progress-strip'),
+  progressStripTitle: document.getElementById('progress-strip-title'),
   progressList: document.getElementById('progress-list'),
 
   gatewayType: document.getElementById('gateway-type'),
@@ -707,20 +710,104 @@ function renderServices() {
   }
 }
 
+function beginActivity({ kind = 'action', service = null, title = 'Running Actions', target = '', message = 'Working…' } = {}) {
+  const id = `action-${++state.actionSeq}`;
+  const entry = {
+    id,
+    kind,
+    service,
+    title,
+    target,
+    message,
+  };
+  state.activeActions.set(id, entry);
+  renderProgressStrip();
+
+  let finished = false;
+  return {
+    id,
+    update(patch = {}) {
+      if (finished) {
+        return;
+      }
+      if (patch.title !== undefined) {
+        entry.title = patch.title;
+      }
+      if (patch.target !== undefined) {
+        entry.target = patch.target;
+      }
+      if (patch.message !== undefined) {
+        entry.message = patch.message;
+      }
+      renderProgressStrip();
+    },
+    finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      state.activeActions.delete(id);
+      renderProgressStrip();
+    },
+  };
+}
+
+function collectActiveProgressItems() {
+  const items = [];
+  const activeBuildServices = new Set();
+
+  for (const entry of state.activeStarts.values()) {
+    items.push({
+      title: 'Starting Processes',
+      target: entry.target || entry.label,
+      message: entry.message,
+    });
+  }
+
+  for (const entry of state.activeActions.values()) {
+    items.push({
+      title: entry.title,
+      target: entry.target,
+      message: entry.message,
+    });
+    if ((entry.kind === 'build' || entry.kind === 'cancel-build') && entry.service) {
+      activeBuildServices.add(entry.service);
+    }
+  }
+
+  const services = state.estate?.services || [];
+  for (const row of services) {
+    if (row.buildRun?.displayState === 'RUNNING' && !activeBuildServices.has(row.service)) {
+      items.push({
+        title: 'Building Services',
+        target: row.service,
+        message: 'Build Run in progress…',
+      });
+    }
+  }
+
+  return items;
+}
+
 function renderProgressStrip() {
-  if (state.activeStarts.size === 0) {
+  const items = collectActiveProgressItems();
+  if (items.length === 0) {
     dom.progressStrip.hidden = true;
     dom.progressList.replaceChildren();
     return;
   }
 
+  const uniqueTitles = new Set(items.map((item) => item.title).filter(Boolean));
+  dom.progressStripTitle.textContent =
+    uniqueTitles.size === 1 ? items[0].title : 'Running Actions';
+
   dom.progressList.replaceChildren();
-  for (const entry of state.activeStarts.values()) {
+  for (const item of items) {
     const li = el('li');
-    li.append(
-      el('span', 'progress-target', `[${entry.target || entry.label}]`),
-      el('span', '', entry.message),
-    );
+    if (item.target) {
+      li.append(el('span', 'progress-target', `[${item.target}]`));
+    }
+    li.append(el('span', '', item.message));
     dom.progressList.append(li);
   }
   dom.progressStrip.hidden = false;
@@ -734,8 +821,15 @@ async function refreshStatus({ explicit = false } = {}) {
   }
   const reqSeq = ++state.statusSeq;
   state.statusInFlightCount += 1;
+  let activity = null;
   if (explicit) {
     dom.btnRefresh.disabled = true;
+    activity = beginActivity({
+      kind: 'refresh',
+      title: 'Running Discovery',
+      target: state.estate?.project || 'project',
+      message: 'Running Discovery…',
+    });
   }
 
   try {
@@ -768,6 +862,7 @@ async function refreshStatus({ explicit = false } = {}) {
     renderGateway();
     renderProfiles();
     renderServices();
+    renderProgressStrip();
 
     if (focusKey) {
       const targetBtn = Array.from(dom.servicesTbody.querySelectorAll('button')).find(
@@ -791,6 +886,7 @@ async function refreshStatus({ explicit = false } = {}) {
     updatePollIndicator('error', 'Error');
     showError(err, { fromPoll: !explicit });
   } finally {
+    activity?.finish();
     state.statusInFlightCount = Math.max(0, state.statusInFlightCount - 1);
     if (explicit) {
       dom.btnRefresh.disabled = false;
@@ -856,11 +952,16 @@ function canAutoReconcileGateway() {
 
 /* ---------- Action Handlers ---------- */
 
-async function runAction(controls, actionFn, { onSettled = null, autoReconcile = false } = {}) {
+async function runAction(
+  controls,
+  actionFn,
+  { onSettled = null, autoReconcile = false, activity = null } = {},
+) {
   const list = Array.from(controls || []).filter(Boolean);
   for (const control of list) {
     control.disabled = true;
   }
+  const active = activity ? beginActivity(activity) : null;
   let actionSucceeded = false;
   try {
     const payload = await actionFn();
@@ -870,6 +971,11 @@ async function runAction(controls, actionFn, { onSettled = null, autoReconcile =
     }
     if (autoReconcile && canAutoReconcileGateway()) {
       dom.btnGatewayReconcile.disabled = true;
+      active?.update({
+        title: 'Reconciling Gateway',
+        target: 'gateway',
+        message: 'Reconciling Gateway…',
+      });
       try {
         const reconcilePayload = await reconcileGateway();
         if (reconcilePayload && reconcilePayload.cliCommand) {
@@ -893,6 +999,7 @@ async function runAction(controls, actionFn, { onSettled = null, autoReconcile =
       await refreshStatus({ explicit: false });
     }
   } finally {
+    active?.finish();
     for (const control of list) {
       control.disabled = false;
     }
@@ -905,6 +1012,12 @@ function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
   return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute), {
     onSettled: () => state.pendingRoutes.delete(serviceName),
     autoReconcile: true,
+    activity: {
+      kind: 'route',
+      title: 'Updating Route',
+      target: serviceName,
+      message: `Setting Route to ${targetRoute}…`,
+    },
   });
 }
 
@@ -913,6 +1026,12 @@ function handleUseProfile(profileName, btn) {
   return runAction([btn], () => useProfile(profileName), {
     onSettled: () => state.pendingProfiles.delete(profileName),
     autoReconcile: true,
+    activity: {
+      kind: 'profile',
+      title: 'Applying Profile',
+      target: profileName,
+      message: 'Applying Profile…',
+    },
   });
 }
 
@@ -975,17 +1094,24 @@ function handleStopServices(services = [], triggerBtn = null) {
   for (const s of services) {
     state.pendingStops.add(s);
   }
+  const isBulk = services.length === 0;
   return runAction([triggerBtn], () => stopServices(services, { all: false, killConflict: false }), {
     onSettled: () => {
       for (const s of services) {
         state.pendingStops.delete(s);
       }
     },
+    activity: {
+      kind: 'stop',
+      title: 'Stopping Processes',
+      target: isBulk ? 'Managed' : services.join(', '),
+      message: isBulk ? 'Stopping Managed Processes…' : 'Stopping Process…',
+    },
   });
 }
 
-function handleGatewayAction(actionFn, triggerBtn) {
-  return runAction([triggerBtn], actionFn);
+function handleGatewayAction(actionFn, triggerBtn, activity = null) {
+  return runAction([triggerBtn], actionFn, { activity });
 }
 
 /* ---------- Detail Drawer: Inspect & Live SSE Logs ---------- */
@@ -1083,6 +1209,12 @@ function updateDrawerTabs() {
 async function loadInspection(serviceName) {
   dom.inspectStatusNote.textContent = 'Running Inspection…';
   dom.btnInspectRefresh.disabled = true;
+  const activity = beginActivity({
+    kind: 'inspect',
+    title: 'Inspecting Service',
+    target: serviceName,
+    message: 'Running Inspection…',
+  });
   try {
     const payload = await fetchInspect(serviceName);
     if (state.drawer.service !== serviceName) {
@@ -1098,6 +1230,7 @@ async function loadInspection(serviceName) {
     dom.inspectStatusNote.textContent = 'Inspection failed';
     showError(err);
   } finally {
+    activity.finish();
     dom.btnInspectRefresh.disabled = false;
   }
 }
@@ -1253,11 +1386,27 @@ function buildBadgeClass(displayState) {
 }
 
 function handleBuildService(serviceName, force, button) {
-  return runAction([button], () => buildService(serviceName, { force }));
+  return runAction([button], () => buildService(serviceName, { force }), {
+    activity: {
+      kind: 'build',
+      service: serviceName,
+      title: 'Building Services',
+      target: serviceName,
+      message: force ? 'Starting forced Build Run…' : 'Starting Build Run…',
+    },
+  });
 }
 
 function handleCancelBuild(serviceName, button) {
-  return runAction([button], () => cancelBuild(serviceName));
+  return runAction([button], () => cancelBuild(serviceName), {
+    activity: {
+      kind: 'cancel-build',
+      service: serviceName,
+      title: 'Canceling Build',
+      target: serviceName,
+      message: 'Canceling Build Run…',
+    },
+  });
 }
 
 function startActiveLogStream() {
@@ -1381,7 +1530,15 @@ function confirmConflictKill() {
   return runAction(
     [dom.btnConflictConfirm],
     () => stopServices([serviceName], { all: false, killConflict: true }),
-    { onSettled: closeConflictDialog },
+    {
+      onSettled: closeConflictDialog,
+      activity: {
+        kind: 'kill-conflict',
+        title: 'Stopping Conflicting Process',
+        target: serviceName,
+        message: 'Terminating conflicting Process…',
+      },
+    },
   );
 }
 
@@ -1457,16 +1614,36 @@ function init() {
   });
 
   dom.btnGatewayReconcile.addEventListener('click', () =>
-    handleGatewayAction(() => reconcileGateway(), dom.btnGatewayReconcile),
+    handleGatewayAction(() => reconcileGateway(), dom.btnGatewayReconcile, {
+      kind: 'gateway-reconcile',
+      title: 'Reconciling Gateway',
+      target: 'gateway',
+      message: 'Reconciling Gateway…',
+    }),
   );
   dom.btnDriftReconcile.addEventListener('click', () =>
-    handleGatewayAction(() => reconcileGateway(), dom.btnDriftReconcile),
+    handleGatewayAction(() => reconcileGateway(), dom.btnDriftReconcile, {
+      kind: 'gateway-reconcile',
+      title: 'Reconciling Gateway',
+      target: 'gateway',
+      message: 'Reconciling Gateway…',
+    }),
   );
   dom.btnGatewayStart.addEventListener('click', () =>
-    handleGatewayAction(() => startGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayStart),
+    handleGatewayAction(() => startGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayStart, {
+      kind: 'gateway-start',
+      title: 'Starting Gateway',
+      target: 'gateway',
+      message: 'Starting Gateway Process…',
+    }),
   );
   dom.btnGatewayStop.addEventListener('click', () =>
-    handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
+    handleGatewayAction(() => stopGateway(), dom.btnGatewayStop, {
+      kind: 'gateway-stop',
+      title: 'Stopping Gateway',
+      target: 'gateway',
+      message: 'Stopping Gateway Process…',
+    }),
   );
   dom.btnGatewayLogs.addEventListener('click', () => openGatewayLogsDrawer());
 
