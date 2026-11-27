@@ -946,6 +946,179 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testDefaultsEnvFilesAppliesPerServiceWithOptionalSkippingAndGatewayIsolation() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        Path ordersRoot = Path.of("C:/dev/orders").toAbsolutePath().normalize();
+        Path billingRoot = Path.of("C:/dev/billing").toAbsolutePath().normalize();
+
+        String json = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "..",
+              "defaults": {
+                "builder": "gradle",
+                "envFiles": [
+                  { "path": ".env.secrets", "optional": true }
+                ]
+              },
+              "builders": {
+                "gradle": { "command": ["./gradlew", "build"] }
+              },
+              "runtimes": {
+                "java": { "command": ["java", "-jar", "app.jar"] }
+              },
+              "gateway": {
+                "type": "wiremock",
+                "port": 8080,
+                "command": ["java", "-jar", "wiremock.jar"]
+              },
+              "services": {
+                "orders": {
+                  "port": 9001,
+                  "runtime": "java",
+                  "repositoryUrl": "https://git.corp/acme/orders.git"
+                },
+                "billing": {
+                  "port": 9002,
+                  "runtime": "java",
+                  "repositoryUrl": "https://git.corp/acme/billing.git"
+                }
+              }
+            }
+            """;
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(
+                configPath,
+                json,
+                filesOf(Map.of(
+                    ordersRoot.resolve(".env.secrets"), "DB_USERNAME=orders-user\nDB_PASSWORD=orders-pass\n"
+                )),
+                Map.of()
+            ),
+            "resolve project with defaults.envFiles"
+        );
+
+        ServiceDefinition orders = project.service("orders").orElseThrow();
+        Assert.assertEquals("orders-user", orders.env().asMap().get("DB_USERNAME"), "orders runtime gets DB_USERNAME");
+        Assert.assertEquals("orders-pass", orders.env().asMap().get("DB_PASSWORD"), "orders runtime gets DB_PASSWORD");
+        Assert.assertEquals("orders-user", orders.buildConfig().orElseThrow().env().asMap().get("DB_USERNAME"), "orders build gets DB_USERNAME");
+        Assert.assertEquals(1, orders.envFiles().size(), "orders effective envFiles includes defaults.envFiles");
+
+        ServiceDefinition billing = project.service("billing").orElseThrow();
+        Assert.assertTrue(!billing.env().asMap().containsKey("DB_USERNAME"), "billing without .env.secrets does not get orders secrets");
+        Assert.assertTrue(!billing.buildConfig().orElseThrow().env().asMap().containsKey("DB_USERNAME"), "billing build does not get orders secrets");
+
+        GatewayDefinition gateway = project.gateway().orElseThrow();
+        Assert.assertTrue(!gateway.env().asMap().containsKey("DB_USERNAME"), "gateway does not inherit defaults.envFiles");
+    }
+
+    public static void testDefaultsEnvFilesPrecedenceTemplatesCatalogAndValidation() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        Path configDir = configPath.getParent();
+        Path monoRoot = Path.of("C:/dev/monorepo").toAbsolutePath().normalize();
+
+        String json = """
+            {
+              "project": "acme",
+              "repositoriesRoot": "..",
+              "envFiles": [".env"],
+              "defaults": {
+                "vars": { "subproject": "." },
+                "envFiles": [
+                  { "path": "{{repository}}/.env.repo", "optional": true },
+                  { "path": "{{subproject}}/.env.secrets", "optional": true }
+                ],
+                "env": {
+                  "FROM_DEFAULTS_ENV": "defaults-env-wins"
+                }
+              },
+              "runtimes": {
+                "java": { "command": ["java", "-jar", "app.jar"] }
+              },
+              "catalog": {
+                "path": "catalog.json",
+                "itemsPath": "apps",
+                "map": {
+                  "name": "name",
+                  "port": "port",
+                  "runtime": "runtime",
+                  "repositoryUrl": "repoUrl",
+                  "vars.subproject": "subproject"
+                }
+              },
+              "services": {
+                "orders": {
+                  "envFiles": [".env.service-override"]
+                }
+              }
+            }
+            """;
+
+        String catalogJson = """
+            {
+              "apps": [
+                {
+                  "name": "orders",
+                  "port": 9001,
+                  "runtime": "java",
+                  "repoUrl": "https://git.corp/acme/monorepo.git",
+                  "subproject": "orders-mod"
+                }
+              ]
+            }
+            """;
+
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(
+                configPath,
+                json,
+                filesOf(Map.of(
+                    configDir.resolve("catalog.json"), catalogJson,
+                    configDir.resolve(".env"), "KEY_A=top\nKEY_B=top\nKEY_C=top\nFROM_DEFAULTS_ENV=top\n",
+                    monoRoot.resolve(".env.repo"), "KEY_A=repo\nKEY_B=repo\nKEY_C=repo\n",
+                    monoRoot.resolve("orders-mod/.env.secrets"), "KEY_B=module\nKEY_C=module\nFROM_DEFAULTS_ENV=module\n",
+                    monoRoot.resolve(".env.service-override"), "KEY_C=service-file\n"
+                )),
+                Map.of()
+            ),
+            "resolve defaults.envFiles precedence with catalog service"
+        );
+
+        Map<String, String> env = project.service("orders").orElseThrow().env().asMap();
+        Assert.assertEquals("repo", env.get("KEY_A"), "defaults.envFiles overrides top-level envFiles");
+        Assert.assertEquals("module", env.get("KEY_B"), "later defaults.envFiles overrides earlier defaults.envFiles");
+        Assert.assertEquals("service-file", env.get("KEY_C"), "services.<name>.envFiles overrides defaults.envFiles");
+        Assert.assertEquals("defaults-env-wins", env.get("FROM_DEFAULTS_ENV"), "defaults.env overrides defaults.envFiles");
+
+        // Required (non-optional) defaults.envFiles fails fast when missing
+        assertResolveErr(
+            configPath,
+            """
+            {
+              "project": "acme",
+              "defaults": { "envFiles": [".env.required"] },
+              "runtimes": { "rt": { "command": ["echo"] } },
+              "services": { "svc": { "runtime": "rt", "workingDir": "." } }
+            }
+            """,
+            "CONFIG_MISSING_ENV_FILE"
+        );
+
+        // Undefined {{var}} in defaults.envFiles fails fast even with zero services
+        assertResolveErr(
+            configPath,
+            """
+            {
+              "project": "acme",
+              "defaults": { "envFiles": [{ "path": "{{unknownVar}}/.env.secrets", "optional": true }] },
+              "runtimes": { "rt": { "command": ["echo"] } }
+            }
+            """,
+            "CONFIG_UNDEFINED_TEMPLATE_VAR"
+        );
+    }
+
     public static void testResolvesRepositoriesSettingsAndDefaults() {
         Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
 

@@ -25,7 +25,7 @@ final class ProjectConfigParser {
     private static final Set<String> REPOSITORIES_KEYS = Set.of("fetchWarnAfterHours", "timeoutSeconds");
     private static final Set<String> ENV_FILE_KEYS = Set.of("path", "optional");
     private static final Set<String> DEFAULTS_KEYS = Set.of(
-        "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env"
+        "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env", "envFiles"
     );
     private static final Set<String> BUILDER_KEYS = Set.of(
         "command", "workingDir", "env"
@@ -258,9 +258,11 @@ final class ProjectConfigParser {
         if (vars.isErr()) return vars.castError();
         Result<Map<String, String>, DomainError> env = parseOptionalStringMap(obj, "env", "defaults.env");
         if (env.isErr()) return env.castError();
+        Result<List<EnvFileSpec>, DomainError> envFiles = parseOptionalEnvFiles(obj, "envFiles", "defaults");
+        if (envFiles.isErr()) return envFiles.castError();
 
         return Result.ok(new RawProjectConfig.RawDefaultsConfig(
-            okVal(builder), okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env)
+            okVal(builder), okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env), okVal(envFiles)
         ));
     }
 

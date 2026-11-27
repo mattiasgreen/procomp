@@ -157,4 +157,48 @@ public final class ProjectLoaderTest {
         );
         Assert.assertEquals("CONFIG_NOT_FOUND", missing.code(), "missing override error code");
     }
+
+    public static void testLoadWithPathWatchesDefaultsEnvFilesIncludingAbsentOptionalOnes() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Path ordersRoot = root.resolve("orders");
+        Path billingRoot = root.resolve("billing");
+
+        var source = new InMemoryConfigSource(root)
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "acme",
+                  "repositoriesRoot": ".",
+                  "defaults": {
+                    "envFiles": [
+                      { "path": ".env.secrets", "optional": true }
+                    ]
+                  },
+                  "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+                  "services": {
+                    "orders": { "runtime": "java", "repositoryUrl": "https://git.corp/acme/orders.git" },
+                    "billing": { "runtime": "java", "repositoryUrl": "https://git.corp/acme/billing.git" }
+                  }
+                }
+                """)
+            .withFile(ordersRoot.resolve(".env.secrets"), "DB_USERNAME=orders-user\n");
+
+        ProjectLoader.LoadedProject loaded = Assert.assertOk(
+            new ProjectLoader(source).loadWithPath(Optional.empty()),
+            "loadWithPath should succeed with optional defaults.envFiles"
+        );
+
+        Assert.assertEquals(
+            "orders-user",
+            loaded.project().service("orders").orElseThrow().env().asMap().get("DB_USERNAME"),
+            "orders gets secret from defaults.envFiles"
+        );
+        Assert.assertTrue(
+            loaded.watchedPaths().contains(ordersRoot.resolve(".env.secrets")),
+            "watchedPaths includes present defaults.envFiles path"
+        );
+        Assert.assertTrue(
+            loaded.watchedPaths().contains(billingRoot.resolve(".env.secrets")),
+            "watchedPaths includes absent optional defaults.envFiles path for live reload"
+        );
+    }
 }
