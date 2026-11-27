@@ -81,7 +81,7 @@
 | `project` | `string` | Yes | Explicit `Project` identifier used to scope local state and logs (`~/.local/state/procomp/<project>/` or `%LOCALAPPDATA%\procomp\<project>\`). |
 | `repositoriesRoot` | `string` | No | Base folder for local `Repository` checkouts (resolved relative to `configDir` if relative). Exposed as `{{repositoriesRoot}}`. |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Explicit `.env` files loaded into `Process` environments. Missing files fail fast unless `optional: true`. |
-| `defaults` | `object` | No | Default `builder`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, and `env` applied to all `Service`s unless overridden. |
+| `defaults` | `object` | No | Default `builder`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, `env`, and `envFiles` applied to all `Service`s (not the `Gateway`). `defaults.envFiles` is prepended before `services.<name>.envFiles` and resolved per `Service` relative to `workingDir`. |
 | `builders` | `map<string, Builder>` | No | Named `Builder` templates referenced by `Service`s or `defaults.builder`. |
 | `runtimes` | `map<string, Runtime>` | Yes | Named `Runtime` execution templates referenced by `Service`s. |
 | `gateway` | `object` | No | Local `Gateway` definition (`type`, `port`, optional `healthPath`, `command`, `workingDir`, `env`). |
@@ -119,8 +119,8 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 ## 4. Environment Variables & Secrets
 
 1. **Precedence (lowest to highest):**
-   - **Runtime `Process`:** host process environment < `envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
-   - **Build `Process`:** host process environment < `envFiles` (in listed order) < `defaults.env` < `builder.env` < `service.env` (`runtime.env` is deliberately excluded).
+   - **Runtime `Process`:** host process environment < top-level `envFiles` (in listed order) < `defaults.envFiles` (in listed order, resolved per `Service` relative to `workingDir`) < `service.envFiles` (in listed order) < `defaults.env` < `runtime.env` < `service.env`.
+   - **Build `Process`:** host process environment < top-level `envFiles` (in listed order) < `defaults.envFiles` (in listed order, resolved per `Service` relative to `workingDir`) < `service.envFiles` (in listed order) < `defaults.env` < `builder.env` < `service.env` (`runtime.env` is deliberately excluded).
 2. **Host-env pass-through:** `env` values, `command` elements, `workingDir`, and `vars` (scalar or array) may reference host variables via `"${env:VAR_NAME}"` (for example, `"${env:JAVA_HOME}/bin/java"` in `runtimes.<name>.command`). Unset host variables fail fast rather than silently expanding to empty strings.
 3. **Secret hygiene:** `procomp` never persists resolved `env` values in state files and never prints them in `inspect`, `status --json`, or error logs.
 

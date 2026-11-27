@@ -37,15 +37,17 @@ record RawProjectConfig(
         Optional<String> remoteUrlTemplate,
         Optional<String> workingDir,
         Map<String, VarValue> vars,
-        Map<String, String> env
+        Map<String, String> env,
+        List<EnvFileSpec> envFiles
     ) {
         static final RawDefaultsConfig EMPTY = new RawDefaultsConfig(
-            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Map.of(), Map.of()
+            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Map.of(), Map.of(), List.of()
         );
 
         RawDefaultsConfig {
             vars = Collections.unmodifiableMap(new LinkedHashMap<>(vars));
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
+            envFiles = List.copyOf(envFiles);
         }
     }
 
