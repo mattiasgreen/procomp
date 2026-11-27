@@ -6,6 +6,9 @@ import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitOperation;
+import procomp.core.git.GitRunRecord;
+import procomp.core.git.GitRunStatus;
 import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
@@ -242,6 +245,45 @@ public final class FsStateStore implements StateStore {
     }
 
     @Override
+    public Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName) {
+        Path file = gitRunFilePath(project, repositoryName);
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.readLock().lock();
+        try {
+            if (!Files.isRegularFile(file)) {
+                return Result.ok(Optional.empty());
+            }
+            return readGitRunFile(file, repositoryName).map(Optional::of);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    @Override
+    public Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record) {
+        Path file = gitRunFilePath(project, repositoryName);
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("repositoryName", Json.str(record.repositoryName()));
+        root.put("operation", Json.str(record.operation().name()));
+        root.put("pid", Json.num(record.pid()));
+        root.put("status", Json.str(record.status().name()));
+        root.put("startedAt", Json.str(record.startedAt().toString()));
+        root.put("finishedAt", record.finishedAt().map(t -> (JsonValue) Json.str(t.toString())).orElse(Json.nil()));
+        root.put("exitCode", record.exitCode().map(c -> (JsonValue) Json.num(c)).orElse(Json.nil()));
+        root.put("reason", record.reason().map(r -> (JsonValue) Json.str(r)).orElse(Json.nil()));
+        root.put("commandLine", Json.str(record.commandLine()));
+        root.put("stdoutLog", Json.str(record.stdoutLog().toString()));
+        root.put("stderrLog", Json.str(record.stderrLog().toString()));
+        ReentrantReadWriteLock lock = lockFor(file);
+        lock.writeLock().lock();
+        try {
+            return writeAtomically(file, Json.stringifyPretty(Json.obj(root)) + "\n");
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> {
@@ -252,6 +294,10 @@ public final class FsStateStore implements StateStore {
             case ProcessKey.Build(String svc) -> {
                 requireSafeSegment(svc, "service");
                 yield svc + ".build";
+            }
+            case ProcessKey.Git(String repo) -> {
+                requireSafeSegment(repo, "repository");
+                yield repo + ".git";
             }
         };
         String suffix = stderr ? ".err.log" : ".out.log";
@@ -421,6 +467,119 @@ public final class FsStateStore implements StateStore {
         return resolveContained(dir, serviceName + ".json", "service");
     }
 
+    private Path gitRunFilePath(String project, String repositoryName) {
+        requireSafeSegment(repositoryName, "repository");
+        Path dir = projectStateDir(project).resolve("git").normalize();
+        return resolveContained(dir, repositoryName + ".json", "repository");
+    }
+
+    private Result<GitRunRecord, DomainError> readGitRunFile(Path file, String fallbackRepoName) {
+        return readJsonObject(file).flatMap(obj -> {
+            Optional<JsonValue> pidVal = obj.get("pid");
+            if (pidVal.isEmpty() || !(pidVal.get() instanceof JsonValue.JsonNumber num) || !num.isInteger()) {
+                return Result.err(corruptState(file, "Invalid or missing 'pid'"));
+            }
+            OptionalLong pidOpt = num.asLong();
+            if (pidOpt.isEmpty() || pidOpt.getAsLong() <= 0) {
+                return Result.err(corruptState(file, "Invalid non-positive 'pid'"));
+            }
+            Result<String, DomainError> opStrRes = requireString(obj, "operation", file);
+            if (opStrRes.isErr()) return opStrRes.castError();
+            GitOperation operation;
+            try {
+                operation = GitOperation.valueOf(okVal(opStrRes));
+            } catch (IllegalArgumentException e) {
+                return Result.err(corruptState(file, "Unknown GitOperation '" + okVal(opStrRes) + "'"));
+            }
+            Result<String, DomainError> statusStrRes = requireString(obj, "status", file);
+            if (statusStrRes.isErr()) return statusStrRes.castError();
+            GitRunStatus status;
+            try {
+                status = GitRunStatus.valueOf(okVal(statusStrRes));
+            } catch (IllegalArgumentException e) {
+                return Result.err(corruptState(file, "Unknown GitRunStatus '" + okVal(statusStrRes) + "'"));
+            }
+            Result<Instant, DomainError> startedRes = requireInstant(obj, "startedAt", file);
+            if (startedRes.isErr()) return startedRes.castError();
+
+            Optional<Instant> finishedAt = Optional.empty();
+            Optional<JsonValue> finishedVal = obj.get("finishedAt");
+            if (finishedVal.isPresent() && !(finishedVal.get() instanceof JsonValue.JsonNull)) {
+                Result<Instant, DomainError> finRes = requireInstant(obj, "finishedAt", file);
+                if (finRes.isErr()) return finRes.castError();
+                finishedAt = Optional.of(okVal(finRes));
+            }
+
+            Optional<Integer> exitCode = Optional.empty();
+            Optional<JsonValue> exitVal = obj.get("exitCode");
+            if (exitVal.isPresent() && !(exitVal.get() instanceof JsonValue.JsonNull)) {
+                if (!(exitVal.get() instanceof JsonValue.JsonNumber codeNum) || !codeNum.isInteger()) {
+                    return Result.err(corruptState(file, "Invalid 'exitCode'"));
+                }
+                OptionalLong codeOpt = codeNum.asLong();
+                if (codeOpt.isEmpty()) {
+                    return Result.err(corruptState(file, "Invalid 'exitCode'"));
+                }
+                exitCode = Optional.of((int) codeOpt.getAsLong());
+            }
+
+            Optional<String> reason = Optional.empty();
+            Optional<JsonValue> reasonVal = obj.get("reason");
+            if (reasonVal.isPresent() && !(reasonVal.get() instanceof JsonValue.JsonNull)) {
+                if (!(reasonVal.get() instanceof JsonValue.JsonString(String r))) {
+                    return Result.err(corruptState(file, "Invalid 'reason'"));
+                }
+                reason = Optional.of(r);
+            }
+
+            Result<String, DomainError> cmdRes = requireString(obj, "commandLine", file);
+            if (cmdRes.isErr()) return cmdRes.castError();
+            Result<String, DomainError> stdoutRes = requireString(obj, "stdoutLog", file);
+            if (stdoutRes.isErr()) return stdoutRes.castError();
+            Result<String, DomainError> stderrRes = requireString(obj, "stderrLog", file);
+            if (stderrRes.isErr()) return stderrRes.castError();
+
+            String repoName = fallbackRepoName;
+            Optional<JsonValue> repoVal = obj.get("repositoryName");
+            if (repoVal.isPresent() && repoVal.get() instanceof JsonValue.JsonString(String rn) && !rn.isBlank()) {
+                repoName = rn;
+            }
+
+            Path stdoutPath;
+            Path stderrPath;
+            try {
+                stdoutPath = Path.of(okVal(stdoutRes));
+                stderrPath = Path.of(okVal(stderrRes));
+            } catch (InvalidPathException e) {
+                return Result.err(corruptState(file, "Invalid log path: " + e.getMessage()));
+            }
+            return switch (status) {
+                case RUNNING -> Result.ok(new GitRunRecord.Running(
+                    repoName, operation, pidOpt.getAsLong(), okVal(startedRes), okVal(cmdRes), stdoutPath, stderrPath
+                ));
+                case SUCCEEDED -> {
+                    if (finishedAt.isEmpty()) {
+                        yield Result.err(corruptState(file, "SUCCEEDED GitRunRecord missing 'finishedAt'"));
+                    }
+                    yield Result.ok(new GitRunRecord.Succeeded(
+                        repoName, operation, pidOpt.getAsLong(), okVal(startedRes), finishedAt.get(), okVal(cmdRes), stdoutPath, stderrPath
+                    ));
+                }
+                case FAILED -> {
+                    if (finishedAt.isEmpty()) {
+                        yield Result.err(corruptState(file, "FAILED GitRunRecord missing 'finishedAt'"));
+                    }
+                    yield Result.ok(new GitRunRecord.Failed(
+                        repoName, operation, pidOpt.getAsLong(), okVal(startedRes), finishedAt.get(),
+                        exitCode, reason.filter(s -> !s.isBlank()).orElse("Git command failed"),
+                        okVal(cmdRes), stdoutPath, stderrPath
+                    ));
+                }
+                case UNKNOWN -> Result.err(corruptState(file, "Persisted GitRunRecord must not have status UNKNOWN"));
+            };
+        });
+    }
+
     private Path processFilePath(String project, ProcessKey key) {
         Path dir = projectStateDir(project);
         return switch (key) {
@@ -431,6 +590,9 @@ public final class FsStateStore implements StateStore {
             case ProcessKey.Gateway _ -> dir.resolve("gateway.json");
             case ProcessKey.Build _ -> throw new IllegalArgumentException(
                 "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
             );
         };
     }

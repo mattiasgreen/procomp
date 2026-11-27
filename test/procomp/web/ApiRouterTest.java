@@ -95,6 +95,11 @@ public final class ApiRouterTest {
         JsonValue.JsonObject data = obj(statusRoot, "data");
         Assert.assertEquals("acme", str(data, "project"), "project name");
         Assert.assertEquals(3, arr(data, "services").elements().size(), "3 services");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) data.get("totalRssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/status totalRssBytes"
+        );
 
         // GET /api/services/billing/inspect
         ApiResponse inspectRes = fx.router.handle(localGet("/api/services/billing/inspect"));
@@ -115,6 +120,18 @@ public final class ApiRouterTest {
         Assert.assertEquals("UNMANAGED", str(inspectData, "owner"), "owner UNMANAGED");
         Assert.assertEquals("IDE", str(inspectData, "provenance"), "provenance IDE");
         Assert.assertEquals(1, arr(inspectData, "parentChain").elements().size(), "parentChain populated");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) inspectData.get("rssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/services/billing/inspect rssBytes"
+        );
+        JsonValue.JsonArray diagCmds = arr(inspectData, "diagnosticCommands");
+        Assert.assertEquals(3, diagCmds.elements().size(), "inspect returns 3 JVM diagnostic commands");
+        Assert.assertEquals(
+            "jcmd 5200 GC.heap_info",
+            str((JsonValue.JsonObject) diagCmds.elements().get(0), "command"),
+            "first diagnostic command uses live PID"
+        );
 
         // Unknown service -> 404
         ApiResponse missingRes = fx.router.handle(localGet("/api/services/ghost/inspect"));
@@ -618,6 +635,114 @@ public final class ApiRouterTest {
         List<SseEvent> events() {
             return events;
         }
+    }
+
+    public static void testProfileSaveAndDeleteEndpointsRoundTripAndEnforceCsrf() {
+        Fixture fx = Fixture.create(Optional.empty());
+
+        // 1. CSRF rejected on PUT and DELETE without same-origin headers
+        ApiResponse csrfPut = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/custom",
+            Map.of("Host", "127.0.0.1:9090", "Origin", "https://evil.example"),
+            "{\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(403, csrfPut.statusCode(), "PUT /api/profiles/{name} enforces CSRF");
+
+        ApiResponse csrfDelete = fx.router.handle(ApiRequest.of(
+            "DELETE",
+            "/api/profiles/dev",
+            Map.of("Host", "127.0.0.1:9090", "Origin", "https://evil.example"),
+            ""
+        ));
+        Assert.assertEquals(403, csrfDelete.statusCode(), "DELETE /api/profiles/{name} enforces CSRF");
+
+        // 2. PUT explicit local services -> 200, echoes CLI command, visible immediately in GET /api/status
+        ApiResponse saveExplicit = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/payments-only",
+            LOCAL_HEADERS,
+            "{\"local\":[\"payments\"]}"
+        ));
+        Assert.assertEquals(200, saveExplicit.statusCode(), "PUT explicit returns 200: " + saveExplicit.body());
+        JsonValue.JsonObject saveExplicitRoot = parseObj(saveExplicit.body());
+        Assert.assertEquals("procomp profile save payments-only payments", str(saveExplicitRoot, "cliCommand"), "explicit cliCommand");
+        Assert.assertEquals(3, arr(obj(saveExplicitRoot, "data"), "profiles").elements().size(), "3 profiles returned");
+
+        // 3. PUT with empty local list -> echoes --none
+        ApiResponse saveEmpty = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/zero-local",
+            LOCAL_HEADERS,
+            "{\"local\":[]}"
+        ));
+        Assert.assertEquals(200, saveEmpty.statusCode(), "PUT empty returns 200: " + saveEmpty.body());
+        Assert.assertEquals("procomp profile save zero-local --none", str(parseObj(saveEmpty.body()), "cliCommand"), "--none cliCommand");
+
+        // 4. PUT with fromCurrentRoutes: true snapshots current Routing Table
+        Assert.assertEquals(200, fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/routes",
+            LOCAL_HEADERS,
+            "{\"services\":[\"orders\"],\"route\":\"LOCAL\"}"
+        )).statusCode(), "set orders LOCAL");
+
+        ApiResponse saveSnap = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/snap-slice",
+            LOCAL_HEADERS,
+            "{\"fromCurrentRoutes\":true}"
+        ));
+        Assert.assertEquals(200, saveSnap.statusCode(), "PUT snapshot returns 200: " + saveSnap.body());
+        JsonValue.JsonObject saveSnapRoot = parseObj(saveSnap.body());
+        Assert.assertEquals("procomp profile save snap-slice", str(saveSnapRoot, "cliCommand"), "snapshot cliCommand");
+        JsonValue.JsonArray snapLocal = arr(obj(obj(saveSnapRoot, "data"), "profile"), "local");
+        Assert.assertEquals(1, snapLocal.elements().size(), "snapshot captured 1 LOCAL service");
+        Assert.assertEquals("orders", ((JsonValue.JsonString) snapLocal.elements().get(0)).value(), "snapshot captured orders");
+
+        // 5. GET /api/status immediately reflects saved profiles
+        ApiResponse statusRes = fx.router.handle(localGet("/api/status"));
+        Assert.assertEquals(200, statusRes.statusCode(), "status returns 200");
+        Assert.assertEquals(5, arr(parseObj(statusRes.body()), "profiles").elements().size(), "status reflects 5 profiles");
+
+        // 6. DELETE removes profile and returns 200; deleting again returns 404 UNKNOWN_PROFILE
+        ApiResponse delRes = fx.router.handle(ApiRequest.of("DELETE", "/api/profiles/snap-slice", LOCAL_HEADERS, ""));
+        Assert.assertEquals(200, delRes.statusCode(), "DELETE returns 200: " + delRes.body());
+        JsonValue.JsonObject delRoot = parseObj(delRes.body());
+        Assert.assertEquals("procomp profile delete snap-slice", str(delRoot, "cliCommand"), "delete cliCommand");
+        Assert.assertEquals(4, arr(obj(delRoot, "data"), "profiles").elements().size(), "4 profiles remain");
+
+        ApiResponse delMissing = fx.router.handle(ApiRequest.of("DELETE", "/api/profiles/snap-slice", LOCAL_HEADERS, ""));
+        Assert.assertEquals(404, delMissing.statusCode(), "DELETE missing returns 404");
+        Assert.assertEquals("UNKNOWN_PROFILE", str(obj(parseObj(delMissing.body()), "error"), "code"), "UNKNOWN_PROFILE code");
+
+        // 7. Invalid profile name -> 400 PROFILE_INVALID_NAME; unknown service -> 404 UNKNOWN_SERVICE
+        ApiResponse badName = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/-flag",
+            LOCAL_HEADERS,
+            "{\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(400, badName.statusCode(), "leading dash returns 400");
+        Assert.assertEquals("PROFILE_INVALID_NAME", str(obj(parseObj(badName.body()), "error"), "code"), "PROFILE_INVALID_NAME code");
+
+        ApiResponse badSvc = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/bad-svc",
+            LOCAL_HEADERS,
+            "{\"local\":[\"ghost\"]}"
+        ));
+        Assert.assertEquals(404, badSvc.statusCode(), "unknown service returns 404");
+        Assert.assertEquals("UNKNOWN_SERVICE", str(obj(parseObj(badSvc.body()), "error"), "code"), "UNKNOWN_SERVICE code");
+
+        ApiResponse ambiguous = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/ambiguous",
+            LOCAL_HEADERS,
+            "{\"fromCurrentRoutes\":true,\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(400, ambiguous.statusCode(), "ambiguous body returns 400");
+        Assert.assertEquals("INVALID_REQUEST", str(obj(parseObj(ambiguous.body()), "error"), "code"), "INVALID_REQUEST code");
     }
 
     private static final class Fixture {

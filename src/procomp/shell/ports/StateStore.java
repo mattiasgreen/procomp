@@ -4,6 +4,7 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitRunRecord;
 import procomp.core.process.ManagedProcessRecord;
 
 import java.nio.file.Path;
@@ -31,6 +32,10 @@ public interface StateStore {
     Result<Optional<BuildRunRecord>, DomainError> readBuildRun(String project, String serviceName);
 
     Result<Unit, DomainError> writeBuildRun(String project, String serviceName, BuildRunRecord record);
+
+    Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName);
+
+    Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record);
 
     Path logPath(String project, ProcessKey key, boolean stderr);
 

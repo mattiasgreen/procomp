@@ -167,6 +167,32 @@ public final class FsStateStoreAndConfigTest {
         );
     }
 
+    public static void testFsConfigSourceAtomicWriteRoundTrip() throws Exception {
+        Path tmp = Files.createTempDirectory("procomp-cfg-write-test");
+        try {
+            Path configPath = tmp.resolve("procomp.json");
+            String initial = """
+                {
+                  "project": "disk-test",
+                  "runtimes": {
+                    "java": { "command": ["java", "-jar", "app.jar"] }
+                  },
+                  "services": {
+                    "orders": { "runtime": "java", "port": 9001, "workingDir": "." }
+                  }
+                }
+                """;
+            Files.writeString(configPath, initial, StandardCharsets.UTF_8);
+
+            FsConfigSource fs = new FsConfigSource();
+            String updated = initial.replace("  \"services\":", "  \"profiles\": {\"p1\": {\"local\": [\"orders\"]}},\n  \"services\":");
+            Assert.assertOk(fs.writeFile(configPath, updated), "atomic writeFile succeeds");
+            Assert.assertEquals(updated, Assert.assertOk(fs.readFile(configPath), "read back"), "persisted content matches");
+        } finally {
+            deleteRecursively(tmp);
+        }
+    }
+
     private static void deleteRecursively(Path dir) {
         if (dir == null || !Files.exists(dir)) {
             return;

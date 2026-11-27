@@ -27,8 +27,36 @@ public record InspectionReport(
     String healthResponse,
     Path outLogPath,
     Path errLogPath,
-    boolean stale
+    boolean stale,
+    List<DiagnosticCommand> diagnosticCommands
 ) {
+    public InspectionReport(
+        String service,
+        Optional<Integer> port,
+        Optional<String> desiredRoute,
+        Optional<String> liveGatewayRoute,
+        Ownership ownership,
+        Optional<String> provenance,
+        HealthState health,
+        Optional<Long> pid,
+        Optional<Duration> uptime,
+        Optional<String> commandLine,
+        List<String> arguments,
+        List<ParentProcess> parentChain,
+        Optional<Long> rssBytes,
+        Optional<String> healthEndpoint,
+        String healthResponse,
+        Path outLogPath,
+        Path errLogPath,
+        boolean stale
+    ) {
+        this(
+            service, port, desiredRoute, liveGatewayRoute, ownership, provenance, health, pid, uptime,
+            commandLine, arguments, parentChain, rssBytes, healthEndpoint, healthResponse, outLogPath, errLogPath,
+            stale, List.of()
+        );
+    }
+
     public InspectionReport {
         if (service == null || service.isBlank()) {
             throw new IllegalArgumentException("service must be non-blank");
@@ -49,5 +77,6 @@ public record InspectionReport(
         Objects.requireNonNull(healthResponse, "healthResponse must not be null");
         Objects.requireNonNull(outLogPath, "outLogPath must not be null");
         Objects.requireNonNull(errLogPath, "errLogPath must not be null");
+        diagnosticCommands = List.copyOf(diagnosticCommands);
     }
 }

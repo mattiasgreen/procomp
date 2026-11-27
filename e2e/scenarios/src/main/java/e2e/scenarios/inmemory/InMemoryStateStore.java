@@ -4,6 +4,7 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitRunRecord;
 import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
@@ -30,6 +31,7 @@ public final class InMemoryStateStore implements StateStore {
     private final Map<String, Map<String, String>> routingByProject = new LinkedHashMap<>();
     private final Map<String, Map<ProcessKey, ManagedProcessRecord>> managedByProject = new LinkedHashMap<>();
     private final Map<String, Map<String, BuildRunRecord>> buildRunsByProject = new LinkedHashMap<>();
+    private final Map<String, Map<String, GitRunRecord>> gitRunsByProject = new LinkedHashMap<>();
     private final Map<Path, StringBuilder> logs = new LinkedHashMap<>();
 
     public InMemoryStateStore() {
@@ -45,6 +47,7 @@ public final class InMemoryStateStore implements StateStore {
         routingByProject.clear();
         managedByProject.clear();
         buildRunsByProject.clear();
+        gitRunsByProject.clear();
         logs.clear();
     }
 
@@ -121,11 +124,27 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
+    public synchronized Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName) {
+        Map<String, GitRunRecord> map = gitRunsByProject.get(project);
+        if (map == null) {
+            return Result.ok(Optional.empty());
+        }
+        return Result.ok(Optional.ofNullable(map.get(repositoryName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record) {
+        gitRunsByProject.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(repositoryName, record);
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
             case ProcessKey.Gateway _ -> "gateway";
             case ProcessKey.Build(String svc) -> svc + ".build";
+            case ProcessKey.Git(String repo) -> repo + ".git";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix).normalize();

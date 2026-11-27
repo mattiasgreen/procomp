@@ -66,7 +66,8 @@ public final class LogsShell {
         Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
         Objects.requireNonNull(onInitialPage, "onInitialPage must not be null");
 
-        if (project.service(request.serviceName()).isEmpty()) {
+        var svcOpt = project.service(request.serviceName());
+        if (svcOpt.isEmpty()) {
             return Result.err(DomainError.of(
                 "UNKNOWN_SERVICE",
                 "Unknown service '" + request.serviceName() + "' in project '" + project.name() + "'",
@@ -74,9 +75,24 @@ public final class LogsShell {
             ));
         }
 
-        ProcessKey key = request.build()
-            ? ProcessKey.build(request.serviceName())
-            : ProcessKey.service(request.serviceName());
+        ProcessKey key;
+        String logTargetName = request.serviceName();
+        if (request.git()) {
+            var repoOpt = svcOpt.get().repository();
+            if (repoOpt.isEmpty()) {
+                return Result.err(DomainError.of(
+                    "GIT_NO_REPOSITORY",
+                    "Service '" + request.serviceName() + "' has no Repository configured",
+                    Map.of("service", request.serviceName())
+                ));
+            }
+            key = ProcessKey.git(repoOpt.get().name());
+            logTargetName = repoOpt.get().name();
+        } else if (request.build()) {
+            key = ProcessKey.build(request.serviceName());
+        } else {
+            key = ProcessKey.service(request.serviceName());
+        }
         Path logPath = stateStore.logPath(project.name(), key, request.stderr());
         if (request.pathOnly()) {
             return Result.ok(new LogsResult.ResolvedPath(logPath));
@@ -89,7 +105,7 @@ public final class LogsShell {
 
         return follow(
             logPath,
-            request.serviceName(),
+            logTargetName,
             request.stderr(),
             request.lines(),
             pollInterval,
@@ -101,19 +117,73 @@ public final class LogsShell {
     public Result<LogPageResult, DomainError> readPage(Project project, LogsPageRequest request) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(request, "request must not be null");
-        if (project.service(request.serviceName()).isEmpty()) {
+        var svcOpt = project.service(request.serviceName());
+        if (svcOpt.isEmpty()) {
             return Result.err(DomainError.of(
                 "UNKNOWN_SERVICE",
                 "Unknown service '" + request.serviceName() + "' in project '" + project.name() + "'",
                 Map.of("service", request.serviceName(), "project", project.name())
             ));
         }
-        ProcessKey key = request.build()
-            ? ProcessKey.build(request.serviceName())
-            : ProcessKey.service(request.serviceName());
+        ProcessKey key;
+        if (request.git()) {
+            var repoOpt = svcOpt.get().repository();
+            if (repoOpt.isEmpty()) {
+                return Result.err(DomainError.of(
+                    "GIT_NO_REPOSITORY",
+                    "Service '" + request.serviceName() + "' has no Repository configured",
+                    Map.of("service", request.serviceName())
+                ));
+            }
+            key = ProcessKey.git(repoOpt.get().name());
+        } else if (request.build()) {
+            key = ProcessKey.build(request.serviceName());
+        } else {
+            key = ProcessKey.service(request.serviceName());
+        }
         Path logPath = stateStore.logPath(project.name(), key, request.stderr());
         return stateStore.readLogPageBackward(logPath, request.beforeOffset(), request.lines(), request.maxBytes())
             .map(page -> new LogPageResult(logPath, page));
+    }
+
+    public Result<LogsResult, DomainError> runGit(Project project, GitLogsRequest request) {
+        return runGit(project, request, DEFAULT_POLL_INTERVAL, () -> !Thread.currentThread().isInterrupted());
+    }
+
+    public Result<LogsResult, DomainError> runGit(
+        Project project,
+        GitLogsRequest request,
+        Duration pollInterval,
+        BooleanSupplier keepFollowing
+    ) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(pollInterval, "pollInterval must not be null");
+        Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
+
+        Result<procomp.core.project.RepositoryRef, DomainError> repoRes = GitShell.resolveTarget(project, request.target());
+        if (repoRes.isErr()) {
+            return repoRes.castError();
+        }
+        String repoName = ((Result.Ok<procomp.core.project.RepositoryRef, DomainError>) repoRes).value().name();
+
+        Path logPath = stateStore.logPath(project.name(), ProcessKey.git(repoName), request.stderr());
+        if (request.pathOnly()) {
+            return Result.ok(new LogsResult.ResolvedPath(logPath));
+        }
+        if (!request.follow()) {
+            return stateStore.readLogText(logPath)
+                .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
+        }
+        return follow(
+            logPath,
+            repoName,
+            request.stderr(),
+            request.lines(),
+            pollInterval,
+            keepFollowing,
+            LogsShell::noopPageListener
+        );
     }
 
     public Result<LogsResult, DomainError> runGateway(Project project, GatewayLogsRequest request) {
@@ -227,7 +297,8 @@ public final class LogsShell {
         boolean pathOnly,
         int lines,
         boolean follow,
-        boolean build
+        boolean build,
+        boolean git
     ) {
         public static final int DEFAULT_LINES = 100;
 
@@ -238,12 +309,43 @@ public final class LogsShell {
             int lines,
             boolean follow
         ) {
-            this(serviceName, stderr, pathOnly, lines, follow, false);
+            this(serviceName, stderr, pathOnly, lines, follow, false, false);
+        }
+
+        public LogsRequest(
+            String serviceName,
+            boolean stderr,
+            boolean pathOnly,
+            int lines,
+            boolean follow,
+            boolean build
+        ) {
+            this(serviceName, stderr, pathOnly, lines, follow, build, false);
         }
 
         public LogsRequest {
             if (serviceName == null || serviceName.isBlank()) {
                 throw new IllegalArgumentException("serviceName must be non-blank");
+            }
+            if (lines < 0) {
+                throw new IllegalArgumentException("lines must be non-negative: " + lines);
+            }
+            if (build && git) {
+                throw new IllegalArgumentException("Cannot combine --build and --git log sources");
+            }
+        }
+    }
+
+    public record GitLogsRequest(
+        String target,
+        boolean stderr,
+        boolean pathOnly,
+        int lines,
+        boolean follow
+    ) {
+        public GitLogsRequest {
+            if (target == null || target.isBlank()) {
+                throw new IllegalArgumentException("target must be non-blank");
             }
             if (lines < 0) {
                 throw new IllegalArgumentException("lines must be non-negative: " + lines);
@@ -268,6 +370,7 @@ public final class LogsShell {
         String serviceName,
         boolean stderr,
         boolean build,
+        boolean git,
         OptionalLong beforeOffset,
         int lines,
         int maxBytes
@@ -279,12 +382,26 @@ public final class LogsShell {
             OptionalLong beforeOffset,
             int lines
         ) {
-            this(serviceName, stderr, build, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
+            this(serviceName, stderr, build, false, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
+        }
+
+        public LogsPageRequest(
+            String serviceName,
+            boolean stderr,
+            boolean build,
+            boolean git,
+            OptionalLong beforeOffset,
+            int lines
+        ) {
+            this(serviceName, stderr, build, git, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
         }
 
         public LogsPageRequest {
             if (serviceName == null || serviceName.isBlank()) {
                 throw new IllegalArgumentException("serviceName must be non-blank");
+            }
+            if (build && git) {
+                throw new IllegalArgumentException("Cannot combine build and git log flags");
             }
             Objects.requireNonNull(beforeOffset, "beforeOffset must not be null");
             if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
