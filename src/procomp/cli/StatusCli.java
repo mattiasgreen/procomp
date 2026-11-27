@@ -69,19 +69,42 @@ public final class StatusCli {
                     formatOwner(row.ownership(), row.provenance()),
                     row.health().name(),
                     row.build().displayState().name(),
+                    row.git().map(g -> g.compactDisplay()).orElse("NO_REPO"),
                     row.port().map(Object::toString).orElse("-"),
                     row.pid().map(Object::toString).orElse("-"),
                     row.uptime().map(CliFormat::formatDuration).orElse("-"),
+                    row.rssBytes().map(CliFormat::formatBytes).orElse("-"),
                     row.stale() ? "YES" : "no"
                 ));
             }
             CliFormat.renderTable(
                 out,
-                List.of("SERVICE", "ROUTE", "OWNER", "HEALTH", "BUILD", "PORT", "PID", "UPTIME", "STALE"),
+                List.of("SERVICE", "ROUTE", "OWNER", "HEALTH", "BUILD", "GIT", "PORT", "PID", "UPTIME", "RSS", "STALE"),
                 rows
             );
         }
         out.println(formatGatewayLine(status.gateway()));
+        status.totalRssBytes().ifPresent(total -> out.println(formatTotalRssLine(status, total)));
+    }
+
+    private static String formatTotalRssLine(EstateStatus status, long totalBytes) {
+        int serviceCount = 0;
+        for (ServiceStatusRow row : status.services()) {
+            if (row.rssBytes().isPresent()) {
+                serviceCount++;
+            }
+        }
+        boolean hasGateway = status.gateway().report().isPresent()
+            && status.gateway().report().get().rssBytes().isPresent();
+        String breakdown;
+        if (serviceCount > 0 && hasGateway) {
+            breakdown = serviceCount + (serviceCount == 1 ? " service" : " services") + " + Gateway";
+        } else if (serviceCount > 0) {
+            breakdown = serviceCount + (serviceCount == 1 ? " service" : " services");
+        } else {
+            breakdown = "Gateway";
+        }
+        return "Total RSS: " + CliFormat.formatBytes(totalBytes) + " (" + breakdown + ")";
     }
 
     private static void renderJson(EstateStatus status, PrintWriter out) {
@@ -96,13 +119,14 @@ public final class StatusCli {
         String owner = formatOwner(report.discovery().ownership(), report.discovery().provenance());
         String health = report.discovery().health().name();
         String pidPart = report.discovery().pid().map(p -> ", PID " + p).orElse("");
+        String rssPart = report.rssBytes().map(b -> ", " + CliFormat.formatBytes(b) + " RSS").orElse("");
         GatewayDriftReport drift = report.drift();
         String syncLabel = switch (drift.syncStatus()) {
             case IN_SYNC -> "IN SYNC";
             case OFFLINE -> "OFFLINE";
             case DRIFTED -> "DRIFTED (" + (drift.drifted().size() + drift.staleMappings().size()) + ")";
         };
-        return "Gateway: port " + report.gateway().port() + ", " + owner + ", " + health + pidPart + ", " + syncLabel;
+        return "Gateway: port " + report.gateway().port() + ", " + owner + ", " + health + pidPart + rssPart + ", " + syncLabel;
     }
 
     private static String formatOwner(Ownership ownership, Optional<String> provenance) {

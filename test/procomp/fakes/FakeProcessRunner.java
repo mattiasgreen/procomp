@@ -20,6 +20,8 @@ public final class FakeProcessRunner implements ProcessRunner {
     private final Clock clock;
     private long nextPid = 10000;
     private final Map<Long, ObservedProcess> processes = new LinkedHashMap<>();
+    private final Map<Long, Long> rssOverrides = new LinkedHashMap<>();
+    private int rssSnapshotCalls = 0;
     private final List<SpawnRequest> spawnedRequests = new ArrayList<>();
     private final List<Long> stoppedPids = new ArrayList<>();
     private DomainError spawnError;
@@ -40,8 +42,18 @@ public final class FakeProcessRunner implements ProcessRunner {
         return this;
     }
 
+    public FakeProcessRunner setRssBytes(long pid, long rssBytes) {
+        rssOverrides.put(pid, rssBytes);
+        return this;
+    }
+
+    public int rssSnapshotCalls() {
+        return rssSnapshotCalls;
+    }
+
     public FakeProcessRunner markExited(long pid) {
         processes.remove(pid);
+        rssOverrides.remove(pid);
         return this;
     }
 
@@ -131,6 +143,20 @@ public final class FakeProcessRunner implements ProcessRunner {
     public Result<Unit, DomainError> stopTree(long pid, Duration gracefulTimeout) {
         stoppedPids.add(pid);
         processes.remove(pid);
+        rssOverrides.remove(pid);
         return Result.ok(Unit.VALUE);
+    }
+
+    @Override
+    public Map<Long, Long> snapshotRssBytes() {
+        rssSnapshotCalls++;
+        Map<Long, Long> snapshot = new LinkedHashMap<>();
+        for (ObservedProcess proc : processes.values()) {
+            if (proc.alive() && proc.rssBytes().isPresent()) {
+                snapshot.put(proc.pid(), proc.rssBytes().get());
+            }
+        }
+        snapshot.putAll(rssOverrides);
+        return Map.copyOf(snapshot);
     }
 }

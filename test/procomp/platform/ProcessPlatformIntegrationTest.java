@@ -250,6 +250,15 @@ public final class ProcessPlatformIntegrationTest {
         }
     }
 
+    public static void testBatchRssSnapshotReportsPositiveRssForCurrentJvmProcess() {
+        OsProcessRunner runner = new OsProcessRunner();
+        long selfPid = ProcessHandle.current().pid();
+        Map<Long, Long> snapshot = runner.snapshotRssBytes();
+        Long selfRss = snapshot.get(selfPid);
+        Assert.assertTrue(selfRss != null && selfRss > 0L,
+            "snapshotRssBytes should include positive RSS for current JVM PID " + selfPid + "; got " + selfRss);
+    }
+
     private static void waitForFileContent(Path file, String expectedSubstring, Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {

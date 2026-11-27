@@ -15,6 +15,7 @@ import java.io.StringWriter;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 
 public final class ProcompCliTest {
 
@@ -304,5 +305,30 @@ public final class ProcompCliTest {
         Assert.assertEquals(0, logsCode, "-v logs orders exits 0; err=" + logsErr);
         Assert.assertEquals("raw-log-line\n", logsOut.toString(), "logs stdout stays raw under -v");
         Assert.assertContains(logsErr.toString(), "[config]", "logs -v writes diagnostics to stderr");
+    }
+
+    public static void testVersionFlagsPrintVersionAndExitZero() {
+        Path cwd = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(cwd);
+        var stateStore = new InMemoryStateStore();
+
+        for (String flag : List.of("--version", "-V")) {
+            StringWriter outBuf = new StringWriter();
+            StringWriter errBuf = new StringWriter();
+            int code = Procomp.run(
+                new String[]{flag},
+                CliRuntime.builder(new PrintWriter(outBuf, true), new PrintWriter(errBuf, true))
+                    .configSource(configSource)
+                    .stateStore(stateStore)
+                    .build()
+            );
+
+            Assert.assertEquals(0, code, flag + " should exit 0");
+            Assert.assertTrue(
+                outBuf.toString().trim().startsWith("procomp "),
+                flag + " should print 'procomp <version>', got: " + outBuf
+            );
+            Assert.assertEquals("", errBuf.toString(), flag + " should write nothing to stderr");
+        }
     }
 }
