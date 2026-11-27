@@ -4,7 +4,11 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.JarURLConnection;
 import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -16,42 +20,95 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.jar.JarEntry;
 
 /**
- * Disk-backed static frontend asset resolver for zero-build Vanilla ES6 assets under {@code web/}.
- * Enforces strict normalized path-traversal protection and serves assets with {@code Cache-Control: no-cache}.
+ * Static frontend asset resolver for zero-build Vanilla ES6 assets under {@code web/},
+ * backed either by a filesystem directory (JEP 458 / local dev) or by JAR/classpath resources
+ * (standalone {@code procomp.jar}). Enforces strict normalized path-traversal protection and
+ * serves assets with {@code Cache-Control: no-cache}.
  */
 public final class StaticAssets {
 
     public static final String CACHE_CONTROL_NO_CACHE = "no-cache";
+    public static final String DEFAULT_RESOURCE_PREFIX = "web";
 
-    private final Path webRoot;
+    public sealed interface Source permits Source.Directory, Source.Classpath {
 
-    private StaticAssets(Path webRoot) {
-        this.webRoot = Objects.requireNonNull(webRoot, "webRoot must not be null").toAbsolutePath().normalize();
+        record Directory(Path webRoot) implements Source {
+            public Directory {
+                webRoot = Objects.requireNonNull(webRoot, "webRoot must not be null").toAbsolutePath().normalize();
+            }
+        }
+
+        record Classpath(ClassLoader classLoader, String resourcePrefix) implements Source {
+            public Classpath {
+                Objects.requireNonNull(classLoader, "classLoader must not be null");
+                Objects.requireNonNull(resourcePrefix, "resourcePrefix must not be null");
+                resourcePrefix = normalizeResourcePrefix(resourcePrefix);
+            }
+        }
+    }
+
+    private final Source source;
+
+    private StaticAssets(Source source) {
+        this.source = Objects.requireNonNull(source, "source must not be null");
     }
 
     public static StaticAssets fromDirectory(Path webRoot) {
-        return new StaticAssets(webRoot);
+        return new StaticAssets(new Source.Directory(webRoot));
+    }
+
+    public static StaticAssets fromClasspath(ClassLoader classLoader, String resourcePrefix) {
+        return new StaticAssets(new Source.Classpath(classLoader, resourcePrefix));
     }
 
     /**
-     * Discovers the {@code web/} directory by walking up from {@code StaticAssets}'s
-     * {@link CodeSource} (procomp's own repository/install root) first, falling back to the
-     * current working directory only when {@code CodeSource} does not locate {@code web/index.html}.
+     * Discovers static web assets in priority order:
+     * <ol>
+     *   <li>If running from a packaged {@code .jar} that bundles {@code web/index.html}, serve directly from the JAR classpath.</li>
+     *   <li>Walk up from {@code StaticAssets}'s {@link CodeSource} (procomp's own repository/install root) for disk-backed {@code web/index.html}.</li>
+     *   <li>Fall back to {@code web/index.html} on the classpath if present.</li>
+     *   <li>Fall back to walking up from the current working directory.</li>
+     * </ol>
      */
     public static Result<StaticAssets, DomainError> discoverDefault() {
-        List<Path> searchRoots = new ArrayList<>(2);
-        codeSourcePath().ifPresent(searchRoots::add);
-        searchRoots.add(Path.of("").toAbsolutePath().normalize());
-        return discoverFrom(searchRoots);
+        Optional<Path> codeSource = codeSourcePath();
+        ClassLoader classLoader = defaultClassLoader();
+        Path cwd = Path.of("").toAbsolutePath().normalize();
+        return discoverDefault(codeSource, classLoader, DEFAULT_RESOURCE_PREFIX, cwd);
+    }
+
+    static Result<StaticAssets, DomainError> discoverDefault(
+        Optional<Path> codeSource,
+        ClassLoader classLoader,
+        String resourcePrefix,
+        Path cwd
+    ) {
+        if (codeSource.isPresent() && isJarFile(codeSource.get()) && hasClasspathIndex(classLoader, resourcePrefix)) {
+            return Result.ok(fromClasspath(classLoader, resourcePrefix));
+        }
+
+        if (codeSource.isPresent()) {
+            Optional<Path> found = findWebRootWalkingUp(codeSource.get());
+            if (found.isPresent()) {
+                return Result.ok(fromDirectory(found.get()));
+            }
+        }
+
+        if (hasClasspathIndex(classLoader, resourcePrefix)) {
+            return Result.ok(fromClasspath(classLoader, resourcePrefix));
+        }
+
+        return discoverFrom(List.of(cwd));
     }
 
     static Result<StaticAssets, DomainError> discoverFrom(List<Path> searchRoots) {
         for (Path root : searchRoots) {
             Optional<Path> found = findWebRootWalkingUp(root);
             if (found.isPresent()) {
-                return Result.ok(new StaticAssets(found.get()));
+                return Result.ok(fromDirectory(found.get()));
             }
         }
 
@@ -61,6 +118,34 @@ public final class StaticAssets {
             "Could not locate static web assets directory 'web/' relative to '" + cwd + "'",
             Map.of("cwd", cwd.toString())
         ));
+    }
+
+    private static ClassLoader defaultClassLoader() {
+        ClassLoader cl = StaticAssets.class.getClassLoader();
+        return cl != null ? cl : ClassLoader.getSystemClassLoader();
+    }
+
+    private static boolean isJarFile(Path path) {
+        return Files.isRegularFile(path) && path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar");
+    }
+
+    private static boolean hasClasspathIndex(ClassLoader classLoader, String resourcePrefix) {
+        String normalized = normalizeResourcePrefix(resourcePrefix);
+        String indexPath = normalized.isEmpty() ? "index.html" : normalized + "/index.html";
+        return classLoader.getResource(indexPath) != null;
+    }
+
+    private static String normalizeResourcePrefix(String rawPrefix) {
+        String trimmed = rawPrefix.trim();
+        int start = 0;
+        while (start < trimmed.length() && trimmed.charAt(start) == '/') {
+            start++;
+        }
+        int end = trimmed.length();
+        while (end > start && trimmed.charAt(end - 1) == '/') {
+            end--;
+        }
+        return trimmed.substring(start, end);
     }
 
     private static Optional<Path> codeSourcePath() {
@@ -90,12 +175,19 @@ public final class StaticAssets {
         return Optional.empty();
     }
 
-    public Path webRoot() {
-        return webRoot;
+    public Source source() {
+        return source;
+    }
+
+    public Optional<Path> webRoot() {
+        return switch (source) {
+            case Source.Directory(Path root) -> Optional.of(root);
+            case Source.Classpath _ -> Optional.empty();
+        };
     }
 
     /**
-     * Resolves an HTTP request path (such as {@code "/"} or {@code "/app.js"}) against {@code webRoot}.
+     * Resolves an HTTP request path (such as {@code "/"} or {@code "/app.js"}) against the configured asset source.
      */
     public AssetResult resolve(String rawRequestPath) {
         Objects.requireNonNull(rawRequestPath, "rawRequestPath must not be null");
@@ -128,6 +220,14 @@ public final class StaticAssets {
             }
         }
 
+        return switch (source) {
+            case Source.Directory(Path webRoot) -> resolveFromDirectory(webRoot, relative);
+            case Source.Classpath(ClassLoader classLoader, String prefix) ->
+                resolveFromClasspath(classLoader, prefix, relative);
+        };
+    }
+
+    private static AssetResult resolveFromDirectory(Path webRoot, String relative) {
         Path resolved;
         try {
             resolved = webRoot.resolve(relative).normalize();
@@ -153,6 +253,56 @@ public final class StaticAssets {
             String contentType = mimeTypeFor(realFile.getFileName().toString());
             return new AssetResult.Found(bytes, contentType, CACHE_CONTROL_NO_CACHE);
         } catch (IOException e) {
+            return AssetResult.NotFound.INSTANCE;
+        }
+    }
+
+    private static AssetResult resolveFromClasspath(ClassLoader classLoader, String prefix, String relative) {
+        if (relative.endsWith("/")) {
+            return AssetResult.NotFound.INSTANCE;
+        }
+
+        List<String> cleanSegments = new ArrayList<>();
+        for (String segment : relative.split("/", -1)) {
+            if (segment.isEmpty() || ".".equals(segment)) {
+                return AssetResult.NotFound.INSTANCE;
+            }
+            cleanSegments.add(segment);
+        }
+        if (cleanSegments.isEmpty()) {
+            return AssetResult.NotFound.INSTANCE;
+        }
+
+        String normalizedRelative = String.join("/", cleanSegments);
+        String resourcePath = prefix.isEmpty() ? normalizedRelative : prefix + "/" + normalizedRelative;
+        URL resourceUrl = classLoader.getResource(resourcePath);
+        if (resourceUrl == null) {
+            return AssetResult.NotFound.INSTANCE;
+        }
+
+        try {
+            if ("file".equals(resourceUrl.getProtocol())) {
+                Path filePath = Path.of(resourceUrl.toURI());
+                if (!Files.isRegularFile(filePath)) {
+                    return AssetResult.NotFound.INSTANCE;
+                }
+            }
+            URLConnection connection = resourceUrl.openConnection();
+            connection.setUseCaches(false);
+            if (connection instanceof JarURLConnection jarConn) {
+                JarEntry entry = jarConn.getJarEntry();
+                if (entry == null || entry.isDirectory()) {
+                    return AssetResult.NotFound.INSTANCE;
+                }
+            }
+            byte[] bytes;
+            try (InputStream in = connection.getInputStream()) {
+                bytes = in.readAllBytes();
+            }
+            String fileName = cleanSegments.get(cleanSegments.size() - 1);
+            String contentType = mimeTypeFor(fileName);
+            return new AssetResult.Found(bytes, contentType, CACHE_CONTROL_NO_CACHE);
+        } catch (IOException | URISyntaxException | IllegalArgumentException e) {
             return AssetResult.NotFound.INSTANCE;
         }
     }
