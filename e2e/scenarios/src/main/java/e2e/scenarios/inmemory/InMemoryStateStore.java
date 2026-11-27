@@ -4,17 +4,21 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.StateStore;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * In-memory implementation of {@link StateStore} storing project routing tables,
@@ -158,6 +162,51 @@ public final class InMemoryStateStore implements StateStore {
         }
         String slice = new String(allBytes, start, size - start, StandardCharsets.UTF_8);
         return Result.ok(new LogChunk(slice, size));
+    }
+
+    @Override
+    public synchronized Result<LogPage, DomainError> readLogPageBackward(
+        Path logPath,
+        OptionalLong beforeOffset,
+        int maxLines,
+        int maxBytes
+    ) {
+        if (maxLines < 0) {
+            throw new IllegalArgumentException("maxLines must be non-negative: " + maxLines);
+        }
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+        }
+        if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+            throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+        }
+        StringBuilder sb = logs.get(normalize(logPath));
+        if (sb == null) {
+            return Result.err(DomainError.of(
+                "LOG_NOT_FOUND",
+                "Log file not found: " + logPath,
+                Map.of("path", logPath.toString())
+            ));
+        }
+        byte[] allBytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+        long size = allBytes.length;
+        long endOffset;
+        if (beforeOffset.isPresent()) {
+            long requested = beforeOffset.getAsLong();
+            if (requested > size) {
+                return Result.ok(new LogPage("", 0L, 0L, false, true));
+            }
+            endOffset = requested;
+        } else {
+            endOffset = size;
+        }
+        if (endOffset == 0L || maxLines == 0) {
+            return Result.ok(new LogPage("", endOffset, endOffset, endOffset > 0L, false));
+        }
+        long windowStart = Math.max(0L, endOffset - maxBytes);
+        byte[] sliceBytes = Arrays.copyOfRange(allBytes, (int) windowStart, (int) endOffset);
+        LogTailer.BackwardSlice slice = LogTailer.sliceBackward(sliceBytes, windowStart, maxLines);
+        return Result.ok(new LogPage(slice.text(), slice.startOffset(), slice.endOffset(), slice.hasOlder(), false));
     }
 
     private static Path normalize(Path path) {

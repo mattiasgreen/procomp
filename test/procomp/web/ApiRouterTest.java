@@ -414,9 +414,80 @@ public final class ApiRouterTest {
         String wire = captured.toString(StandardCharsets.UTF_8);
         Assert.assertContains(wire, "event: meta\n", "emitted meta frame");
         Assert.assertContains(wire, "procomp logs orders -n 2 -f", "meta contains follow cliCommand");
+        Assert.assertContains(wire, "\"startOffset\":6", "meta contains startOffset");
+        Assert.assertContains(wire, "\"hasOlder\":true", "meta contains hasOlder");
         Assert.assertContains(wire, "event: log\n", "emitted log frames");
         Assert.assertContains(wire, "\"line\":\"line2\\n\"", "emitted line2");
         Assert.assertContains(wire, "\"line\":\"line3\\n\"", "emitted line3");
+    }
+
+    public static void testLogsBackwardPaginationTruncationAndValidation() {
+        Fixture fx = Fixture.create(Optional.empty());
+        Path outLog = fx.stateStore.logPath("acme", ProcessKey.service("orders"), false);
+        fx.stateStore.appendLog(outLog, "l1\nl2\nl3\nl4\nl5\n");
+
+        ApiResponse page1Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2"));
+        Assert.assertEquals(200, page1Res.statusCode(), "page 1 200");
+        JsonValue.JsonObject page1 = obj(parseObj(page1Res.body()), "data");
+        Assert.assertEquals("l4\nl5\n", str(page1, "text"), "page 1 text");
+        Assert.assertEquals(9L, num(page1, "startOffset"), "page 1 startOffset");
+        Assert.assertEquals(15L, num(page1, "endOffset"), "page 1 endOffset");
+        Assert.assertTrue(bool(page1, "hasOlder"), "page 1 hasOlder");
+        Assert.assertFalse(bool(page1, "truncated"), "page 1 not truncated");
+
+        ApiResponse page2Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=9"));
+        Assert.assertEquals(200, page2Res.statusCode(), "page 2 200");
+        JsonValue.JsonObject page2 = obj(parseObj(page2Res.body()), "data");
+        Assert.assertEquals("l2\nl3\n", str(page2, "text"), "page 2 text");
+        Assert.assertEquals(3L, num(page2, "startOffset"), "page 2 startOffset");
+        Assert.assertEquals(9L, num(page2, "endOffset"), "page 2 endOffset");
+        Assert.assertTrue(bool(page2, "hasOlder"), "page 2 hasOlder");
+
+        ApiResponse page3Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=3"));
+        Assert.assertEquals(200, page3Res.statusCode(), "page 3 200");
+        JsonValue.JsonObject page3 = obj(parseObj(page3Res.body()), "data");
+        Assert.assertEquals("l1\n", str(page3, "text"), "page 3 text");
+        Assert.assertEquals(0L, num(page3, "startOffset"), "page 3 startOffset 0");
+        Assert.assertEquals(3L, num(page3, "endOffset"), "page 3 endOffset");
+        Assert.assertFalse(bool(page3, "hasOlder"), "page 3 hasOlder false");
+
+        fx.stateStore.replaceLog(outLog, "new\n");
+        ApiResponse truncRes = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=9"));
+        Assert.assertEquals(200, truncRes.statusCode(), "truncated returns 200");
+        JsonValue.JsonObject trunc = obj(parseObj(truncRes.body()), "data");
+        Assert.assertEquals("", str(trunc, "text"), "truncated text empty");
+        Assert.assertEquals(0L, num(trunc, "startOffset"), "truncated startOffset 0");
+        Assert.assertFalse(bool(trunc, "hasOlder"), "truncated hasOlder false");
+        Assert.assertTrue(bool(trunc, "truncated"), "truncated flag true");
+
+        ApiResponse negRes = fx.router.handle(localGet("/api/services/orders/logs", "beforeOffset=-1"));
+        Assert.assertEquals(400, negRes.statusCode(), "negative beforeOffset returns 400");
+        ApiResponse badRes = fx.router.handle(localGet("/api/services/orders/logs", "beforeOffset=abc"));
+        Assert.assertEquals(400, badRes.statusCode(), "non-numeric beforeOffset returns 400");
+
+        // Build Run SSE meta emits startOffset and hasOlder
+        Path buildOut = fx.stateStore.logPath("acme", ProcessKey.build("orders"), false);
+        fx.stateStore.appendLog(buildOut, "b1\nb2\nb3\n");
+        ByteArrayOutputStream buildWire = new ByteArrayOutputStream();
+        AtomicInteger buildWrites = new AtomicInteger(0);
+        SseStream buildSink = new SseStream(new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                if (buildWrites.incrementAndGet() > 2) {
+                    throw new IOException("client disconnected");
+                }
+                buildWire.write(b, off, len);
+            }
+        });
+        fx.router.handleSse(localGet("/api/services/orders/logs/stream", "lines=2&build=true"), buildSink);
+        String buildText = buildWire.toString(StandardCharsets.UTF_8);
+        Assert.assertContains(buildText, "\"startOffset\":3", "build SSE meta contains startOffset");
+        Assert.assertContains(buildText, "\"hasOlder\":true", "build SSE meta contains hasOlder");
     }
 
     public static void testLiveProjectHolderAutoReloadsAndRecoversFromInvalidConfig() throws IOException {
@@ -666,6 +737,16 @@ public final class ApiRouterTest {
 
     private static String str(JsonValue.JsonObject parent, String key) {
         return ((JsonValue.JsonString) parent.get(key).orElseThrow(() -> new AssertionError("missing string key: " + key))).value();
+    }
+
+    private static long num(JsonValue.JsonObject parent, String key) {
+        return ((JsonValue.JsonNumber) parent.get(key).orElseThrow(() -> new AssertionError("missing number key: " + key)))
+            .asLong()
+            .orElseThrow(() -> new AssertionError("non-integer number key: " + key));
+    }
+
+    private static boolean bool(JsonValue.JsonObject parent, String key) {
+        return ((JsonValue.JsonBoolean) parent.get(key).orElseThrow(() -> new AssertionError("missing boolean key: " + key))).value();
     }
 
     private static void deleteRecursively(Path path) {

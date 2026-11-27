@@ -3,6 +3,7 @@ package procomp.platform;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.process.LogRotation;
 import procomp.core.process.ObservedProcess;
 import procomp.core.process.ParentProcess;
 import procomp.shell.ports.ProcessRunner;
@@ -11,6 +12,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -37,6 +39,24 @@ public final class OsProcessRunner implements ProcessRunner {
 
     private static final int MAX_PARENT_DEPTH = 64;
     private static final Duration FORCE_KILL_WAIT = Duration.ofSeconds(5);
+
+    private final long maxLogFileBytes;
+    private final int maxLogBackups;
+
+    public OsProcessRunner() {
+        this(LogRotation.DEFAULT_MAX_FILE_BYTES, LogRotation.DEFAULT_MAX_BACKUPS);
+    }
+
+    public OsProcessRunner(long maxLogFileBytes, int maxLogBackups) {
+        if (maxLogFileBytes <= 0) {
+            throw new IllegalArgumentException("maxLogFileBytes must be positive: " + maxLogFileBytes);
+        }
+        if (maxLogBackups < 0) {
+            throw new IllegalArgumentException("maxLogBackups must be non-negative: " + maxLogBackups);
+        }
+        this.maxLogFileBytes = maxLogFileBytes;
+        this.maxLogBackups = maxLogBackups;
+    }
 
     @Override
     public Result<SpawnedProcess, DomainError> spawnDetached(SpawnRequest request) {
@@ -117,6 +137,8 @@ public final class OsProcessRunner implements ProcessRunner {
         try {
             ensureParentDir(request.stdoutLog());
             ensureParentDir(request.stderrLog());
+            rotateLogIfNeeded(request.stdoutLog());
+            rotateLogIfNeeded(request.stderrLog());
 
             ProcessBuilder pb = new ProcessBuilder(effectiveCommand);
             pb.directory(request.workingDir().toFile());
@@ -124,8 +146,8 @@ public final class OsProcessRunner implements ProcessRunner {
                 pb.environment().putAll(request.envOverrides());
             }
             pb.redirectInput(ProcessBuilder.Redirect.from(nullDeviceFile()));
-            pb.redirectOutput(ProcessBuilder.Redirect.to(request.stdoutLog().toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.to(request.stderrLog().toFile()));
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(request.stdoutLog().toFile()));
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(request.stderrLog().toFile()));
 
             Process process = pb.start();
             ProcessHandle.Info info = process.toHandle().info();
@@ -139,6 +161,50 @@ public final class OsProcessRunner implements ProcessRunner {
                 Map.of("executable", effectiveCommand.get(0), "workingDir", request.workingDir().toString())
             ));
         }
+    }
+
+    private void rotateLogIfNeeded(Path activeLog) {
+        if (maxLogBackups == 0 || !Files.isRegularFile(activeLog)) {
+            return;
+        }
+        try {
+            long size = Files.size(activeLog);
+            if (size < maxLogFileBytes) {
+                return;
+            }
+            Set<Integer> existingBackups = new HashSet<>();
+            for (int gen = 1; gen <= maxLogBackups; gen++) {
+                if (Files.exists(backupPath(activeLog, gen))) {
+                    existingBackups.add(gen);
+                }
+            }
+            LogRotation.RotationPlan plan = LogRotation.plan(size, maxLogFileBytes, maxLogBackups, existingBackups);
+            if (plan instanceof LogRotation.RotationPlan.Rotate(List<LogRotation.Step> steps)) {
+                for (LogRotation.Step step : steps) {
+                    switch (step) {
+                        case LogRotation.Step.Delete(int gen) -> Files.deleteIfExists(backupPath(activeLog, gen));
+                        case LogRotation.Step.Rename(int fromGen, int toGen) -> Files.move(
+                            generationPath(activeLog, fromGen),
+                            generationPath(activeLog, toGen),
+                            StandardCopyOption.REPLACE_EXISTING
+                        );
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // Best-effort rotation: never fail Process startup if an external lock blocks rename.
+        }
+    }
+
+    private static Path generationPath(Path activeLog, int generation) {
+        return generation == 0 ? activeLog : backupPath(activeLog, generation);
+    }
+
+    private static Path backupPath(Path activeLog, int generation) {
+        Path fileName = activeLog.getFileName();
+        String rotatedName = (fileName == null ? activeLog.toString() : fileName.toString()) + "." + generation;
+        Path parent = activeLog.getParent();
+        return parent == null ? Path.of(rotatedName) : parent.resolve(rotatedName);
     }
 
     @Override

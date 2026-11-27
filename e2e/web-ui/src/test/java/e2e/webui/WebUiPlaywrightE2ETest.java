@@ -1,8 +1,11 @@
 package e2e.webui;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.CDPSession;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
@@ -25,7 +28,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -372,6 +377,137 @@ final class WebUiPlaywrightE2ETest {
                     page.locator("#logs-output").innerText().contains(InMemoryConfigSource.DEMO_SECRET_VALUE),
                     "Live logs must never leak secret env values"
                 );
+            }
+        }
+    }
+
+    @Test
+    void logsBackwardPaginationAutoScrollAndDevToolsProfileHealth() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.failuresLogsAndStale(), world, "service-crashed");
+
+            // Seed 550 historical lines so initial 200-line tail leaves 2 backward pages (200 + 150)
+            for (int i = 1; i <= 550; i++) {
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog(
+                    "orders",
+                    String.format("hist-line-%04d", i),
+                    false
+                ));
+            }
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                CDPSession cdp = context.newCDPSession(page);
+                cdp.send("Performance.enable");
+                cdp.send("Profiler.enable");
+                cdp.send("Profiler.start");
+
+                page.navigate(host.baseUrl());
+
+                Locator ordersRow = serviceRow("orders");
+                ordersRow.getByRole(
+                    com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Logs")
+                ).click();
+
+                assertThat(page.locator("#detail-drawer")).isVisible();
+                assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
+                assertThat(page.locator("#logs-line-count")).hasText("200 lines");
+                assertThat(page.locator("#logs-output")).containsText("hist-line-0550");
+                assertThat(page.locator("#logs-output")).containsText("hist-line-0351");
+                assertThat(page.locator("#btn-logs-load-older")).isVisible();
+                assertThat(page.locator("#chk-logs-autoscroll")).isChecked();
+
+                // Disengage Auto-scroll by scrolling upward with mouse wheel over #logs-output
+                page.locator("#logs-output").hover();
+                page.mouse().wheel(0, -120);
+                assertThat(page.locator("#chk-logs-autoscroll")).not().isChecked();
+
+                // Push live lines while scrolled up: viewport must NOT snap back to bottom
+                Number scrollTopBeforeLive = (Number) page.evaluate("() => document.getElementById('logs-output').scrollTop");
+                for (int i = 1; i <= 10; i++) {
+                    world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "live-burst-" + i, false));
+                }
+                assertThat(page.locator("#logs-line-count")).hasText("210 lines");
+                assertThat(page.locator("#chk-logs-autoscroll")).not().isChecked();
+                Number scrollTopAfterLive = (Number) page.evaluate("() => document.getElementById('logs-output').scrollTop");
+                assertEquals(
+                    scrollTopBeforeLive.intValue(),
+                    scrollTopAfterLive.intValue(),
+                    "Incoming live lines must not snap scrollTop back while Auto-scroll is disengaged"
+                );
+
+                // Scroll near top -> automatically loads previous 200 lines and preserves reading anchor
+                page.evaluate("() => { const el = document.getElementById('logs-output'); el.scrollTop = 0; }");
+                assertThat(page.locator("#logs-line-count")).hasText("410 lines");
+                assertThat(page.locator("#logs-output")).containsText("hist-line-0151");
+                Number anchoredScrollTop = (Number) page.evaluate("() => document.getElementById('logs-output').scrollTop");
+                assertTrue(
+                    anchoredScrollTop.intValue() > 100,
+                    "Prepending older lines must preserve reading position (scrollTop=" + anchoredScrollTop + ")"
+                );
+
+                // Click "Load older" button directly -> loads remaining lines up to beginning of log
+                assertThat(page.locator("#btn-logs-load-older")).hasText("Load older");
+                page.locator("#btn-logs-load-older").evaluate("el => el.click()");
+                assertThat(page.locator("#logs-output")).containsText("hist-line-0001");
+                assertThat(page.locator("#logs-history-banner")).containsText("Start of log");
+                assertThat(page.locator("#btn-logs-load-older")).hasCount(0);
+
+                // Scroll back to bottom -> Auto-scroll automatically re-engages
+                page.evaluate("() => { const el = document.getElementById('logs-output'); el.scrollTop = el.scrollHeight; }");
+                assertThat(page.locator("#chk-logs-autoscroll")).isChecked();
+
+                // Verify suspended top-eviction while scrolled up (>5000 lines) and trim-back to 5000 on re-engage
+                page.locator("#logs-output").hover();
+                page.mouse().wheel(0, -120);
+                assertThat(page.locator("#chk-logs-autoscroll")).not().isChecked();
+
+                StringBuilder bulk = new StringBuilder(60_000);
+                for (int i = 1; i <= 4600; i++) {
+                    bulk.append("bulk-line-").append(i).append('\n');
+                }
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", bulk.toString(), false));
+                assertThat(page.locator("#logs-output")).containsText("bulk-line-4600");
+                assertThat(page.locator("#logs-output")).containsText("hist-line-0001");
+                Number pausedCount = (Number) page.evaluate(
+                    "() => document.querySelectorAll('#logs-lines .log-line').length"
+                );
+                assertTrue(
+                    pausedCount.intValue() > 5000,
+                    "Top eviction must be suspended while Auto-scroll is off (got " + pausedCount + ")"
+                );
+
+                // Re-enabling Auto-scroll trims excess lines back down to 5000
+                page.locator("#chk-logs-autoscroll").check();
+                assertThat(page.locator("#logs-line-count")).hasText("5000 lines");
+
+                // Clear resets viewport and hides Load older
+                page.locator("#btn-logs-clear").click();
+                assertThat(page.locator("#logs-line-count")).hasText("0 lines");
+                assertThat(page.locator("#btn-logs-load-older")).hasCount(0);
+
+                // Inspect Chromium DevTools Profiler + Performance metrics (force GC so detached nodes are collected)
+                JsonObject profileResult = cdp.send("Profiler.stop");
+                assertTrue(profileResult.has("profile"), "CDP Profiler.stop should return a CPU profile");
+
+                cdp.send("HeapProfiler.collectGarbage");
+                JsonObject metricsResult = cdp.send("Performance.getMetrics");
+                Map<String, Double> metrics = new HashMap<>();
+                for (JsonElement elem : metricsResult.getAsJsonArray("metrics")) {
+                    JsonObject entry = elem.getAsJsonObject();
+                    metrics.put(entry.get("name").getAsString(), entry.get("value").getAsDouble());
+                }
+                double nodes = metrics.getOrDefault("Nodes", 0.0);
+                double jsHeapBytes = metrics.getOrDefault("JSHeapUsedSize", 0.0);
+                double layoutSeconds = metrics.getOrDefault("LayoutDuration", 0.0);
+                assertTrue(nodes < 10_000, "DOM node count should stay bounded after Clear, got " + nodes);
+                assertTrue(
+                    jsHeapBytes < 128.0 * 1024 * 1024,
+                    "JS heap should stay under 128 MB, got " + (jsHeapBytes / (1024 * 1024)) + " MB"
+                );
+                assertTrue(layoutSeconds < 5.0, "Cumulative layout duration should stay responsive, got " + layoutSeconds + "s");
+
+                cdp.detach();
             }
         }
     }
