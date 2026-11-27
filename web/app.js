@@ -72,6 +72,8 @@ const state = {
   },
   activeStarts: new Map(),
   startSeq: 0,
+  activeActions: new Map(),
+  actionSeq: 0,
   conflictService: null,
   profileDialog: {
     mode: 'create',
@@ -115,6 +117,7 @@ const dom = {
   btnDismissError: document.getElementById('btn-dismiss-error'),
 
   progressStrip: document.getElementById('progress-strip'),
+  progressStripTitle: document.getElementById('progress-strip-title'),
   progressList: document.getElementById('progress-list'),
 
   gatewayType: document.getElementById('gateway-type'),
@@ -876,20 +879,134 @@ function renderServices() {
   }
 }
 
+const GATEWAY_RECONCILE_ACTIVITY = Object.freeze({
+  title: 'Reconciling Gateway',
+  target: 'gateway',
+  message: 'Reconciling Gateway…',
+});
+
+function beginActivity({
+  buildService = null,
+  gitRepo = null,
+  title = 'Running Actions',
+  target = '',
+  message = 'Working…',
+} = {}) {
+  const id = `action-${++state.actionSeq}`;
+  const entry = {
+    buildService,
+    gitRepo,
+    title,
+    target,
+    message,
+  };
+  state.activeActions.set(id, entry);
+  renderProgressStrip();
+
+  let finished = false;
+  return {
+    update(patch = {}) {
+      if (finished) {
+        return;
+      }
+      if (patch.title !== undefined) {
+        entry.title = patch.title;
+      }
+      if (patch.target !== undefined) {
+        entry.target = patch.target;
+      }
+      if (patch.message !== undefined) {
+        entry.message = patch.message;
+      }
+      renderProgressStrip();
+    },
+    finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      state.activeActions.delete(id);
+      renderProgressStrip();
+    },
+  };
+}
+
+function collectActiveProgressItems() {
+  const items = [];
+  const activeBuildServices = new Set();
+  const activeGitRepos = new Set();
+
+  for (const entry of state.activeStarts.values()) {
+    items.push({
+      title: 'Starting Processes',
+      target: entry.target || entry.label,
+      message: entry.message,
+    });
+  }
+
+  for (const entry of state.activeActions.values()) {
+    items.push({
+      title: entry.title,
+      target: entry.target,
+      message: entry.message,
+    });
+    if (entry.buildService) {
+      activeBuildServices.add(entry.buildService);
+    }
+    if (entry.gitRepo) {
+      activeGitRepos.add(entry.gitRepo);
+    }
+  }
+
+  const services = state.estate?.services || [];
+  const seenRunningGitRepos = new Set();
+  for (const row of services) {
+    if (row.buildRun?.displayState === 'RUNNING' && !activeBuildServices.has(row.service)) {
+      items.push({
+        title: 'Building Services',
+        target: row.service,
+        message: 'Build Run in progress…',
+      });
+    }
+    const git = row.git;
+    if (
+      git?.latestRun?.status === 'RUNNING' &&
+      git.repository &&
+      !activeGitRepos.has(git.repository) &&
+      !seenRunningGitRepos.has(git.repository)
+    ) {
+      seenRunningGitRepos.add(git.repository);
+      const op = git.latestRun.operation ? `${git.latestRun.operation} ` : '';
+      items.push({
+        title: 'Running Git Operations',
+        target: git.repository,
+        message: `Git ${op}in progress…`,
+      });
+    }
+  }
+
+  return items;
+}
+
 function renderProgressStrip() {
-  if (state.activeStarts.size === 0) {
+  const items = collectActiveProgressItems();
+  if (items.length === 0) {
     dom.progressStrip.hidden = true;
     dom.progressList.replaceChildren();
     return;
   }
 
+  const uniqueTitles = new Set(items.map((item) => item.title).filter(Boolean));
+  dom.progressStripTitle.textContent =
+    uniqueTitles.size === 1 ? [...uniqueTitles][0] : 'Running Actions';
+
   dom.progressList.replaceChildren();
-  for (const entry of state.activeStarts.values()) {
+  for (const item of items) {
     const li = el('li');
-    li.append(
-      el('span', 'progress-target', `[${entry.target || entry.label}]`),
-      el('span', '', entry.message),
-    );
+    if (item.target) {
+      li.append(el('span', 'progress-target', `[${item.target}]`));
+    }
+    li.append(el('span', '', item.message));
     dom.progressList.append(li);
   }
   dom.progressStrip.hidden = false;
@@ -903,8 +1020,14 @@ async function refreshStatus({ explicit = false } = {}) {
   }
   const reqSeq = ++state.statusSeq;
   state.statusInFlightCount += 1;
+  let activity = null;
   if (explicit) {
     dom.btnRefresh.disabled = true;
+    activity = beginActivity({
+      title: 'Running Discovery',
+      target: state.estate?.project || 'project',
+      message: 'Running Discovery…',
+    });
   }
 
   try {
@@ -943,6 +1066,7 @@ async function refreshStatus({ explicit = false } = {}) {
     renderGateway();
     renderProfiles();
     renderServices();
+    renderProgressStrip();
     renderLogsSidebar();
 
     if (state.view === 'logs' && !state.logs.targetType) {
@@ -985,6 +1109,7 @@ async function refreshStatus({ explicit = false } = {}) {
     updatePollIndicator('error', 'Error');
     showError(err, { fromPoll: !explicit });
   } finally {
+    activity?.finish();
     state.statusInFlightCount = Math.max(0, state.statusInFlightCount - 1);
     if (explicit) {
       dom.btnRefresh.disabled = false;
@@ -1050,11 +1175,16 @@ function canAutoReconcileGateway() {
 
 /* ---------- Action Handlers ---------- */
 
-async function runAction(controls, actionFn, { onSettled = null, autoReconcile = false } = {}) {
+async function runAction(
+  controls,
+  actionFn,
+  { onSettled = null, autoReconcile = false, activity = null } = {},
+) {
   const list = Array.from(controls || []).filter(Boolean);
   for (const control of list) {
     control.disabled = true;
   }
+  const active = activity ? beginActivity(activity) : null;
   let actionSucceeded = false;
   try {
     const payload = await actionFn();
@@ -1064,6 +1194,7 @@ async function runAction(controls, actionFn, { onSettled = null, autoReconcile =
     }
     if (autoReconcile && canAutoReconcileGateway()) {
       dom.btnGatewayReconcile.disabled = true;
+      active?.update(GATEWAY_RECONCILE_ACTIVITY);
       try {
         const reconcilePayload = await reconcileGateway();
         if (reconcilePayload && reconcilePayload.cliCommand) {
@@ -1087,6 +1218,7 @@ async function runAction(controls, actionFn, { onSettled = null, autoReconcile =
       await refreshStatus({ explicit: false });
     }
   } finally {
+    active?.finish();
     for (const control of list) {
       control.disabled = false;
     }
@@ -1099,6 +1231,11 @@ function handleRouteToggle(serviceName, targetRoute, toggleGroup) {
   return runAction(toggleGroup.querySelectorAll('button'), () => updateRoutes([serviceName], targetRoute), {
     onSettled: () => state.pendingRoutes.delete(serviceName),
     autoReconcile: true,
+    activity: {
+      title: 'Updating Route',
+      target: serviceName,
+      message: `Setting Route to ${targetRoute}…`,
+    },
   });
 }
 
@@ -1107,6 +1244,11 @@ function handleUseProfile(profileName, btn) {
   return runAction([btn], () => useProfile(profileName), {
     onSettled: () => state.pendingProfiles.delete(profileName),
     autoReconcile: true,
+    activity: {
+      title: 'Applying Profile',
+      target: profileName,
+      message: 'Applying Profile…',
+    },
   });
 }
 
@@ -1169,17 +1311,19 @@ function handleStopServices(services = [], triggerBtn = null) {
   for (const s of services) {
     state.pendingStops.add(s);
   }
+  const isBulk = services.length === 0;
   return runAction([triggerBtn], () => stopServices(services, { all: false, killConflict: false }), {
     onSettled: () => {
       for (const s of services) {
         state.pendingStops.delete(s);
       }
     },
+    activity: {
+      title: 'Stopping Processes',
+      target: isBulk ? 'Managed' : services.join(', '),
+      message: isBulk ? 'Stopping Managed Processes…' : 'Stopping Process…',
+    },
   });
-}
-
-function handleGatewayAction(actionFn, triggerBtn) {
-  return runAction([triggerBtn], actionFn);
 }
 
 /* ---------- Top-Level Views: Services & Fullscreen Logs ---------- */
@@ -1427,6 +1571,11 @@ function closeDrawer() {
 async function loadInspection(serviceName) {
   dom.inspectStatusNote.textContent = 'Running Inspection…';
   dom.btnInspectRefresh.disabled = true;
+  const activity = beginActivity({
+    title: 'Inspecting Service',
+    target: serviceName,
+    message: 'Running Inspection…',
+  });
   try {
     const payload = await fetchInspect(serviceName);
     if (state.drawer.service !== serviceName) {
@@ -1442,6 +1591,7 @@ async function loadInspection(serviceName) {
     dom.inspectStatusNote.textContent = 'Inspection failed';
     showError(err);
   } finally {
+    activity.finish();
     dom.btnInspectRefresh.disabled = false;
   }
 }
@@ -1809,19 +1959,43 @@ function openPillMenu(kind, row, anchorEl) {
         danger: true,
         action: 'git-cancel',
         title: `Cancel running Git Run for ${git.repository}`,
-        onClick: (btn) => runAction([btn], () => gitCancel([git.repository])),
+        onClick: (btn) =>
+          runAction([btn], () => gitCancel([git.repository]), {
+            activity: {
+              gitRepo: git.repository,
+              title: 'Canceling Git Run',
+              target: git.repository,
+              message: 'Canceling Git Run…',
+            },
+          }),
       });
     } else if (git.state === 'NOT_CLONED') {
       addPillMenuItem('Clone', {
         action: 'git-clone',
         title: `Clone Repository ${git.repository}`,
-        onClick: (btn) => runAction([btn], () => gitClone([git.repository])),
+        onClick: (btn) =>
+          runAction([btn], () => gitClone([git.repository]), {
+            activity: {
+              gitRepo: git.repository,
+              title: 'Cloning Repositories',
+              target: git.repository,
+              message: 'Cloning Repository…',
+            },
+          }),
       });
     } else if (git.state === 'CLONED') {
       addPillMenuItem('Fetch', {
         action: 'git-fetch',
         title: `Fetch Repository ${git.repository}`,
-        onClick: (btn) => runAction([btn], () => gitFetch([git.repository])),
+        onClick: (btn) =>
+          runAction([btn], () => gitFetch([git.repository]), {
+            activity: {
+              gitRepo: git.repository,
+              title: 'Fetching Repositories',
+              target: git.repository,
+              message: 'Fetching Repository…',
+            },
+          }),
       });
       addPillMenuItem('Pull', {
         disabled: Boolean(git.dirty),
@@ -1829,7 +2003,15 @@ function openPillMenu(kind, row, anchorEl) {
         title: git.dirty
           ? `Cannot pull ${git.repository}: working tree is dirty`
           : `Fast-forward pull Repository ${git.repository}`,
-        onClick: (btn) => runAction([btn], () => gitPull([git.repository])),
+        onClick: (btn) =>
+          runAction([btn], () => gitPull([git.repository]), {
+            activity: {
+              gitRepo: git.repository,
+              title: 'Pulling Repositories',
+              target: git.repository,
+              message: 'Pulling Repository…',
+            },
+          }),
       });
       addPillMenuItem('Switch…', {
         action: 'git-switch',
@@ -1842,7 +2024,15 @@ function openPillMenu(kind, row, anchorEl) {
         title: git.dirty
           ? `Stash uncommitted and untracked changes in Repository ${git.repository}`
           : `Working tree for ${git.repository} is clean`,
-        onClick: (btn) => runAction([btn], () => gitStash({ targets: [git.repository], includeUntracked: true })),
+        onClick: (btn) =>
+          runAction([btn], () => gitStash({ targets: [git.repository], includeUntracked: true }), {
+            activity: {
+              gitRepo: git.repository,
+              title: 'Stashing Repositories',
+              target: git.repository,
+              message: 'Stashing changes…',
+            },
+          }),
       });
     }
     if (git.latestRun) {
@@ -1998,6 +2188,12 @@ async function handleGitSwitchFetch() {
   if (!repo) return;
   dom.btnGitSwitchFetch.disabled = true;
   dom.gitSwitchError.hidden = true;
+  const activity = beginActivity({
+    gitRepo: repo,
+    title: 'Fetching Repositories',
+    target: repo,
+    message: 'Fetching Repository…',
+  });
   try {
     const payload = await gitFetch([repo]);
     if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
@@ -2007,6 +2203,7 @@ async function handleGitSwitchFetch() {
     dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
     dom.gitSwitchError.hidden = false;
   } finally {
+    activity.finish();
     dom.btnGitSwitchFetch.disabled = false;
   }
 }
@@ -2016,6 +2213,12 @@ async function handleGitSwitchStash() {
   if (!repo) return;
   dom.btnGitSwitchStash.disabled = true;
   dom.gitSwitchError.hidden = true;
+  const activity = beginActivity({
+    gitRepo: repo,
+    title: 'Stashing Repositories',
+    target: repo,
+    message: 'Stashing changes…',
+  });
   try {
     const payload = await gitStash({ targets: [repo], includeUntracked: true });
     if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
@@ -2025,6 +2228,7 @@ async function handleGitSwitchStash() {
     dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
     dom.gitSwitchError.hidden = false;
   } finally {
+    activity.finish();
     dom.btnGitSwitchStash.disabled = false;
   }
 }
@@ -2037,6 +2241,12 @@ async function handleGitSwitchExecute(useDefault) {
   dom.btnGitSwitchConfirm.disabled = true;
   dom.btnGitSwitchDefault.disabled = true;
   dom.gitSwitchError.hidden = true;
+  const activity = beginActivity({
+    gitRepo: repo,
+    title: 'Switching Branch',
+    target: repo,
+    message: useDefault ? 'Switching to default branch…' : `Switching to ${branch}…`,
+  });
   try {
     const payload = await gitSwitch({ branch, useDefault, targets: [repo] });
     if (payload.cliCommand) setCliCommand(payload.cliCommand, { explicit: true });
@@ -2046,15 +2256,31 @@ async function handleGitSwitchExecute(useDefault) {
     dom.gitSwitchError.textContent = err instanceof Error ? err.message : String(err);
     dom.gitSwitchError.hidden = false;
     await loadGitSwitchBranches(repo);
+  } finally {
+    activity.finish();
   }
 }
 
 function handleBuildService(serviceName, force, button) {
-  return runAction([button], () => buildService(serviceName, { force }));
+  return runAction([button], () => buildService(serviceName, { force }), {
+    activity: {
+      buildService: serviceName,
+      title: 'Building Services',
+      target: serviceName,
+      message: force ? 'Starting forced Build Run…' : 'Starting Build Run…',
+    },
+  });
 }
 
 function handleCancelBuild(serviceName, button) {
-  return runAction([button], () => cancelBuild(serviceName));
+  return runAction([button], () => cancelBuild(serviceName), {
+    activity: {
+      buildService: serviceName,
+      title: 'Canceling Build',
+      target: serviceName,
+      message: 'Canceling Build Run…',
+    },
+  });
 }
 
 function startActiveLogStream() {
@@ -2189,7 +2415,14 @@ function confirmConflictKill() {
   return runAction(
     [dom.btnConflictConfirm],
     () => stopServices([serviceName], { all: false, killConflict: true }),
-    { onSettled: closeConflictDialog },
+    {
+      onSettled: closeConflictDialog,
+      activity: {
+        title: 'Stopping Conflicting Process',
+        target: serviceName,
+        message: 'Terminating conflicting Process…',
+      },
+    },
   );
 }
 
@@ -2401,12 +2634,13 @@ function updateProfileDialogState() {
   dom.btnProfileSave.textContent = willOverwrite ? 'Overwrite Profile' : 'Save Profile';
 }
 
-async function runProfileDialogMutation(actionFn, disabledControls) {
+async function runProfileDialogMutation(actionFn, disabledControls, activity = null) {
   state.profileDialog.submitting = true;
   dom.profileDialogError.hidden = true;
   for (const control of disabledControls) {
     control.disabled = true;
   }
+  const active = activity ? beginActivity(activity) : null;
   try {
     const payload = await actionFn();
     if (payload && payload.cliCommand) {
@@ -2423,6 +2657,7 @@ async function runProfileDialogMutation(actionFn, disabledControls) {
       setCliCommand(err.cliCommand, { explicit: true, errorCode: err.code });
     }
   } finally {
+    active?.finish();
     state.profileDialog.submitting = false;
     for (const control of disabledControls) {
       control.disabled = false;
@@ -2452,6 +2687,11 @@ async function submitProfileDialog() {
   await runProfileDialogMutation(
     () => saveProfile(name, useSnapshot ? { fromCurrentRoutes: true } : { local: selected }),
     [dom.btnProfileSave, dom.btnProfileDelete],
+    {
+      title: 'Saving Profile',
+      target: name,
+      message: 'Saving Profile…',
+    },
   );
 }
 
@@ -2463,6 +2703,11 @@ async function confirmDeleteProfile() {
   await runProfileDialogMutation(
     () => deleteProfile(name),
     [dom.btnProfileDeleteConfirm, dom.btnProfileSave],
+    {
+      title: 'Deleting Profile',
+      target: name,
+      message: 'Deleting Profile…',
+    },
   );
 }
 
@@ -2584,16 +2829,32 @@ function init() {
   });
 
   dom.btnGatewayReconcile.addEventListener('click', () =>
-    handleGatewayAction(() => reconcileGateway(), dom.btnGatewayReconcile),
+    runAction([dom.btnGatewayReconcile], () => reconcileGateway(), {
+      activity: GATEWAY_RECONCILE_ACTIVITY,
+    }),
   );
   dom.btnDriftReconcile.addEventListener('click', () =>
-    handleGatewayAction(() => reconcileGateway(), dom.btnDriftReconcile),
+    runAction([dom.btnDriftReconcile], () => reconcileGateway(), {
+      activity: GATEWAY_RECONCILE_ACTIVITY,
+    }),
   );
   dom.btnGatewayStart.addEventListener('click', () =>
-    handleGatewayAction(() => startGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayStart),
+    runAction([dom.btnGatewayStart], () => startGateway({ detach: false, timeoutSeconds: 30 }), {
+      activity: {
+        title: 'Starting Gateway',
+        target: 'gateway',
+        message: 'Starting Gateway Process…',
+      },
+    }),
   );
   dom.btnGatewayStop.addEventListener('click', () =>
-    handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
+    runAction([dom.btnGatewayStop], () => stopGateway(), {
+      activity: {
+        title: 'Stopping Gateway',
+        target: 'gateway',
+        message: 'Stopping Gateway Process…',
+      },
+    }),
   );
   dom.btnGatewayLogs.addEventListener('click', () => openLogsView('gateway', null));
 
@@ -2657,10 +2918,22 @@ function init() {
   });
 
   dom.btnGitFetchLocal.addEventListener('click', () =>
-    runAction([dom.btnGitFetchLocal], () => gitFetch([])),
+    runAction([dom.btnGitFetchLocal], () => gitFetch([]), {
+      activity: {
+        title: 'Fetching Repositories',
+        target: 'LOCAL',
+        message: 'Fetching LOCAL Repositories…',
+      },
+    }),
   );
   dom.btnGitPullLocal.addEventListener('click', () =>
-    runAction([dom.btnGitPullLocal], () => gitPull([])),
+    runAction([dom.btnGitPullLocal], () => gitPull([]), {
+      activity: {
+        title: 'Pulling Repositories',
+        target: 'LOCAL',
+        message: 'Pulling LOCAL Repositories…',
+      },
+    }),
   );
 
   dom.gitSwitchFilter.addEventListener('input', () => {
