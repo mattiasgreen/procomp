@@ -9,8 +9,10 @@ import procomp.core.common.Unit;
 import procomp.core.git.GitOperation;
 import procomp.core.git.GitRunRecord;
 import procomp.core.git.GitRunStatus;
+import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.StateStore;
 
@@ -45,6 +47,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public final class FsStateStore implements StateStore {
 
     private static final int MAX_LOG_CHUNK_BYTES = 1024 * 1024;
+    private static final int BACKWARD_READ_STEP_BYTES = 64 * 1024;
     private static final long MAX_LOG_TEXT_BYTES = 16L * 1024 * 1024;
     private static final int WINDOWS_MOVE_MAX_ATTEMPTS = 5;
 
@@ -361,6 +364,100 @@ public final class FsStateStore implements StateStore {
             return Result.ok(new LogChunk(new String(bytes, 0, completeLen, StandardCharsets.UTF_8), start + completeLen));
         } catch (IOException e) {
             return Result.err(DomainError.of("STATE_IO_ERROR", "Failed to read log chunk '" + logPath + "': " + e.getMessage(), Map.of("path", logPath.toString())));
+        }
+    }
+
+    @Override
+    public Result<LogPage, DomainError> readLogPageBackward(
+        Path logPath,
+        OptionalLong beforeOffset,
+        int maxLines,
+        int maxBytes
+    ) {
+        if (maxLines < 0) {
+            throw new IllegalArgumentException("maxLines must be non-negative: " + maxLines);
+        }
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+        }
+        if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+            throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+        }
+        if (!Files.isRegularFile(logPath)) {
+            return Result.err(DomainError.of("LOG_NOT_FOUND", "Log file not found: " + logPath, Map.of("path", logPath.toString())));
+        }
+        try (FileChannel channel = FileChannel.open(logPath, StandardOpenOption.READ)) {
+            long size = channel.size();
+            long endOffset;
+            if (beforeOffset.isPresent()) {
+                long requested = beforeOffset.getAsLong();
+                if (requested > size) {
+                    return Result.ok(new LogPage("", 0L, 0L, false, true));
+                }
+                endOffset = requested;
+            } else {
+                endOffset = size;
+            }
+            if (endOffset == 0L || maxLines == 0) {
+                return Result.ok(new LogPage("", endOffset, endOffset, endOffset > 0L, false));
+            }
+
+            long minWindowStart = Math.max(0L, endOffset - maxBytes);
+            long cursor = endOffset;
+            int seenNewlines = 0;
+            boolean trailingNewlineChecked = false;
+            List<byte[]> chunks = new ArrayList<>();
+            int totalRead = 0;
+
+            while (cursor > minWindowStart && seenNewlines < maxLines) {
+                long nextStart = Math.max(minWindowStart, cursor - BACKWARD_READ_STEP_BYTES);
+                int toRead = (int) (cursor - nextStart);
+                channel.position(nextStart);
+                ByteBuffer buffer = ByteBuffer.allocate(toRead);
+                while (buffer.hasRemaining()) {
+                    if (channel.read(buffer) < 0) {
+                        break;
+                    }
+                }
+                buffer.flip();
+                byte[] chunk = new byte[buffer.remaining()];
+                buffer.get(chunk);
+                if (chunk.length == 0) {
+                    break;
+                }
+                chunks.add(chunk);
+                totalRead += chunk.length;
+
+                int scanEnd = chunk.length - 1;
+                if (!trailingNewlineChecked) {
+                    trailingNewlineChecked = true;
+                    if (chunk[scanEnd] == '\n') {
+                        scanEnd--;
+                    }
+                }
+                for (int i = scanEnd; i >= 0; i--) {
+                    if (chunk[i] == '\n') {
+                        seenNewlines++;
+                        if (seenNewlines >= maxLines) {
+                            break;
+                        }
+                    }
+                }
+                cursor = nextStart;
+            }
+
+            byte[] bytes = new byte[totalRead];
+            int destPos = 0;
+            for (int i = chunks.size() - 1; i >= 0; i--) {
+                byte[] chunk = chunks.get(i);
+                System.arraycopy(chunk, 0, bytes, destPos, chunk.length);
+                destPos += chunk.length;
+            }
+
+            LogTailer.BackwardSlice slice = LogTailer.sliceBackward(bytes, cursor, maxLines);
+            return Result.ok(new LogPage(slice.text(), slice.startOffset(), slice.endOffset(), slice.hasOlder(), false));
+        } catch (IOException e) {
+            return Result.err(DomainError.of("STATE_IO_ERROR", "Failed to read log page '" + logPath + "': " + e.getMessage(), Map.of("path", logPath.toString())));
         }
     }
 

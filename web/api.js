@@ -212,21 +212,30 @@ export function reconcileGateway() {
   });
 }
 
-export function fetchServiceLogs(serviceName, { lines = 100, err = false, build = false, git = false } = {}) {
+export function fetchServiceLogs(
+  serviceName,
+  { lines = 200, err = false, build = false, git = false, beforeOffset = null } = {},
+) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
     build: build ? 'true' : 'false',
     git: git ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/logs?${params.toString()}`);
 }
 
-export function fetchGatewayLogs({ lines = 100, err = false } = {}) {
+export function fetchGatewayLogs({ lines = 200, err = false, beforeOffset = null } = {}) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/gateway/logs?${params.toString()}`);
 }
 

@@ -3,8 +3,10 @@ import {
   buildService,
   cancelBuild,
   deleteProfile,
+  fetchGatewayLogs,
   fetchGitBranches,
   fetchInspect,
+  fetchServiceLogs,
   fetchStatus,
   gitCancel,
   gitClone,
@@ -25,7 +27,12 @@ import {
 } from './api.js';
 
 const POLL_INTERVAL_MS = 2500;
+const INITIAL_LOG_LINES = 200;
+const OLDER_LOG_PAGE_LINES = 200;
 const MAX_LOG_LINES = 5000;
+const MAX_PAUSED_LOG_LINES = 50000;
+const AUTOSCROLL_REENGAGE_THRESHOLD_PX = 8;
+const LOAD_OLDER_TOP_THRESHOLD_PX = 48;
 const MAX_CLI_HISTORY = 500;
 const STORAGE_KEY_AUTO_RECONCILE = 'procomp.gatewayAutoReconcile';
 
@@ -69,6 +76,13 @@ const state = {
     matchedCount: 0,
     stream: null,
     streamSeq: 0,
+    startOffset: 0,
+    hasOlder: false,
+    loadingOlder: false,
+    truncated: false,
+    programmaticScroll: false,
+    pointerDown: false,
+    lastTouchY: null,
   },
   activeStarts: new Map(),
   startSeq: 0,
@@ -1741,6 +1755,132 @@ function renderInspection(report) {
 
 /* ---------- Live SSE Logs ---------- */
 
+let logsHistoryBannerEl = null;
+let logsLinesEl = null;
+let pendingLogLines = [];
+let pendingLogFlushRaf = null;
+
+function ensureLogsContainers() {
+  if (!logsHistoryBannerEl || !logsLinesEl || !dom.logsOutput.contains(logsLinesEl)) {
+    logsHistoryBannerEl = el('div', 'logs-history-banner');
+    logsHistoryBannerEl.id = 'logs-history-banner';
+    logsHistoryBannerEl.hidden = true;
+    logsLinesEl = el('div', 'logs-lines');
+    logsLinesEl.id = 'logs-lines';
+    dom.logsOutput.replaceChildren(logsHistoryBannerEl, logsLinesEl);
+  }
+}
+
+function renderLogsHistoryBanner() {
+  ensureLogsContainers();
+  logsHistoryBannerEl.replaceChildren();
+
+  if (state.logs.entries.length === 0 && !state.logs.hasOlder && !state.logs.truncated) {
+    logsHistoryBannerEl.hidden = true;
+    return;
+  }
+
+  if (state.logs.hasOlder) {
+    const btn = el(
+      'button',
+      'btn btn-secondary btn-xs',
+      state.logs.loadingOlder ? 'Loading…' : 'Load older',
+    );
+    btn.type = 'button';
+    btn.id = 'btn-logs-load-older';
+    btn.disabled = state.logs.loadingOlder;
+    btn.addEventListener('click', () => {
+      if (state.logs.autoScroll) {
+        setLogsAutoScroll(false);
+      }
+      loadOlderLogs();
+    });
+    logsHistoryBannerEl.append(btn);
+    logsHistoryBannerEl.hidden = false;
+    return;
+  }
+
+  if (state.logs.truncated) {
+    logsHistoryBannerEl.append(el('span', 'logs-history-marker', 'Log file was reset'));
+    logsHistoryBannerEl.hidden = false;
+    return;
+  }
+
+  if (state.logs.entries.length > 0) {
+    logsHistoryBannerEl.append(el('span', 'logs-history-marker', 'Start of log'));
+    logsHistoryBannerEl.hidden = false;
+    return;
+  }
+
+  logsHistoryBannerEl.hidden = true;
+}
+
+function runProgrammaticScroll(scrollFn) {
+  state.logs.programmaticScroll = true;
+  scrollFn();
+  window.requestAnimationFrame(() => {
+    state.logs.programmaticScroll = false;
+  });
+}
+
+function scrollLogsToBottom() {
+  runProgrammaticScroll(() => {
+    dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
+  });
+}
+
+function trimLogsToCap(cap) {
+  if (state.logs.entries.length <= cap) {
+    return;
+  }
+  const excess = state.logs.entries.length - cap;
+  const query = state.logs.filterQuery;
+  ensureLogsContainers();
+  for (let i = 0; i < excess; i += 1) {
+    const evicted = state.logs.entries[i];
+    if (evicted && matchesOrQuery(evicted.line, query) && state.logs.matchedCount > 0) {
+      if (logsLinesEl.firstElementChild) {
+        logsLinesEl.firstElementChild.remove();
+      }
+      state.logs.matchedCount = Math.max(0, state.logs.matchedCount - 1);
+    }
+  }
+  state.logs.entries.splice(0, excess);
+  if (state.logs.matchedCount === 0 && state.logs.entries.length > 0) {
+    logsLinesEl.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+  }
+  updateLogsLineCount();
+}
+
+function setLogsAutoScroll(enabled, { scrollToBottom = true } = {}) {
+  state.logs.autoScroll = enabled;
+  dom.chkLogsAutoscroll.checked = enabled;
+  if (enabled) {
+    trimLogsToCap(MAX_LOG_LINES);
+    if (scrollToBottom) {
+      scrollLogsToBottom();
+    }
+  }
+}
+
+function splitRawLogLines(text) {
+  if (!text) {
+    return [];
+  }
+  const lines = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      lines.push(text.slice(start, i + 1));
+      start = i + 1;
+    }
+  }
+  if (start < text.length) {
+    lines.push(text.slice(start));
+  }
+  return lines;
+}
+
 function setLogsStreamBadge(text, badgeClass) {
   dom.logsStreamStatus.textContent = text;
   dom.logsStreamStatus.className = `badge ${badgeClass}`;
@@ -1759,21 +1899,32 @@ function updateLogsLineCount() {
   }
 }
 
-function clearLogsOutput() {
+function clearLogsOutput({ resetHistory = false } = {}) {
+  ensureLogsContainers();
+  cancelPendingLogFlush();
   state.logs.entries = [];
   state.logs.matchedCount = 0;
+  if (resetHistory) {
+    state.logs.startOffset = 0;
+    state.logs.hasOlder = false;
+    state.logs.loadingOlder = false;
+    state.logs.truncated = false;
+  }
   updateLogsLineCount();
-  dom.logsOutput.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
+  logsLinesEl.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
+  renderLogsHistoryBanner();
 }
 
 function renderFilteredLogs() {
+  ensureLogsContainers();
   const query = state.logs.filterQuery;
   const total = state.logs.entries.length;
 
   if (total === 0) {
     state.logs.matchedCount = 0;
     updateLogsLineCount();
-    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
+    logsLinesEl.replaceChildren(el('div', 'log-empty', 'Waiting for log output…'));
+    renderLogsHistoryBanner();
     return;
   }
 
@@ -1790,49 +1941,166 @@ function renderFilteredLogs() {
   updateLogsLineCount();
 
   if (matched === 0) {
-    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+    logsLinesEl.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
   } else {
-    dom.logsOutput.replaceChildren(fragment);
+    logsLinesEl.replaceChildren(fragment);
+  }
+  renderLogsHistoryBanner();
+}
+
+function cancelPendingLogFlush() {
+  pendingLogLines = [];
+  if (pendingLogFlushRaf !== null) {
+    window.cancelAnimationFrame(pendingLogFlushRaf);
+    pendingLogFlushRaf = null;
+  }
+}
+
+function flushPendingLogLines() {
+  pendingLogFlushRaf = null;
+  if (pendingLogLines.length === 0) {
+    return;
+  }
+  ensureLogsContainers();
+  const batch = pendingLogLines;
+  pendingLogLines = [];
+
+  const prevTotal = state.logs.entries.length;
+  const query = state.logs.filterQuery;
+  const frag = document.createDocumentFragment();
+  let addedMatched = 0;
+
+  for (const item of batch) {
+    const entry = { line: item.line, stderr: item.isStderr };
+    state.logs.entries.push(entry);
+    if (matchesOrQuery(entry.line, query)) {
+      frag.append(el('div', entry.stderr ? 'log-line log-line-err' : 'log-line', entry.line));
+      addedMatched += 1;
+    }
+  }
+
+  if (addedMatched > 0) {
+    if (state.logs.matchedCount === 0) {
+      logsLinesEl.replaceChildren();
+    }
+    logsLinesEl.append(frag);
+    state.logs.matchedCount += addedMatched;
+  } else if (state.logs.matchedCount === 0 && state.logs.entries.length > 0) {
+    logsLinesEl.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+  }
+
+  const activeCap = state.logs.autoScroll ? MAX_LOG_LINES : MAX_PAUSED_LOG_LINES;
+  trimLogsToCap(activeCap);
+  updateLogsLineCount();
+
+  if (prevTotal === 0) {
+    renderLogsHistoryBanner();
   }
 
   if (state.logs.autoScroll) {
-    dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
+    scrollLogsToBottom();
   }
 }
 
 function appendLogLine(line, isStderr) {
-  const entry = { line, stderr: isStderr };
-  state.logs.entries.push(entry);
+  pendingLogLines.push({ line, isStderr });
+  if (pendingLogFlushRaf === null) {
+    pendingLogFlushRaf = window.requestAnimationFrame(flushPendingLogLines);
+  }
+}
 
-  if (state.logs.entries.length > MAX_LOG_LINES) {
-    const evicted = state.logs.entries.shift();
-    if (evicted && matchesOrQuery(evicted.line, state.logs.filterQuery) && state.logs.matchedCount > 0) {
-      if (dom.logsOutput.firstElementChild) {
-        dom.logsOutput.firstElementChild.remove();
+async function loadOlderLogs() {
+  if (state.view !== 'logs' || !state.logs.targetType) {
+    return;
+  }
+  if (!state.logs.hasOlder || state.logs.loadingOlder || state.logs.startOffset <= 0) {
+    return;
+  }
+  const seq = state.logs.streamSeq;
+  const beforeOffset = state.logs.startOffset;
+  const isStderr = state.logs.err;
+
+  state.logs.loadingOlder = true;
+  renderLogsHistoryBanner();
+
+  try {
+    const payload =
+      state.logs.targetType === 'gateway'
+        ? await fetchGatewayLogs({
+            lines: OLDER_LOG_PAGE_LINES,
+            err: isStderr,
+            beforeOffset,
+          })
+        : await fetchServiceLogs(state.logs.targetService, {
+            lines: OLDER_LOG_PAGE_LINES,
+            err: isStderr,
+            build: state.logs.build,
+            git: state.logs.git,
+            beforeOffset,
+          });
+
+    if (seq !== state.logs.streamSeq) {
+      return;
+    }
+
+    const data = payload?.data || {};
+    state.logs.startOffset = typeof data.startOffset === 'number' ? data.startOffset : 0;
+    state.logs.hasOlder = Boolean(data.hasOlder);
+    state.logs.truncated = Boolean(data.truncated);
+    state.logs.loadingOlder = false;
+
+    const olderLines = splitRawLogLines(data.text || '');
+    const prevScrollHeight = dom.logsOutput.scrollHeight;
+    const prevScrollTop = dom.logsOutput.scrollTop;
+
+    ensureLogsContainers();
+    if (olderLines.length > 0) {
+      const olderEntries = olderLines.map((line) => ({ line, stderr: isStderr }));
+      state.logs.entries = olderEntries.concat(state.logs.entries);
+
+      const query = state.logs.filterQuery;
+      const frag = document.createDocumentFragment();
+      let addedMatched = 0;
+      for (const entry of olderEntries) {
+        if (matchesOrQuery(entry.line, query)) {
+          frag.append(el('div', entry.stderr ? 'log-line log-line-err' : 'log-line', entry.line));
+          addedMatched += 1;
+        }
       }
-      state.logs.matchedCount = Math.max(0, state.logs.matchedCount - 1);
+      if (addedMatched > 0) {
+        if (state.logs.matchedCount === 0) {
+          logsLinesEl.replaceChildren();
+        }
+        logsLinesEl.prepend(frag);
+        state.logs.matchedCount += addedMatched;
+      } else if (state.logs.matchedCount === 0) {
+        logsLinesEl.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
+      }
+      updateLogsLineCount();
     }
+
+    renderLogsHistoryBanner();
+
+    const heightDelta = dom.logsOutput.scrollHeight - prevScrollHeight;
+    if (heightDelta !== 0) {
+      runProgrammaticScroll(() => {
+        dom.logsOutput.scrollTop = Math.max(0, prevScrollTop + heightDelta);
+      });
+    }
+  } catch (err) {
+    if (seq !== state.logs.streamSeq) {
+      return;
+    }
+    state.logs.loadingOlder = false;
+    renderLogsHistoryBanner();
+    showError(err);
   }
-
-  if (matchesOrQuery(line, state.logs.filterQuery)) {
-    if (state.logs.matchedCount === 0) {
-      dom.logsOutput.replaceChildren();
-    }
-    dom.logsOutput.append(el('div', isStderr ? 'log-line log-line-err' : 'log-line', line));
-    state.logs.matchedCount += 1;
-
-    if (state.logs.autoScroll) {
-      dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
-    }
-  } else if (state.logs.matchedCount === 0) {
-    dom.logsOutput.replaceChildren(el('div', 'log-empty', 'No log lines match the current filter.'));
-  }
-
-  updateLogsLineCount();
 }
 
 function closeLogStream() {
   state.logs.streamSeq += 1;
+  state.logs.loadingOlder = false;
+  cancelPendingLogFlush();
   if (state.logs.stream) {
     state.logs.stream.close();
     state.logs.stream = null;
@@ -2289,14 +2557,15 @@ function startActiveLogStream() {
   }
   closeLogStream();
   const seq = ++state.logs.streamSeq;
-  clearLogsOutput();
+  clearLogsOutput({ resetHistory: true });
+  setLogsAutoScroll(true, { scrollToBottom: false });
   renderLogsHeader();
   dom.btnLogsReconnect.hidden = true;
   setLogsStreamBadge('Connecting…', 'badge-starting');
 
   let logHistoryEntry = null;
   const handlers = {
-    lines: 100,
+    lines: INITIAL_LOG_LINES,
     err: state.logs.err,
     build: state.logs.build,
     git: state.logs.git,
@@ -2314,6 +2583,14 @@ function startActiveLogStream() {
       if (payload.cliCommand) {
         logHistoryEntry = setCliCommand(payload.cliCommand, { explicit: true });
       }
+      if (typeof payload.startOffset === 'number') {
+        state.logs.startOffset = payload.startOffset;
+      }
+      if (typeof payload.hasOlder === 'boolean') {
+        state.logs.hasOlder = payload.hasOlder;
+      }
+      state.logs.truncated = false;
+      renderLogsHistoryBanner();
       dom.btnLogsReconnect.hidden = true;
       setLogsStreamBadge('Streaming', 'badge-healthy');
     },
@@ -2961,22 +3238,95 @@ function init() {
   });
 
   dom.chkLogsAutoscroll.addEventListener('change', () => {
-    state.logs.autoScroll = dom.chkLogsAutoscroll.checked;
-    if (state.logs.autoScroll) {
-      dom.logsOutput.scrollTop = dom.logsOutput.scrollHeight;
+    setLogsAutoScroll(dom.chkLogsAutoscroll.checked);
+  });
+
+  dom.logsOutput.addEventListener(
+    'wheel',
+    (event) => {
+      if (event.deltaY < 0 && state.logs.autoScroll) {
+        setLogsAutoScroll(false);
+      }
+    },
+    { passive: true },
+  );
+
+  dom.logsOutput.addEventListener(
+    'touchstart',
+    (event) => {
+      if (event.touches.length === 1) {
+        state.logs.lastTouchY = event.touches[0].clientY;
+      }
+    },
+    { passive: true },
+  );
+
+  dom.logsOutput.addEventListener(
+    'touchmove',
+    (event) => {
+      if (event.touches.length === 1 && state.logs.lastTouchY !== null) {
+        const currentY = event.touches[0].clientY;
+        if (currentY > state.logs.lastTouchY && state.logs.autoScroll) {
+          setLogsAutoScroll(false);
+        }
+        state.logs.lastTouchY = currentY;
+      }
+    },
+    { passive: true },
+  );
+
+  dom.logsOutput.addEventListener(
+    'touchend',
+    () => {
+      state.logs.lastTouchY = null;
+    },
+    { passive: true },
+  );
+
+  dom.logsOutput.addEventListener('keydown', (event) => {
+    if (
+      (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') &&
+      state.logs.autoScroll
+    ) {
+      setLogsAutoScroll(false);
     }
+  });
+
+  dom.logsOutput.addEventListener('pointerdown', () => {
+    state.logs.pointerDown = true;
+  });
+
+  window.addEventListener('pointerup', () => {
+    state.logs.pointerDown = false;
   });
 
   dom.logsOutput.addEventListener('scroll', () => {
     const distanceFromBottom =
       dom.logsOutput.scrollHeight - dom.logsOutput.scrollTop - dom.logsOutput.clientHeight;
-    if (distanceFromBottom > 24 && state.logs.autoScroll) {
-      state.logs.autoScroll = false;
-      dom.chkLogsAutoscroll.checked = false;
+
+    if (distanceFromBottom <= AUTOSCROLL_REENGAGE_THRESHOLD_PX) {
+      if (!state.logs.autoScroll) {
+        setLogsAutoScroll(true, { scrollToBottom: false });
+      }
+    } else if (!state.logs.programmaticScroll || state.logs.pointerDown) {
+      if (state.logs.autoScroll) {
+        setLogsAutoScroll(false);
+      }
+    }
+
+    if (
+      !state.logs.programmaticScroll &&
+      !state.logs.autoScroll &&
+      dom.logsOutput.scrollTop <= LOAD_OLDER_TOP_THRESHOLD_PX &&
+      state.logs.hasOlder &&
+      !state.logs.loadingOlder &&
+      state.logs.entries.length > 0
+    ) {
+      loadOlderLogs();
     }
   });
 
-  dom.btnLogsClear.addEventListener('click', clearLogsOutput);
+  dom.btnLogsClear.addEventListener('click', () => clearLogsOutput({ resetHistory: true }));
   dom.btnLogsReconnect.addEventListener('click', () => {
     startActiveLogStream();
   });

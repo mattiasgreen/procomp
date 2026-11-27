@@ -10,6 +10,7 @@ import procomp.core.process.ManagedProcessRecord;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * Persistence port for project-scoped routing table, managed process metadata, build runs, and raw logs.
@@ -41,4 +42,11 @@ public interface StateStore {
     Result<String, DomainError> readLogText(Path logPath);
 
     Result<LogChunk, DomainError> readLogChunk(Path logPath, long byteOffset);
+
+    Result<LogPage, DomainError> readLogPageBackward(
+        Path logPath,
+        OptionalLong beforeOffset,
+        int maxLines,
+        int maxBytes
+    );
 }

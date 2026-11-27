@@ -24,7 +24,10 @@ import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
 import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
+import procomp.shell.LogsShell.GatewayLogsPageRequest;
 import procomp.shell.LogsShell.GatewayLogsRequest;
+import procomp.shell.LogsShell.LogPageResult;
+import procomp.shell.LogsShell.LogsPageRequest;
 import procomp.shell.LogsShell.LogsRequest;
 import procomp.shell.LogsShell.LogsResult;
 import procomp.shell.ProcessShell;
@@ -44,7 +47,6 @@ import procomp.shell.ports.ProgressObserver.ProgressEvent;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,6 +57,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -1120,11 +1123,16 @@ public final class ApiRouter {
         if (gitFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
+        Result<OptionalLong, DomainError> beforeOffsetRes = parseOptionalQueryNonNegativeLong(query, "beforeOffset");
+        if (beforeOffsetRes instanceof Result.Err<OptionalLong, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
         boolean build = ((Result.Ok<Boolean, DomainError>) buildFlagRes).value();
         boolean git = ((Result.Ok<Boolean, DomainError>) gitFlagRes).value();
+        OptionalLong beforeOffset = ((Result.Ok<OptionalLong, DomainError>) beforeOffsetRes).value();
         if (build && git) {
             return errorResponse(400, DomainError.of("INVALID_REQUEST", "Cannot combine 'build=true' and 'git=true'"), "");
         }
@@ -1142,24 +1150,13 @@ public final class ApiRouter {
         if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
-        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, false, build, git));
-        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+        Result<LogPageResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .readPage(project, new LogsPageRequest(serviceName, stderr, build, git, beforeOffset, lines));
+        if (logsRes instanceof Result.Err<LogPageResult, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
-        LogsResult result = ((Result.Ok<LogsResult, DomainError>) logsRes).value();
-        if (!(result instanceof LogsResult.RawTail(Path path, String text))) {
-            return errorResponse(
-                500,
-                DomainError.of("LOGS_UNEXPECTED_RESULT", "Unexpected LogsShell result for non-follow request"),
-                cliCommand
-            );
-        }
-
-        Map<String, JsonValue> data = new LinkedHashMap<>();
-        data.put("path", Json.str(path.toString()));
-        data.put("text", Json.str(text));
-        return okEnvelope(Json.obj(data), cliCommand);
+        LogPageResult result = ((Result.Ok<LogPageResult, DomainError>) logsRes).value();
+        return okEnvelope(logPageJson(result), cliCommand);
     }
 
     private void handleLogsStream(String rawName, ApiRequest request, SseSink sink) {
@@ -1210,8 +1207,6 @@ public final class ApiRouter {
             ? cli.gitLogs(serviceName, stderr, false, lines, true)
             : cli.logs(serviceName, stderr, false, lines, true, build);
 
-        sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
-
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
@@ -1230,7 +1225,13 @@ public final class ApiRouter {
             return;
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .run(project, new LogsRequest(serviceName, stderr, false, lines, true, build, git), logsPollInterval, sink::isOpen);
+            .run(
+                project,
+                new LogsRequest(serviceName, stderr, false, lines, true, build, git),
+                logsPollInterval,
+                sink::isOpen,
+                initialPage -> sendLogStreamMeta(sink, cliCommand, initialPage)
+            );
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
         }
@@ -1251,9 +1252,14 @@ public final class ApiRouter {
         if (errFlagRes instanceof Result.Err<Boolean, DomainError>(DomainError err)) {
             return errorResponse(400, err, "");
         }
+        Result<OptionalLong, DomainError> beforeOffsetRes = parseOptionalQueryNonNegativeLong(query, "beforeOffset");
+        if (beforeOffsetRes instanceof Result.Err<OptionalLong, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
 
         int lines = ((Result.Ok<Integer, DomainError>) linesRes).value();
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
+        OptionalLong beforeOffset = ((Result.Ok<OptionalLong, DomainError>) beforeOffsetRes).value();
         String cliCommand = cli.gatewayLogs(stderr, false, lines, false);
 
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
@@ -1266,24 +1272,13 @@ public final class ApiRouter {
         if (shellRes instanceof Result.Err<LogsShell, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
-        Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, false));
-        if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
+        Result<LogPageResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
+            .readGatewayPage(project, new GatewayLogsPageRequest(stderr, beforeOffset, lines));
+        if (logsRes instanceof Result.Err<LogPageResult, DomainError>(DomainError err)) {
             return domainErrorResponse(err, cliCommand);
         }
-        LogsResult result = ((Result.Ok<LogsResult, DomainError>) logsRes).value();
-        if (!(result instanceof LogsResult.RawTail(Path path, String text))) {
-            return errorResponse(
-                500,
-                DomainError.of("LOGS_UNEXPECTED_RESULT", "Unexpected LogsShell result for non-follow request"),
-                cliCommand
-            );
-        }
-
-        Map<String, JsonValue> data = new LinkedHashMap<>();
-        data.put("path", Json.str(path.toString()));
-        data.put("text", Json.str(text));
-        return okEnvelope(Json.obj(data), cliCommand);
+        LogPageResult result = ((Result.Ok<LogPageResult, DomainError>) logsRes).value();
+        return okEnvelope(logPageJson(result), cliCommand);
     }
 
     private void handleGatewayLogsStream(ApiRequest request, SseSink sink) {
@@ -1309,8 +1304,6 @@ public final class ApiRouter {
         boolean stderr = ((Result.Ok<Boolean, DomainError>) errFlagRes).value();
         String cliCommand = cli.gatewayLogs(stderr, false, lines, true);
 
-        sink.send("meta", Json.stringify(Json.obj(Map.of("cliCommand", Json.str(cliCommand)))));
-
         Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
         if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
@@ -1329,10 +1322,35 @@ public final class ApiRouter {
             return;
         }
         Result<LogsResult, DomainError> logsRes = ((Result.Ok<LogsShell, DomainError>) shellRes).value()
-            .runGateway(project, new GatewayLogsRequest(stderr, false, lines, true), logsPollInterval, sink::isOpen);
+            .runGateway(
+                project,
+                new GatewayLogsRequest(stderr, false, lines, true),
+                logsPollInterval,
+                sink::isOpen,
+                initialPage -> sendLogStreamMeta(sink, cliCommand, initialPage)
+            );
         if (logsRes instanceof Result.Err<LogsResult, DomainError>(DomainError err)) {
             sendSseError(sink, err, cliCommand);
         }
+    }
+
+    private static JsonValue.JsonObject logPageJson(LogPageResult result) {
+        Map<String, JsonValue> data = new LinkedHashMap<>();
+        data.put("path", Json.str(result.path().toString()));
+        data.put("text", Json.str(result.page().text()));
+        data.put("startOffset", Json.num(result.page().startOffset()));
+        data.put("endOffset", Json.num(result.page().endOffset()));
+        data.put("hasOlder", Json.bool(result.page().hasOlder()));
+        data.put("truncated", Json.bool(result.page().truncated()));
+        return Json.obj(data);
+    }
+
+    private static void sendLogStreamMeta(SseSink sink, String cliCommand, procomp.shell.ports.LogPage initialPage) {
+        Map<String, JsonValue> meta = new LinkedHashMap<>();
+        meta.put("cliCommand", Json.str(cliCommand));
+        meta.put("startOffset", Json.num(initialPage.startOffset()));
+        meta.put("hasOlder", Json.bool(initialPage.hasOlder()));
+        sink.send("meta", Json.stringify(Json.obj(meta)));
     }
 
     private Optional<DomainError> checkHost(ApiRequest request) {
@@ -1962,6 +1980,25 @@ public final class ApiRouter {
                 return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be non-negative"));
             }
             return Result.ok(val);
+        } catch (NumberFormatException e) {
+            return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be an integer"));
+        }
+    }
+
+    private static Result<OptionalLong, DomainError> parseOptionalQueryNonNegativeLong(
+        Map<String, String> query,
+        String key
+    ) {
+        String raw = query.get(key);
+        if (raw == null || raw.isBlank()) {
+            return Result.ok(OptionalLong.empty());
+        }
+        try {
+            long val = Long.parseLong(raw.trim());
+            if (val < 0) {
+                return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be non-negative"));
+            }
+            return Result.ok(OptionalLong.of(val));
         } catch (NumberFormatException e) {
             return Result.err(DomainError.of("INVALID_REQUEST", "Query parameter '" + key + "' must be an integer"));
         }
