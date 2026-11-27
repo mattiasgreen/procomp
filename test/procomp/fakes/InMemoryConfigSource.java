@@ -2,6 +2,7 @@ package procomp.fakes;
 
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
+import procomp.core.common.Unit;
 import procomp.shell.ports.ConfigSource;
 
 import java.nio.file.Path;
@@ -69,5 +70,11 @@ public final class InMemoryConfigSource implements ConfigSource {
             return Result.err(DomainError.of("IO_READ_ERROR", "File not found: " + normalized, Map.of("path", normalized.toString())));
         }
         return Result.ok(content);
+    }
+
+    @Override
+    public Result<Unit, DomainError> writeFile(Path path, String content) {
+        files.put(cwd.resolve(path).normalize(), content);
+        return Result.ok(Unit.VALUE);
     }
 }

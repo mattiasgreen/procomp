@@ -42,6 +42,7 @@ final class LogsCli {
         int lines = LogsRequest.DEFAULT_LINES;
         boolean follow = false;
         boolean build = false;
+        boolean git = false;
 
         for (int i = 0; i < args.size(); i++) {
             String arg = args.get(i);
@@ -49,6 +50,7 @@ final class LogsCli {
                 case "--err" -> stderr = true;
                 case "--path" -> pathOnly = true;
                 case "--build" -> build = true;
+                case "--git" -> git = true;
                 case "-f", "--follow" -> follow = true;
                 case "-n", "--lines" -> {
                     if (i + 1 >= args.size()) {
@@ -86,9 +88,12 @@ final class LogsCli {
         }
 
         if (serviceName == null) {
-            return Result.err("Missing required <service> argument. Usage: procomp logs <service> [-n <lines>] [-f] [--err] [--path] [--build]");
+            return Result.err("Missing required <service> argument. Usage: procomp logs <service> [-n <lines>] [-f] [--err] [--path] [--build|--git]");
         }
-        return Result.ok(new LogsRequest(serviceName, stderr, pathOnly, lines, follow, build));
+        if (build && git) {
+            return Result.err("Cannot combine '--build' and '--git' for 'logs'.");
+        }
+        return Result.ok(new LogsRequest(serviceName, stderr, pathOnly, lines, follow, build, git));
     }
 
     static Result<Integer, String> parseNonNegativeInt(String raw) {

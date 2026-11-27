@@ -95,6 +95,11 @@ public final class ApiRouterTest {
         JsonValue.JsonObject data = obj(statusRoot, "data");
         Assert.assertEquals("acme", str(data, "project"), "project name");
         Assert.assertEquals(3, arr(data, "services").elements().size(), "3 services");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) data.get("totalRssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/status totalRssBytes"
+        );
 
         // GET /api/services/billing/inspect
         ApiResponse inspectRes = fx.router.handle(localGet("/api/services/billing/inspect"));
@@ -115,6 +120,18 @@ public final class ApiRouterTest {
         Assert.assertEquals("UNMANAGED", str(inspectData, "owner"), "owner UNMANAGED");
         Assert.assertEquals("IDE", str(inspectData, "provenance"), "provenance IDE");
         Assert.assertEquals(1, arr(inspectData, "parentChain").elements().size(), "parentChain populated");
+        Assert.assertEquals(
+            128_000_000L,
+            ((JsonValue.JsonNumber) inspectData.get("rssBytes").orElseThrow()).asLong().orElseThrow(),
+            "/api/services/billing/inspect rssBytes"
+        );
+        JsonValue.JsonArray diagCmds = arr(inspectData, "diagnosticCommands");
+        Assert.assertEquals(3, diagCmds.elements().size(), "inspect returns 3 JVM diagnostic commands");
+        Assert.assertEquals(
+            "jcmd 5200 GC.heap_info",
+            str((JsonValue.JsonObject) diagCmds.elements().get(0), "command"),
+            "first diagnostic command uses live PID"
+        );
 
         // Unknown service -> 404
         ApiResponse missingRes = fx.router.handle(localGet("/api/services/ghost/inspect"));
@@ -414,9 +431,80 @@ public final class ApiRouterTest {
         String wire = captured.toString(StandardCharsets.UTF_8);
         Assert.assertContains(wire, "event: meta\n", "emitted meta frame");
         Assert.assertContains(wire, "procomp logs orders -n 2 -f", "meta contains follow cliCommand");
+        Assert.assertContains(wire, "\"startOffset\":6", "meta contains startOffset");
+        Assert.assertContains(wire, "\"hasOlder\":true", "meta contains hasOlder");
         Assert.assertContains(wire, "event: log\n", "emitted log frames");
         Assert.assertContains(wire, "\"line\":\"line2\\n\"", "emitted line2");
         Assert.assertContains(wire, "\"line\":\"line3\\n\"", "emitted line3");
+    }
+
+    public static void testLogsBackwardPaginationTruncationAndValidation() {
+        Fixture fx = Fixture.create(Optional.empty());
+        Path outLog = fx.stateStore.logPath("acme", ProcessKey.service("orders"), false);
+        fx.stateStore.appendLog(outLog, "l1\nl2\nl3\nl4\nl5\n");
+
+        ApiResponse page1Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2"));
+        Assert.assertEquals(200, page1Res.statusCode(), "page 1 200");
+        JsonValue.JsonObject page1 = obj(parseObj(page1Res.body()), "data");
+        Assert.assertEquals("l4\nl5\n", str(page1, "text"), "page 1 text");
+        Assert.assertEquals(9L, num(page1, "startOffset"), "page 1 startOffset");
+        Assert.assertEquals(15L, num(page1, "endOffset"), "page 1 endOffset");
+        Assert.assertTrue(bool(page1, "hasOlder"), "page 1 hasOlder");
+        Assert.assertFalse(bool(page1, "truncated"), "page 1 not truncated");
+
+        ApiResponse page2Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=9"));
+        Assert.assertEquals(200, page2Res.statusCode(), "page 2 200");
+        JsonValue.JsonObject page2 = obj(parseObj(page2Res.body()), "data");
+        Assert.assertEquals("l2\nl3\n", str(page2, "text"), "page 2 text");
+        Assert.assertEquals(3L, num(page2, "startOffset"), "page 2 startOffset");
+        Assert.assertEquals(9L, num(page2, "endOffset"), "page 2 endOffset");
+        Assert.assertTrue(bool(page2, "hasOlder"), "page 2 hasOlder");
+
+        ApiResponse page3Res = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=3"));
+        Assert.assertEquals(200, page3Res.statusCode(), "page 3 200");
+        JsonValue.JsonObject page3 = obj(parseObj(page3Res.body()), "data");
+        Assert.assertEquals("l1\n", str(page3, "text"), "page 3 text");
+        Assert.assertEquals(0L, num(page3, "startOffset"), "page 3 startOffset 0");
+        Assert.assertEquals(3L, num(page3, "endOffset"), "page 3 endOffset");
+        Assert.assertFalse(bool(page3, "hasOlder"), "page 3 hasOlder false");
+
+        fx.stateStore.replaceLog(outLog, "new\n");
+        ApiResponse truncRes = fx.router.handle(localGet("/api/services/orders/logs", "lines=2&beforeOffset=9"));
+        Assert.assertEquals(200, truncRes.statusCode(), "truncated returns 200");
+        JsonValue.JsonObject trunc = obj(parseObj(truncRes.body()), "data");
+        Assert.assertEquals("", str(trunc, "text"), "truncated text empty");
+        Assert.assertEquals(0L, num(trunc, "startOffset"), "truncated startOffset 0");
+        Assert.assertFalse(bool(trunc, "hasOlder"), "truncated hasOlder false");
+        Assert.assertTrue(bool(trunc, "truncated"), "truncated flag true");
+
+        ApiResponse negRes = fx.router.handle(localGet("/api/services/orders/logs", "beforeOffset=-1"));
+        Assert.assertEquals(400, negRes.statusCode(), "negative beforeOffset returns 400");
+        ApiResponse badRes = fx.router.handle(localGet("/api/services/orders/logs", "beforeOffset=abc"));
+        Assert.assertEquals(400, badRes.statusCode(), "non-numeric beforeOffset returns 400");
+
+        // Build Run SSE meta emits startOffset and hasOlder
+        Path buildOut = fx.stateStore.logPath("acme", ProcessKey.build("orders"), false);
+        fx.stateStore.appendLog(buildOut, "b1\nb2\nb3\n");
+        ByteArrayOutputStream buildWire = new ByteArrayOutputStream();
+        AtomicInteger buildWrites = new AtomicInteger(0);
+        SseStream buildSink = new SseStream(new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                if (buildWrites.incrementAndGet() > 2) {
+                    throw new IOException("client disconnected");
+                }
+                buildWire.write(b, off, len);
+            }
+        });
+        fx.router.handleSse(localGet("/api/services/orders/logs/stream", "lines=2&build=true"), buildSink);
+        String buildText = buildWire.toString(StandardCharsets.UTF_8);
+        Assert.assertContains(buildText, "\"startOffset\":3", "build SSE meta contains startOffset");
+        Assert.assertContains(buildText, "\"hasOlder\":true", "build SSE meta contains hasOlder");
     }
 
     public static void testLiveProjectHolderAutoReloadsAndRecoversFromInvalidConfig() throws IOException {
@@ -549,6 +637,114 @@ public final class ApiRouterTest {
         }
     }
 
+    public static void testProfileSaveAndDeleteEndpointsRoundTripAndEnforceCsrf() {
+        Fixture fx = Fixture.create(Optional.empty());
+
+        // 1. CSRF rejected on PUT and DELETE without same-origin headers
+        ApiResponse csrfPut = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/custom",
+            Map.of("Host", "127.0.0.1:9090", "Origin", "https://evil.example"),
+            "{\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(403, csrfPut.statusCode(), "PUT /api/profiles/{name} enforces CSRF");
+
+        ApiResponse csrfDelete = fx.router.handle(ApiRequest.of(
+            "DELETE",
+            "/api/profiles/dev",
+            Map.of("Host", "127.0.0.1:9090", "Origin", "https://evil.example"),
+            ""
+        ));
+        Assert.assertEquals(403, csrfDelete.statusCode(), "DELETE /api/profiles/{name} enforces CSRF");
+
+        // 2. PUT explicit local services -> 200, echoes CLI command, visible immediately in GET /api/status
+        ApiResponse saveExplicit = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/payments-only",
+            LOCAL_HEADERS,
+            "{\"local\":[\"payments\"]}"
+        ));
+        Assert.assertEquals(200, saveExplicit.statusCode(), "PUT explicit returns 200: " + saveExplicit.body());
+        JsonValue.JsonObject saveExplicitRoot = parseObj(saveExplicit.body());
+        Assert.assertEquals("procomp profile save payments-only payments", str(saveExplicitRoot, "cliCommand"), "explicit cliCommand");
+        Assert.assertEquals(3, arr(obj(saveExplicitRoot, "data"), "profiles").elements().size(), "3 profiles returned");
+
+        // 3. PUT with empty local list -> echoes --none
+        ApiResponse saveEmpty = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/zero-local",
+            LOCAL_HEADERS,
+            "{\"local\":[]}"
+        ));
+        Assert.assertEquals(200, saveEmpty.statusCode(), "PUT empty returns 200: " + saveEmpty.body());
+        Assert.assertEquals("procomp profile save zero-local --none", str(parseObj(saveEmpty.body()), "cliCommand"), "--none cliCommand");
+
+        // 4. PUT with fromCurrentRoutes: true snapshots current Routing Table
+        Assert.assertEquals(200, fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/routes",
+            LOCAL_HEADERS,
+            "{\"services\":[\"orders\"],\"route\":\"LOCAL\"}"
+        )).statusCode(), "set orders LOCAL");
+
+        ApiResponse saveSnap = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/snap-slice",
+            LOCAL_HEADERS,
+            "{\"fromCurrentRoutes\":true}"
+        ));
+        Assert.assertEquals(200, saveSnap.statusCode(), "PUT snapshot returns 200: " + saveSnap.body());
+        JsonValue.JsonObject saveSnapRoot = parseObj(saveSnap.body());
+        Assert.assertEquals("procomp profile save snap-slice", str(saveSnapRoot, "cliCommand"), "snapshot cliCommand");
+        JsonValue.JsonArray snapLocal = arr(obj(obj(saveSnapRoot, "data"), "profile"), "local");
+        Assert.assertEquals(1, snapLocal.elements().size(), "snapshot captured 1 LOCAL service");
+        Assert.assertEquals("orders", ((JsonValue.JsonString) snapLocal.elements().get(0)).value(), "snapshot captured orders");
+
+        // 5. GET /api/status immediately reflects saved profiles
+        ApiResponse statusRes = fx.router.handle(localGet("/api/status"));
+        Assert.assertEquals(200, statusRes.statusCode(), "status returns 200");
+        Assert.assertEquals(5, arr(parseObj(statusRes.body()), "profiles").elements().size(), "status reflects 5 profiles");
+
+        // 6. DELETE removes profile and returns 200; deleting again returns 404 UNKNOWN_PROFILE
+        ApiResponse delRes = fx.router.handle(ApiRequest.of("DELETE", "/api/profiles/snap-slice", LOCAL_HEADERS, ""));
+        Assert.assertEquals(200, delRes.statusCode(), "DELETE returns 200: " + delRes.body());
+        JsonValue.JsonObject delRoot = parseObj(delRes.body());
+        Assert.assertEquals("procomp profile delete snap-slice", str(delRoot, "cliCommand"), "delete cliCommand");
+        Assert.assertEquals(4, arr(obj(delRoot, "data"), "profiles").elements().size(), "4 profiles remain");
+
+        ApiResponse delMissing = fx.router.handle(ApiRequest.of("DELETE", "/api/profiles/snap-slice", LOCAL_HEADERS, ""));
+        Assert.assertEquals(404, delMissing.statusCode(), "DELETE missing returns 404");
+        Assert.assertEquals("UNKNOWN_PROFILE", str(obj(parseObj(delMissing.body()), "error"), "code"), "UNKNOWN_PROFILE code");
+
+        // 7. Invalid profile name -> 400 PROFILE_INVALID_NAME; unknown service -> 404 UNKNOWN_SERVICE
+        ApiResponse badName = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/-flag",
+            LOCAL_HEADERS,
+            "{\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(400, badName.statusCode(), "leading dash returns 400");
+        Assert.assertEquals("PROFILE_INVALID_NAME", str(obj(parseObj(badName.body()), "error"), "code"), "PROFILE_INVALID_NAME code");
+
+        ApiResponse badSvc = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/bad-svc",
+            LOCAL_HEADERS,
+            "{\"local\":[\"ghost\"]}"
+        ));
+        Assert.assertEquals(404, badSvc.statusCode(), "unknown service returns 404");
+        Assert.assertEquals("UNKNOWN_SERVICE", str(obj(parseObj(badSvc.body()), "error"), "code"), "UNKNOWN_SERVICE code");
+
+        ApiResponse ambiguous = fx.router.handle(ApiRequest.of(
+            "PUT",
+            "/api/profiles/ambiguous",
+            LOCAL_HEADERS,
+            "{\"fromCurrentRoutes\":true,\"local\":[\"orders\"]}"
+        ));
+        Assert.assertEquals(400, ambiguous.statusCode(), "ambiguous body returns 400");
+        Assert.assertEquals("INVALID_REQUEST", str(obj(parseObj(ambiguous.body()), "error"), "code"), "INVALID_REQUEST code");
+    }
+
     private static final class Fixture {
         final Path root;
         final Path configPath;
@@ -666,6 +862,16 @@ public final class ApiRouterTest {
 
     private static String str(JsonValue.JsonObject parent, String key) {
         return ((JsonValue.JsonString) parent.get(key).orElseThrow(() -> new AssertionError("missing string key: " + key))).value();
+    }
+
+    private static long num(JsonValue.JsonObject parent, String key) {
+        return ((JsonValue.JsonNumber) parent.get(key).orElseThrow(() -> new AssertionError("missing number key: " + key)))
+            .asLong()
+            .orElseThrow(() -> new AssertionError("non-integer number key: " + key));
+    }
+
+    private static boolean bool(JsonValue.JsonObject parent, String key) {
+        return ((JsonValue.JsonBoolean) parent.get(key).orElseThrow(() -> new AssertionError("missing boolean key: " + key))).value();
     }
 
     private static void deleteRecursively(Path path) {
