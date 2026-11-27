@@ -14,6 +14,7 @@ import java.util.Optional;
 record RawProjectConfig(
     String project,
     Optional<String> repositoriesRoot,
+    RepositorySettings repositories,
     List<EnvFileSpec> envFiles,
     RawDefaultsConfig defaults,
     Map<String, RawBuilderConfig> builders,

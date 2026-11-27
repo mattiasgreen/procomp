@@ -1119,6 +1119,125 @@ public final class ProjectResolverTest {
         );
     }
 
+    public static void testResolvesRepositoriesSettingsAndDefaults() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+
+        Project defaultProj = Assert.assertOk(
+            ProjectResolver.resolve(
+                configPath,
+                """
+                {"project":"acme","runtimes":{"rt":{"command":["echo"]}}}
+                """,
+                emptyFiles(),
+                Map.of()
+            ),
+            "default repositories settings"
+        );
+        Assert.assertEquals(24, defaultProj.repositorySettings().fetchWarnAfterHours(), "default fetchWarnAfterHours");
+        Assert.assertEquals(120, defaultProj.repositorySettings().timeoutSeconds(), "default timeoutSeconds");
+
+        Project customProj = Assert.assertOk(
+            ProjectResolver.resolve(
+                configPath,
+                """
+                {"project":"acme","repositories":{"fetchWarnAfterHours":0,"timeoutSeconds":45},"runtimes":{"rt":{"command":["echo"]}}}
+                """,
+                emptyFiles(),
+                Map.of()
+            ),
+            "custom repositories settings"
+        );
+        Assert.assertEquals(0, customProj.repositorySettings().fetchWarnAfterHours(), "custom fetchWarnAfterHours");
+        Assert.assertEquals(45, customProj.repositorySettings().timeoutSeconds(), "custom timeoutSeconds");
+
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","repositories":{"unknownKey":1},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_UNRECOGNIZED_FIELD"
+        );
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","repositories":{"fetchWarnAfterHours":-1},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_INVALID_VALUE"
+        );
+        assertResolveErr(
+            configPath,
+            """
+            {"project":"acme","repositories":{"timeoutSeconds":0},"runtimes":{"rt":{"command":["echo"]}}}
+            """,
+            "CONFIG_INVALID_VALUE"
+        );
+    }
+
+    public static void testDerivesRepositoryNamesAndRejectsAmbiguousCollisions() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+
+        Project okProj = Assert.assertOk(
+            ProjectResolver.resolve(
+                configPath,
+                """
+                {
+                  "project": "acme",
+                  "repositoriesRoot": "..",
+                  "runtimes": { "rt": { "command": ["echo"] } },
+                  "services": {
+                    "sap-facade": { "runtime": "rt", "repositoryUrl": "https://git.example/team/external-facades.git" },
+                    "salesforce-facade": { "runtime": "rt", "repositoryUrl": "https://git.example/team/external-facades.git" },
+                    "payments": { "runtime": "rt", "repositoryUrl": "https://git.example/team/payments.git" }
+                  }
+                }
+                """,
+                emptyFiles(),
+                Map.of()
+            ),
+            "shared monorepo and 1:1 service/repo equality allowed"
+        );
+        Assert.assertEquals(2, okProj.repositories().size(), "deduplicated repository count");
+        Assert.assertEquals("external-facades", okProj.repositories().get(0).name(), "monorepo derived name");
+        Assert.assertEquals("payments", okProj.repositories().get(1).name(), "1:1 repo derived name");
+        Assert.assertEquals(
+            "external-facades",
+            okProj.service("sap-facade").orElseThrow().repository().orElseThrow().name(),
+            "service repository name"
+        );
+
+        // Collision 1: two distinct Repository roots with same basename
+        assertResolveErr(
+            configPath,
+            """
+            {
+              "project": "acme",
+              "runtimes": { "rt": { "command": ["echo"] } },
+              "services": {
+                "svc-a": { "runtime": "rt", "repository": "../team-a/backend" },
+                "svc-b": { "runtime": "rt", "repository": "../team-b/backend" }
+              }
+            }
+            """,
+            "CONFIG_REPOSITORY_NAME_COLLISION"
+        );
+
+        // Collision 2: Repository basename collides with a different Service's name
+        assertResolveErr(
+            configPath,
+            """
+            {
+              "project": "acme",
+              "runtimes": { "rt": { "command": ["echo"] } },
+              "services": {
+                "svc-a": { "runtime": "rt", "repository": "../payments" },
+                "payments": { "runtime": "rt", "repository": "../legacy-monorepo" }
+              }
+            }
+            """,
+            "CONFIG_REPOSITORY_NAME_COLLISION"
+        );
+    }
+
     private static void assertResolveErr(Path configPath, String json, String expectedCode) {
         DomainError err = Assert.assertErr(
             ProjectResolver.resolve(configPath, json, emptyFiles(), Map.of()),

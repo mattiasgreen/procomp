@@ -23,6 +23,7 @@
     { "path": ".env.local", "optional": true }
   ],
   "defaults": {
+    "builder": "gradle",
     "proxyPathTemplate": "/{{service}}",
     "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
     "vars": {
@@ -31,6 +32,11 @@
     "env": {
       "SPRING_PROFILES_ACTIVE": "local",
       "DB_PASSWORD": "${env:ACME_DB_PASSWORD}"
+    }
+  },
+  "builders": {
+    "gradle": {
+      "command": ["./gradlew", ":{{subproject}}:bootJar", "--console=plain"]
     }
   },
   "runtimes": {
@@ -80,6 +86,7 @@
 | :--- | :--- | :--- | :--- |
 | `project` | `string` | Yes | Explicit `Project` identifier used to scope local state and logs (`~/.local/state/procomp/<project>/` or `%LOCALAPPDATA%\procomp\<project>\`). |
 | `repositoriesRoot` | `string` | No | Base folder for local `Repository` checkouts (resolved relative to `configDir` if relative). Exposed as `{{repositoriesRoot}}`. |
+| `repositories` | `object` | No | Optional `Repository` Git settings: `fetchWarnAfterHours` (non-negative integer, default `24`; `0` disables fetch-age warnings) and `timeoutSeconds` (positive integer, default `120`; overridable via `--timeout`). |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Explicit `.env` files loaded into `Process` environments. Missing files fail fast unless `optional: true`. |
 | `defaults` | `object` | No | Default `builder`, `proxyPathTemplate`, `remoteUrlTemplate`, `workingDir`, `vars`, `env`, and `envFiles` applied to all `Service`s (not the `Gateway`). `defaults.envFiles` is prepended before `services.<name>.envFiles` and resolved per `Service` relative to `workingDir`. |
 | `builders` | `map<string, Builder>` | No | Named `Builder` templates referenced by `Service`s or `defaults.builder`. |
@@ -93,7 +100,7 @@
 
 ## 3. Commands (`argv` Arrays) & Template Variables
 
-All launch commands (`runtimes.<name>.command` and `gateway.command`) are **structured `argv` arrays** executed directly without a shell wrapper.
+All commands (`builders.<name>.command`, `runtimes.<name>.command`, and `gateway.command`) are **structured `argv` arrays** executed directly without a shell wrapper.
 
 ### Built-In Template Variables (`{{var}}`)
 
@@ -175,12 +182,12 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `port` | `integer` | No* | Local TCP port the `Service` listens on (*required if `proxyPath` is routed `LOCAL`). |
 | `runtime` | `string` | Yes* | Key in top-level `runtimes` (validated strictly; *optional when overriding a `Service` already imported with a `runtime` from `catalog`). |
 | `builder` | `string` | No | Key in top-level `builders` (defaults to `defaults.builder` if omitted). |
-| `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). |
+| `repository` | `string` | No | Explicit local `Repository` Git root path override. Multiple `Service`s may share the same `Repository` (monorepo / multi-module). Each `Repository`'s canonical name is derived from its root folder basename; validation fails fast if two distinct `Repository` paths share a basename or if a `Repository` name collides with a different `Service`'s name. |
 | `repositoryUrl` | `string` | No | Remote Git URL used to derive `<repositoriesRoot>/<basename>` when `repository` is omitted. |
 | `workingDir` | `string` | No* | Working directory for the `Service`'s `Process`. Defaults to `{{repository}}` when a `Repository` is configured (*required if the `Service` has no `Repository`). |
 | `healthPath` | `string` | No | Overrides `runtime.healthPath`. |
 | `proxyPath` | `string` | No | Gateway path prefix (defaults to `defaults.proxyPathTemplate` or `"/{{service}}"`). |
 | `remoteUrl` | `string` | No | Upstream URL when routed `REMOTE` (defaults to `defaults.remoteUrlTemplate`). |
 | `vars` | `map<string, string \| string[]>` | No | Custom template variables (merged over `defaults.vars`). |
-| `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env`). |
+| `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env` for runtimes and `builder.env` for builds). |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Additional service-specific `.env` files. |

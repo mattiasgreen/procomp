@@ -6,6 +6,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.Route;
 import com.microsoft.playwright.assertions.PlaywrightAssertions;
 import e2e.scenarios.catalog.ScenarioCatalog;
 import e2e.scenarios.engine.ExternalActorEvent;
@@ -26,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -237,8 +239,7 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(pricingRow.locator("button.route-local")).hasAttribute("aria-pressed", "true");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp gateway reconcile");
 
-                pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Start")).click();
+                clickHealthMenuAction(pricingRow, "Start");
                 assertThat(pricingRow).containsText("HEALTHY");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp start pricing");
 
@@ -289,15 +290,15 @@ final class WebUiPlaywrightE2ETest {
 
                 Locator pricingRow = serviceRow("pricing");
                 assertThat(pricingRow).containsText("UNMANAGED");
-                assertThat(pricingRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                pricingRow.locator("button[data-pill='health']").click();
+                assertThat(page.locator("#pill-action-menu").getByRole(com.microsoft.playwright.options.AriaRole.MENUITEM,
                     new Locator.GetByRoleOptions().setName("Stop"))).isDisabled();
 
                 Locator ordersRow = serviceRow("orders");
                 assertThat(ordersRow).containsText("CONFLICT");
 
                 // Trigger Kill Conflict -> native <dialog> must show Inspection details + verbatim CLI command
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Kill Conflict…")).click();
+                clickHealthMenuAction(ordersRow, "Kill Conflict…");
 
                 Locator dialog = page.locator("#conflict-dialog");
                 assertThat(dialog).isVisible();
@@ -312,8 +313,7 @@ final class WebUiPlaywrightE2ETest {
                 assertThat(ordersRow).containsText("CONFLICT");
 
                 // Confirming kills the Conflict Process and echoes the verbatim CLI command
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Kill Conflict…")).click();
+                clickHealthMenuAction(ordersRow, "Kill Conflict…");
                 assertThat(dialog).isVisible();
                 page.locator("#btn-conflict-confirm").click();
 
@@ -336,20 +336,18 @@ final class WebUiPlaywrightE2ETest {
                 Locator ordersRow = serviceRow("orders");
                 assertThat(ordersRow).containsText("CRASHED");
 
-                // Recover CRASHED orders right from the Web UI Start button
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Start")).click();
+                // Recover CRASHED orders right from the Web UI HEALTH pill menu
+                clickHealthMenuAction(ordersRow, "Start");
                 assertThat(ordersRow).containsText("HEALTHY");
                 assertThat(page.locator("#cli-command-echo")).hasText("procomp start orders");
 
-                // Rebuild Artifact externally -> Refresh -> orders displays STALE
+                // Rebuild Artifact externally -> Refresh -> orders displays inline STALE badge beside HEALTH
                 world.triggerActor(new ExternalActorEvent.RebuildArtifact("orders"));
                 page.locator("#btn-refresh").click();
                 assertThat(ordersRow).containsText("STALE");
 
                 // Open Inspect drawer on orders -> verify STALE details and secret hygiene
-                ordersRow.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Inspect")).click();
+                clickHealthMenuAction(ordersRow, "Inspect");
 
                 assertThat(page.locator("#detail-drawer")).isVisible();
                 assertThat(page.locator("#drawer-service-name")).hasText("orders");
@@ -360,8 +358,10 @@ final class WebUiPlaywrightE2ETest {
                     "Inspection drawer must never leak secret env values"
                 );
 
-                // Switch to live SSE Logs tab on orders and push a new log line while connected
-                page.locator("#tab-logs").click();
+                // Open fullscreen Logs view for orders and push a live line while connected
+                clickHealthMenuAction(ordersRow, "Logs");
+                assertThat(page.locator("#view-logs")).isVisible();
+                assertThat(page.locator("#logs-target-name")).hasText("orders");
                 assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
 
                 String liveMarker = "playwright-sse-live-line-42";
@@ -374,6 +374,241 @@ final class WebUiPlaywrightE2ETest {
                 );
             }
         }
+    }
+
+    @Test
+    void progressStripDisplaysSpinnerAndDynamicTitleForNonStartAndConcurrentActions() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                Locator progressStrip = page.locator("#progress-strip");
+                Locator progressTitle = page.locator("#progress-strip-title");
+                Locator progressList = page.locator("#progress-list");
+                Locator ordersRow = serviceRow("orders");
+
+                assertThat(ordersRow).containsText("HEALTHY");
+                assertThat(progressStrip).isHidden();
+
+                // Hold both stop and gateway reconcile requests open to verify single + concurrent progress display
+                List<Route> pendingStops = new ArrayList<>();
+                List<Route> pendingReconciles = new ArrayList<>();
+                page.route("**/api/services/stop", pendingStops::add);
+                page.route("**/api/gateway/reconcile", pendingReconciles::add);
+
+                // 1. Trigger Stop on orders -> blue strip shows "Stopping Processes" with [orders]
+                clickHealthMenuAction(ordersRow, "Stop");
+
+                assertThat(progressStrip).isVisible();
+                assertThat(progressStrip.locator(".spinner")).isVisible();
+                assertThat(progressTitle).hasText("Stopping Processes");
+                assertThat(progressList).containsText("[orders]");
+                assertThat(progressList).containsText("Stopping Process…");
+
+                // 2. While stop is still in flight, trigger Gateway Reconcile -> combined title "Running Actions"
+                page.locator("#btn-gateway-reconcile").click();
+
+                assertThat(progressTitle).hasText("Running Actions");
+                assertThat(progressList.locator("li")).hasCount(2);
+                assertThat(progressList).containsText("[orders]");
+                assertThat(progressList).containsText("[gateway]");
+                assertThat(progressList).containsText("Reconciling Gateway…");
+
+                // 3. Release Stop -> header switches to remaining action's title ("Reconciling Gateway")
+                assertEquals(1, pendingStops.size(), "Expected one intercepted stop request");
+                pendingStops.removeFirst().resume();
+
+                assertThat(ordersRow).containsText("STOPPED");
+                assertThat(progressStrip).isVisible();
+                assertThat(progressTitle).hasText("Reconciling Gateway");
+                assertThat(progressList.locator("li")).hasCount(1);
+                assertThat(progressList).containsText("[gateway]");
+
+                // 4. Release Gateway Reconcile -> strip hides cleanly
+                assertEquals(1, pendingReconciles.size(), "Expected one intercepted reconcile request");
+                pendingReconciles.removeFirst().resume();
+
+                assertThat(progressStrip).isHidden();
+                page.unroute("**/api/services/stop");
+                page.unroute("**/api/gateway/reconcile");
+
+                // 5. Explicit Refresh shows "Running Discovery" while in flight and hides when done
+                List<Route> pendingStatuses = new ArrayList<>();
+                page.route("**/api/status", pendingStatuses::add);
+
+                page.locator("#btn-refresh").click();
+                assertThat(progressStrip).isVisible();
+                assertThat(progressTitle).hasText("Running Discovery");
+                assertThat(progressList).containsText("Running Discovery…");
+
+                while (!pendingStatuses.isEmpty()) {
+                    pendingStatuses.removeFirst().resume();
+                }
+                page.unroute("**/api/status");
+                assertThat(progressStrip).isHidden();
+            }
+        }
+    }
+
+    @Test
+    void profileManagementCreatesEditsHighlightsAndDeletesProfilesInProcompJson() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // 1. Existing orders-local profile matches current Routing Table -> highlighted active
+                Locator ordersLocalPill = page.locator(".profile-pill-group[data-profile='orders-local'] .profile-pill");
+                assertThat(ordersLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 2. Flip pricing LOCAL -> orders-local is no longer active
+                serviceRow("pricing").getByRole(
+                    com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("LOCAL")
+                ).click();
+                assertThat(ordersLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 3. Click "+ Save Profile" -> pre-selected with current LOCAL services, overwrite warning on existing name
+                page.locator("#btn-save-profile").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#profile-name-input").fill("orders-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isVisible();
+                assertThat(page.locator("#btn-profile-save")).hasText("Overwrite Profile");
+
+                // Change to new name -> snapshot CLI preview & save
+                page.locator("#profile-name-input").fill("full-local");
+                assertThat(page.locator("#profile-overwrite-warning")).isHidden();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local");
+
+                // New pill appears and is immediately active (matches current Routing Table)
+                Locator fullLocalPill = page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill");
+                assertThat(fullLocalPill).isVisible();
+                assertThat(fullLocalPill).containsText("4 LOCAL");
+                assertThat(fullLocalPill).hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // 4. Edit full-local via inline edit icon -> Clear all -> saves as --none without mutating current Routing Table
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                assertThat(page.locator("#profile-name-input")).isDisabled();
+                page.locator("#btn-profile-clear-all").click();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile save full-local --none");
+                page.locator("#btn-profile-save").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile save full-local --none");
+                assertThat(fullLocalPill).containsText("0 LOCAL");
+                assertThat(fullLocalPill).not().hasClass(Pattern.compile(".*\\bactive\\b.*"));
+
+                // Reload page -> persisted in procomp.json
+                page.reload();
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill")).containsText("0 LOCAL");
+
+                // 5. Delete full-local with confirmation inside Edit dialog
+                page.locator(".profile-pill-group[data-profile='full-local'] .profile-pill-edit").click();
+                assertThat(page.locator("#profile-dialog")).isVisible();
+                page.locator("#btn-profile-delete").click();
+                assertThat(page.locator("#profile-delete-confirm")).isVisible();
+                assertThat(page.locator("#profile-cli-preview")).hasText("procomp profile delete full-local");
+                page.locator("#btn-profile-delete-confirm").click();
+
+                assertThat(page.locator("#profile-dialog")).isHidden();
+                assertThat(page.locator("#cli-command-echo")).hasText("procomp profile delete full-local");
+                assertThat(page.locator(".profile-pill-group[data-profile='full-local']")).hasCount(0);
+            }
+        }
+    }
+
+    @Test
+    void fullscreenLogsViewAndServiceTableFilteringSupportOrQueriesWrapAndShortcuts() {
+        try (InMemoryWorld world = new InMemoryWorld()) {
+            new ScenarioRunner().jumpToStep(ScenarioCatalog.hybridRouting(), world, "hybrid-running");
+
+            try (ScenarioWebUiHost host = ScenarioWebUiHost.start(world, webDir)) {
+                page.navigate(host.baseUrl());
+
+                // LOCAL-routed services (broker, orders, notifications) are sorted above REMOTE (pricing)
+                assertThat(page.locator("#services-tbody tr").first().locator("td:first-child")).hasText("broker");
+                assertThat(page.locator("#services-tbody tr").last().locator("td:first-child")).hasText("pricing");
+
+                // LOCAL only chip collapses table to the 3 LOCAL services
+                page.locator("#btn-services-local-only").click();
+                assertThat(page.locator("#btn-services-local-only")).hasAttribute("aria-pressed", "true");
+                assertThat(page.locator("#services-tbody tr")).hasCount(3);
+                assertThat(serviceRow("pricing")).hasCount(0);
+
+                // Turn off LOCAL only and test case-insensitive |-OR filter (including trailing |)
+                page.locator("#btn-services-local-only").click();
+                page.locator("#services-filter-input").fill("PRICING|");
+                assertThat(page.locator("#services-tbody tr")).hasCount(1);
+                assertThat(serviceRow("pricing")).isVisible();
+
+                page.locator("#services-filter-input").fill("pricing|orders");
+                assertThat(page.locator("#services-tbody tr")).hasCount(2);
+
+                // Clear filter via Escape inside input, then blur via second Escape
+                page.locator("#services-filter-input").press("Escape");
+                assertThat(page.locator("#services-filter-input")).hasValue("");
+                page.locator("#services-filter-input").press("Escape");
+
+                // Press '2' to switch to fullscreen Logs view (auto-selects first LOCAL service: broker)
+                page.keyboard().press("2");
+                assertThat(page.locator("#view-logs")).isVisible();
+                assertThat(page.locator("#view-services")).isHidden();
+                assertThat(page.locator("#logs-target-name")).hasText("broker");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("broker");
+                assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
+
+                // Switch target to orders via sidebar in 1 click
+                page.locator("#logs-target-list button[data-service='orders']").click();
+                assertThat(page.locator("#logs-target-name")).hasText("orders");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("orders");
+                assertThat(page.locator("#logs-stream-status")).hasText("Streaming");
+
+                // Push mixed log lines and filter with |-OR
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "INFO startup ok", false));
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "WARN slow query", false));
+                world.triggerActor(new ExternalActorEvent.AppendServiceLog("orders", "ERROR payment timeout", false));
+                assertThat(page.locator("#logs-output")).containsText("ERROR payment timeout");
+
+                // Press '/' to focus log line filter
+                page.keyboard().press("/");
+                page.locator("#logs-filter-input").fill("error|warn");
+                assertThat(page.locator("#logs-output")).containsText("WARN slow query");
+                assertThat(page.locator("#logs-output")).containsText("ERROR payment timeout");
+                assertFalse(page.locator("#logs-output").innerText().contains("INFO startup ok"));
+                assertThat(page.locator("#logs-line-count")).containsText("/");
+
+                // Wrap toggle defaults to off (.no-wrap) and toggles cleanly
+                assertThat(page.locator("#logs-output")).hasClass(java.util.regex.Pattern.compile(".*\\bno-wrap\\b.*"));
+                page.locator("#chk-logs-wrap").check();
+                assertThat(page.locator("#logs-output")).not().hasClass(java.util.regex.Pattern.compile(".*\\bno-wrap\\b.*"));
+
+                // Switch target to Gateway via sidebar in 1 click
+                page.locator("#logs-target-list button[data-target-type='gateway']").click();
+                assertThat(page.locator("#logs-target-name")).hasText("gateway");
+                assertThat(page.locator("#nav-tab-logs-target")).containsText("gateway");
+                assertThat(page.locator("#logs-source-group")).isHidden();
+
+                // Press '1' to return to Services view
+                page.keyboard().press("1");
+                assertThat(page.locator("#view-services")).isVisible();
+                assertThat(page.locator("#view-logs")).isHidden();
+            }
+        }
+    }
+
+    private void clickHealthMenuAction(Locator row, String actionName) {
+        row.locator("button[data-pill='health']").click();
+        page.locator("#pill-action-menu")
+            .getByRole(com.microsoft.playwright.options.AriaRole.MENUITEM, new Locator.GetByRoleOptions().setName(actionName))
+            .click();
     }
 
     private Locator serviceRow(String serviceName) {

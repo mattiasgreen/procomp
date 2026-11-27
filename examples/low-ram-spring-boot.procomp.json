@@ -1,0 +1,95 @@
+{
+  "project": "acme-low-ram",
+  "repositoriesRoot": "..",
+  "envFiles": [
+    { "path": ".env.local", "optional": true }
+  ],
+  "defaults": {
+    "proxyPathTemplate": "/{{service}}",
+    "remoteUrlTemplate": "https://shared-dev.mycorp/{{service}}",
+    "vars": {
+      "jvmArgs": [
+        "-Xms32m",
+        "-Xmx256m",
+        "-XX:+UseSerialGC",
+        "-XX:TieredStopAtLevel=1",
+        "-XX:MaxMetaspaceSize=128m",
+        "-XX:ReservedCodeCacheSize=48m",
+        "-Xss256k",
+        "-XX:+UseCompactObjectHeaders",
+        "-XX:NativeMemoryTracking=summary"
+      ]
+    },
+    "env": {
+      "SPRING_PROFILES_ACTIVE": "local"
+    }
+  },
+  "runtimes": {
+    "java": {
+      "command": [
+        "java",
+        "{{jvmArgs}}",
+        "-Dserver.port={{port}}",
+        "-jar",
+        "{{artifact}}"
+      ],
+      "healthPath": "/actuator/health",
+      "artifactGlob": "build/libs/*.jar",
+      "artifactExclude": "*-plain.jar",
+      "env": {
+        "SPRING_MAIN_LAZY_INITIALIZATION": "true",
+        "SERVER_TOMCAT_THREADS_MAX": "10",
+        "SERVER_TOMCAT_THREADS_MIN_SPARE": "2",
+        "SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE": "3",
+        "SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE": "1",
+        "SPRING_JMX_ENABLED": "false"
+      }
+    }
+  },
+  "gateway": {
+    "type": "wiremock",
+    "port": 8080,
+    "healthPath": "/__admin/health",
+    "command": [
+      "java",
+      "-Xms32m",
+      "-Xmx128m",
+      "-XX:+UseSerialGC",
+      "-XX:TieredStopAtLevel=1",
+      "-jar",
+      "{{repositoriesRoot}}/wiremock/wiremock-standalone.jar",
+      "--port",
+      "8080"
+    ],
+    "workingDir": "{{repositoriesRoot}}/wiremock"
+  },
+  "services": {
+    "orders": {
+      "runtime": "java",
+      "port": 9001,
+      "workingDir": "{{repositoriesRoot}}/orders"
+    },
+    "billing": {
+      "runtime": "java",
+      "port": 9002,
+      "workingDir": "{{repositoriesRoot}}/billing",
+      "vars": {
+        "jvmArgs": [
+          "-Xms64m",
+          "-Xmx512m",
+          "-XX:+UseSerialGC",
+          "-XX:TieredStopAtLevel=1",
+          "-XX:NativeMemoryTracking=summary"
+        ]
+      },
+      "env": {
+        "SPRING_MAIN_LAZY_INITIALIZATION": "false"
+      }
+    }
+  },
+  "profiles": {
+    "orders-only": {
+      "local": ["orders"]
+    }
+  }
+}
