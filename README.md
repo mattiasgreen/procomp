@@ -52,12 +52,14 @@ We are deliberately building **`procomp` as a focused CLI first** to nail the do
 Requires **JDK 25 LTS** (zero external runtime dependencies via JEP 458):
 
 ```sh
-./procomp --help          # POSIX (macOS / Linux / Git Bash / WSL)
-procomp.cmd --help        # Windows
-./install.sh              # Install/upgrade procomp onto PATH (Linux, macOS, Windows Git Bash)
-./install.sh --uninstall  # Print verified uninstall commands (never deletes files automatically)
-./procomp-test --fast     # Offline fast test suite (Levels 1-2)
-gradle check              # Full Gradle verification (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, Scenarios, Demos)
+./procomp --help                  # POSIX (macOS / Linux / Git Bash / WSL)
+procomp.cmd --help                # Windows
+./install.sh                      # Install/upgrade procomp onto PATH (Linux, macOS, Windows Git Bash)
+./install.sh --uninstall          # Print verified uninstall commands (never deletes files automatically)
+./gradlew :assemble               # Build standalone executable build/libs/procomp.jar
+java -jar build/libs/procomp.jar --help
+./procomp-test --fast             # Offline fast test suite (Levels 1-2)
+./gradlew check                   # Full Gradle verification (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, JAR)
 ```
 
 ---
