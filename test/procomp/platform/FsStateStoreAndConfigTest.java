@@ -29,7 +29,7 @@ public final class FsStateStoreAndConfigTest {
             home
         );
         Assert.assertEquals(
-            Path.of("C:/custom-state/acme").toAbsolutePath().normalize(),
+            Path.of("C:/custom-state/acme").normalize(),
             overrideStore.projectStateDir("acme"),
             "PROCOMP_STATE_DIR takes precedence over OS state dirs"
         );
@@ -40,7 +40,7 @@ public final class FsStateStoreAndConfigTest {
             home
         );
         Assert.assertEquals(
-            Path.of("C:/Users/dev/AppData/Local/procomp/acme").toAbsolutePath().normalize(),
+            Path.of("C:/Users/dev/AppData/Local/procomp/acme").normalize(),
             winStore.projectStateDir("acme"),
             "Windows defaults to %LOCALAPPDATA%\\procomp\\<project>"
         );

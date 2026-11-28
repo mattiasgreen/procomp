@@ -15,7 +15,7 @@ Architectural and engineering rules for `procomp`. Keep this file short and auth
   - **Inner loop (during edits):** `gradle lint` (incremental compile, Error Prone + NullAway, Spotless) or `gradle fastCheck` (`lint` + parallel `unitTest` covering Levels 1–2, zero OS processes/ports).
   - **Pre-commit / ticket completion:** `gradle check` (adds sequential `integrationTest` Level 3 + `:verifyJep458` empty-classpath smoke check).
   - **Outer loop (before merging integration/process/gateway/UI changes):** `gradle outerLoop` (`check` + `:e2e:scenarios:check` + `:e2e:runner:e2eTest` + `:e2e:web-ui:uiE2eTest`; run `:e2e:web-ui:installBrowsers` once to install Playwright Chromium). Never run `:e2e:runner:e2eTest` or `:e2e:web-ui:uiE2eTest` in the inner edit loop.
-  - Offline fast testing remains available via `java test/TestRunner.java` (`./procomp-test` / `procomp-test.cmd`, `--fast` for Levels 1–2). See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
+  - JEP 458 zero-dependency source launch applies strictly to the **runtime** (`src/`); all testing and verification run through Gradle. See `docs/adr/0001-pure-java-25-jep458.md` and `docs/adr/0003-gradle-dev-toolchain-jep458-runtime.md`.
 
 ## Architecture: Functional Core, Imperative Shell (FCIS + DDD)
 

@@ -58,7 +58,7 @@ procomp.cmd --help                # Windows
 ./install.sh --uninstall          # Print verified uninstall commands (never deletes files automatically)
 ./gradlew :assemble               # Build standalone executable build/libs/procomp.jar
 ./procomp-jar --help              # Run built procomp.jar (POSIX; Windows: procomp-jar.cmd --help)
-./procomp-test --fast             # Offline fast test suite (Levels 1-2)
+./gradlew fastCheck               # Fast inner-loop verification (Spotless, Error Prone + NullAway, Levels 1-2)
 ./gradlew check                   # Full Gradle verification (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, JAR)
 ```
 

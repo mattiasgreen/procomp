@@ -23,7 +23,6 @@ sourceSets {
     }
     test {
         java.setSrcDirs(listOf("test", "gradle-test"))
-        java.exclude("TestRunner.java")
     }
 }
 
@@ -110,6 +109,7 @@ tasks.test {
 }
 
 spotless {
+    lineEndings = com.diffplug.spotless.LineEnding.UNIX
     java {
         target("src/**/*.java", "test/**/*.java", "gradle-test/**/*.java", "e2e/*/src/**/*.java")
         trimTrailingWhitespace()
@@ -142,22 +142,6 @@ val verifyJep458 by tasks.registering(Exec::class) {
     environment("JAVA_HOME", launcher.map { it.metadata.installationPath.asFile.absolutePath }.get())
 }
 
-val verifyTestRunnerCompile by tasks.registering(Exec::class) {
-    group = "verification"
-    description = "Verifies offline test/TestRunner.java compiles cleanly with zero external dependencies."
-    val compiler = javaToolchains.compilerFor(java.toolchain)
-    val outDir = layout.buildDirectory.dir("verify-test-runner")
-    inputs.file(layout.projectDirectory.file("test/TestRunner.java")).withPathSensitivity(PathSensitivity.RELATIVE)
-    outputs.dir(outDir)
-    environment("CLASSPATH", "")
-    executable(compiler.map { it.executablePath.asFile.absolutePath }.get())
-    argumentProviders.add(CommandLineArgumentProvider {
-        val dir = outDir.get().asFile
-        dir.mkdirs()
-        listOf("-encoding", "UTF-8", "-d", dir.absolutePath, "test/TestRunner.java")
-    })
-}
-
 val verifyJar by tasks.registering(Exec::class) {
     group = "verification"
     description = "Verifies the assembled procomp.jar is executable standalone with an empty classpath."
@@ -180,7 +164,7 @@ val verifyJar by tasks.registering(Exec::class) {
 }
 
 tasks.named("check") {
-    dependsOn(lint, unitTest, integrationTest, verifyJep458, verifyTestRunnerCompile, verifyJar)
+    dependsOn(lint, unitTest, integrationTest, verifyJep458, verifyJar)
 }
 
 val outerLoop by tasks.registering {

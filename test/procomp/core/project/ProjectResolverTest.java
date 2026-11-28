@@ -603,9 +603,11 @@ public final class ProjectResolverTest {
             }
             """;
 
+        Path servicesRoot = Path.of("dev", "services").toAbsolutePath().normalize();
+        String servicesRootStr = servicesRoot.toString().replace('\\', '/');
         Map<String, String> hostEnv = Map.of(
             "JAVA_HOME", "C:/jdks/jdk-25",
-            "SERVICES_ROOT", "C:/dev/services",
+            "SERVICES_ROOT", servicesRootStr,
             "BILLING_ENV", "local-dev"
         );
         Project project = Assert.assertOk(
@@ -620,7 +622,7 @@ public final class ProjectResolverTest {
             "service command expands ${env:JAVA_HOME} directly and via array vars"
         );
         Assert.assertEquals(
-            Path.of("C:/dev/services/orders").normalize(),
+            servicesRoot.resolve("orders").normalize(),
             orders.workingDir(),
             "service workingDir expands ${env:SERVICES_ROOT}"
         );
@@ -639,7 +641,7 @@ public final class ProjectResolverTest {
             "gateway command expands ${env:JAVA_HOME}"
         );
         Assert.assertEquals(
-            Optional.of(Path.of("C:/dev/services/wiremock").normalize()),
+            Optional.of(servicesRoot.resolve("wiremock").normalize()),
             gw.workingDir(),
             "gateway workingDir expands ${env:SERVICES_ROOT}"
         );

@@ -32,9 +32,6 @@ jobs:
       - name: Run Gradle check (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, Scenarios, Demo Freshness)
         run: gradle check --stacktrace
 
-      - name: Run zero-Gradle offline test runner (Levels 1, 2, 3)
-        run: java test/TestRunner.java
-
       - name: Verify CLI launcher shim (POSIX)
         if: runner.os != 'Windows'
         run: ./procomp --help
