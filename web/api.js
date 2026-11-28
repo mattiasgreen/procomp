@@ -100,6 +100,20 @@ export function useProfile(profileName) {
   });
 }
 
+export function saveProfile(profileName, { local = null, fromCurrentRoutes = false } = {}) {
+  const payload = fromCurrentRoutes ? { fromCurrentRoutes: true } : { local: Array.isArray(local) ? local : [] };
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteProfile(profileName) {
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function startServices(services = [], { detach = false, timeoutSeconds = 30 } = {}) {
   return requestJson('/api/services/start', {
     method: 'POST',
@@ -124,6 +138,58 @@ export function buildService(serviceName, { force = false } = {}) {
 export function cancelBuild(serviceName) {
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/build/cancel`, {
     method: 'POST',
+  });
+}
+
+export function fetchGitBranches(target) {
+  return requestJson(`/api/git/branches/${encodeURIComponent(target)}`);
+}
+
+export function gitClone(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/clone', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitFetch(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/fetch', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitPull(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/pull', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitSwitch({ branch = null, useDefault = false, targets = [], all = false, force = false } = {}) {
+  const payload = { targets, all, force };
+  if (useDefault) {
+    payload.default = true;
+  } else if (branch) {
+    payload.branch = branch;
+  }
+  return requestJson('/api/git/switch', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function gitStash({ targets = [], all = false, message = '', includeUntracked = true, force = false } = {}) {
+  return requestJson('/api/git/stash', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, message, includeUntracked, force }),
+  });
+}
+
+export function gitCancel(targets = [], { all = false } = {}) {
+  return requestJson('/api/git/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all }),
   });
 }
 
@@ -153,20 +219,30 @@ export function installGitHooks(repositories = []) {
   });
 }
 
-export function fetchServiceLogs(serviceName, { lines = 100, err = false, build = false } = {}) {
+export function fetchServiceLogs(
+  serviceName,
+  { lines = 200, err = false, build = false, git = false, beforeOffset = null } = {},
+) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
     build: build ? 'true' : 'false',
+    git: git ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/logs?${params.toString()}`);
 }
 
-export function fetchGatewayLogs({ lines = 100, err = false } = {}) {
+export function fetchGatewayLogs({ lines = 200, err = false, beforeOffset = null } = {}) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/gateway/logs?${params.toString()}`);
 }
 
@@ -394,6 +470,7 @@ export function streamServiceLogs(serviceName, handlers = {}) {
     lines: String(handlers.lines ?? 100),
     err: handlers.err ? 'true' : 'false',
     build: handlers.build ? 'true' : 'false',
+    git: handlers.git ? 'true' : 'false',
   });
   return openLogEventSource(
     `/api/services/${encodeURIComponent(serviceName)}/logs/stream?${params.toString()}`,

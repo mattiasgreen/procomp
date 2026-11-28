@@ -169,6 +169,51 @@ public final class LogsShellTest {
         );
     }
 
+    public static void testFollowTailsTrueEndOfFileOverOneMegabyteAndReportsInitialPageMeta() {
+        Project project = sampleProject();
+        var stateStore = new InMemoryStateStore();
+        Path outLog = stateStore.logPath("acme", ProcessKey.service("orders"), false);
+        String filler = "x".repeat(1024) + "\n";
+        StringBuilder big = new StringBuilder(1_200_000);
+        for (int i = 0; i < 1100; i++) {
+            big.append(filler);
+        }
+        big.append("tail-penultimate\n");
+        big.append("tail-final\n");
+        stateStore.replaceLog(outLog, big.toString());
+
+        var observer = new RecordingObserver();
+        var shell = new LogsShell(stateStore, new FakeClock(), observer);
+        var seenMeta = new java.util.concurrent.atomic.AtomicReference<procomp.shell.ports.LogPage>();
+
+        LogsResult result = Assert.assertOk(
+            shell.run(
+                project,
+                new LogsRequest("orders", false, false, 2, true),
+                Duration.ofMillis(10),
+                () -> false,
+                seenMeta::set
+            ),
+            "follow on >1MB file succeeds"
+        );
+        Assert.assertNotNull(seenMeta.get(), "initial page metadata callback invoked");
+        Assert.assertTrue(seenMeta.get().hasOlder(), ">1MB file has older bytes");
+        Assert.assertTrue(seenMeta.get().startOffset() > 1_000_000L, "startOffset is near true end of file");
+        Assert.assertEquals(
+            new LogsResult.Followed(outLog, big.toString().length()),
+            result,
+            "followed offset starts at true end of >1MB file"
+        );
+        Assert.assertEquals(
+            List.of(
+                new ProgressEvent.LogLine("orders", false, "tail-penultimate\n"),
+                new ProgressEvent.LogLine("orders", false, "tail-final\n")
+            ),
+            observer.events(),
+            "emits true last 2 lines from >1MB file"
+        );
+    }
+
     private static Project sampleProject() {
         Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
         var source = new InMemoryConfigSource(root)

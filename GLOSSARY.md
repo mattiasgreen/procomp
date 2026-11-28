@@ -19,12 +19,16 @@ The local reverse-proxy router that fronts the hybrid service network and enforc
 _Avoid_: Proxy service, WireMock service
 
 **Process**:
-An OS process instance (PID, command line, parent chain, port binding, log stream, and health) that backs a locally running Service, a local Gateway, or a Build Run.
+An OS process instance (PID, command line, parent chain, port binding, log stream, and health) that backs a locally running Service, a local Gateway, a Build Run, or a Git Run.
 _Avoid_: Instance, worker, daemon
 
 **Build Run**:
 A tracked build execution for a Service, recording its Process, status (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`), timestamps, exit code, and build log.
 _Avoid_: Build state, compile job
+
+**Git Run**:
+A tracked mutating Git operation (`CLONE`, `FETCH`, `PULL`, `SWITCH`, `STASH`) for a Repository, recording its Process, status (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`), timestamps, exit code, and Git log.
+_Avoid_: Sync job, git task, repository run
 
 **Artifact**:
 A runnable file on disk produced for a Service by a Build Run and launched by a Process.
@@ -93,7 +97,7 @@ _Avoid_: Outdated, dirty
 ### Observation Actions
 
 **Discovery**:
-The read-only action of determining what is currently running for a Service or Gateway, who owns it (`Managed`, `Unmanaged`, `Conflict`, or `None`), and its current Health State.
+The read-only, zero-network action of determining what is currently running for a Service or Gateway (ownership `Managed`, `Unmanaged`, `Conflict`, or `None`, and Health State) as well as the local Git state of its Repository.
 _Avoid_: Probing, polling
 
 **Inspection**:

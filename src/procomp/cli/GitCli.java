@@ -2,257 +2,598 @@ package procomp.cli;
 
 import procomp.core.common.Json;
 import procomp.core.common.Result;
-import procomp.core.git.GitHooksInstallResult;
-import procomp.core.git.GitHooksReport;
-import procomp.core.git.HookCheckResult;
-import procomp.core.git.RepositoryHookStatus;
-import procomp.core.git.RepositoryInstallOutcome;
+import procomp.core.git.BranchInfo;
+import procomp.core.git.GitEngine;
+import procomp.core.git.GitRunRecord;
+import procomp.core.git.RepositoryObservation;
+import procomp.core.git.StashEntry;
 import procomp.core.project.Project;
 import procomp.shell.DomainJson;
+import procomp.shell.GitShell;
+import procomp.shell.LogsShell.GitLogsRequest;
+import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.LogsShell.LogsResult;
 
 import java.io.PrintWriter;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.stream.Collectors;
+import java.util.Optional;
 
 /**
- * CLI argument parser and text/JSON renderer for {@code procomp git hooks <status|install|upgrade>}.
+ * CLI argument parser and renderer for {@code procomp git <status|branches|clone|fetch|pull|switch|stash|cancel|logs>}.
  */
 public final class GitCli {
 
-    private static final String USAGE =
-        "Usage: procomp git hooks [status [--json] | install [repository...] [--json] | upgrade [repository...] [--json]]";
+    private static final DateTimeFormatter COMMIT_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        .withZone(ZoneOffset.UTC);
 
-    public sealed interface Action permits Action.HooksStatus, Action.HooksInstall {
-        record HooksStatus(boolean json) implements Action {}
+    public sealed interface Action permits
+        Action.Status,
+        Action.Branches,
+        Action.Clone,
+        Action.Fetch,
+        Action.Pull,
+        Action.Switch,
+        Action.StashPush,
+        Action.StashList,
+        Action.Cancel,
+        Action.Logs,
+        Action.Hooks {
 
-        record HooksInstall(List<String> repositories, boolean json) implements Action {
-            public HooksInstall {
-                repositories = List.copyOf(repositories);
-            }
-        }
+        record Status(List<String> targets, boolean localOnly, boolean fetch, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record Branches(String target, boolean json) implements Action {}
+        record Clone(List<String> targets, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record Fetch(List<String> targets, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record Pull(List<String> targets, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record Switch(Optional<String> branch, boolean useDefault, List<String> targets, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record StashPush(List<String> targets, boolean all, Optional<String> message, boolean includeUntracked, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
+        record StashList(List<String> targets, boolean all, boolean json) implements Action {}
+        record Cancel(List<String> targets, boolean all, boolean json) implements Action {}
+        record Logs(GitLogsRequest request) implements Action {}
+        record Hooks(GitHooksCli.Action action) implements Action {}
     }
 
     private GitCli() {}
 
     public static Result<Action, String> parse(List<String> args) {
         if (args.isEmpty()) {
-            return Result.err("Missing 'git' subcommand. " + USAGE);
+            return Result.err("Missing 'git' subcommand. Usage: procomp git <status|branches|clone|fetch|pull|switch|stash|cancel|logs|hooks> [options]");
         }
         String sub = args.get(0);
-        if (!"hooks".equals(sub)) {
-            return Result.err("Unknown 'git' subcommand '" + sub + "'. " + USAGE);
-        }
         List<String> rest = args.subList(1, args.size());
-        if (rest.isEmpty()) {
-            return Result.ok(new Action.HooksStatus(false));
-        }
-
-        String first = rest.get(0);
-        if ("--json".equals(first) && rest.size() == 1) {
-            return Result.ok(new Action.HooksStatus(true));
-        }
-        if ("status".equals(first)) {
-            return parseStatusArgs(rest.subList(1, rest.size()));
-        }
-        if ("install".equals(first) || "upgrade".equals(first)) {
-            return parseInstallArgs(first, rest.subList(1, rest.size()));
-        }
-        return Result.err("Unknown 'git hooks' action '" + first + "'. " + USAGE);
-    }
-
-    private static Result<Action, String> parseStatusArgs(List<String> args) {
-        boolean json = false;
-        for (String arg : args) {
-            if ("--json".equals(arg)) {
-                json = true;
-            } else if (arg.startsWith("-")) {
-                return Result.err("Unknown option '" + arg + "' for 'git hooks status'. " + USAGE);
-            } else {
-                return Result.err("Unexpected argument '" + arg + "' for 'git hooks status'. " + USAGE);
-            }
-        }
-        return Result.ok(new Action.HooksStatus(json));
-    }
-
-    private static Result<Action, String> parseInstallArgs(String verb, List<String> args) {
-        boolean json = false;
-        List<String> repos = new ArrayList<>();
-        for (String arg : args) {
-            if ("--json".equals(arg)) {
-                json = true;
-            } else if (arg.startsWith("-")) {
-                return Result.err("Unknown option '" + arg + "' for 'git hooks " + verb + "'. " + USAGE);
-            } else if (arg.isBlank()) {
-                return Result.err("Repository name must not be blank. " + USAGE);
-            } else {
-                repos.add(arg);
-            }
-        }
-        return Result.ok(new Action.HooksInstall(repos, json));
+        return switch (sub) {
+            case "status" -> parseStatus(rest);
+            case "branches" -> parseBranches(rest);
+            case "clone" -> parseBatchOp("clone", rest).map(o -> new Action.Clone(o.targets, o.all, o.force, o.timeout, o.json));
+            case "fetch" -> parseBatchOp("fetch", rest).map(o -> new Action.Fetch(o.targets, o.all, o.force, o.timeout, o.json));
+            case "pull" -> parseBatchOp("pull", rest).map(o -> new Action.Pull(o.targets, o.all, o.force, o.timeout, o.json));
+            case "switch" -> parseSwitch(rest);
+            case "stash" -> parseStash(rest);
+            case "cancel" -> parseCancel(rest);
+            case "logs" -> parseLogs(rest);
+            case "hooks" -> GitHooksCli.parse(rest).map(Action.Hooks::new);
+            default -> Result.err("Unknown 'git' subcommand '" + sub + "'. Supported: status, branches, clone, fetch, pull, switch, stash, cancel, logs, hooks.");
+        };
     }
 
     static int execute(Action action, Project project, CliRuntime runtime) {
         return switch (action) {
-            case Action.HooksStatus(boolean json) -> runtime.handleResult(
-                runtime.gitHooksShell().flatMap(shell -> shell.status(project)),
+            case Action.Status s -> {
+                Result<GitShell.GitStatusReport, procomp.core.common.DomainError> res =
+                    runtime.gitShell().flatMap(shell -> shell.status(project, s.targets(), s.localOnly(), s.fetch(), s.all(), s.force(), s.timeout()));
+                if (res instanceof Result.Err<GitShell.GitStatusReport, procomp.core.common.DomainError>(var err)) {
+                    runtime.err().println("Error: " + err.format());
+                    yield 1;
+                }
+                GitShell.GitStatusReport report = ((Result.Ok<GitShell.GitStatusReport, procomp.core.common.DomainError>) res).value();
+                if (s.json()) {
+                    runtime.out().println(Json.stringify(DomainJson.gitStatusReport(report)));
+                } else {
+                    if (report.fetchReport().isPresent()) {
+                        renderBatchText(report.fetchReport().get(), runtime.out());
+                    }
+                    renderStatusText(report, runtime.out());
+                }
+                yield report.fetchReport().map(GitShell.GitBatchReport::hasFailures).orElse(false) ? 1 : 0;
+            }
+            case Action.Branches b -> runtime.handleResult(
+                runtime.gitShell().flatMap(shell -> shell.branches(project, b.target())),
                 report -> {
-                    if (json) {
-                        runtime.out().println(Json.stringify(DomainJson.gitHooksReport(report)));
+                    if (b.json()) {
+                        runtime.out().println(Json.stringify(DomainJson.gitBranchesReport(report)));
                     } else {
-                        renderStatusText(report, runtime.out());
+                        renderBranchesText(report, runtime.out());
                     }
                 }
             );
-            case Action.HooksInstall(List<String> repos, boolean json) -> runtime.handleResult(
-                runtime.gitHooksShell().flatMap(shell -> shell.install(project, repos)),
+            case Action.Clone c -> executeBatch(
+                runtime.gitShell().flatMap(shell -> shell.cloneRepositories(project, c.targets(), c.all(), c.force(), c.timeout())),
+                c.json(), runtime
+            );
+            case Action.Fetch f -> executeBatch(
+                runtime.gitShell().flatMap(shell -> shell.fetch(project, f.targets(), f.all(), f.force(), f.timeout())),
+                f.json(), runtime
+            );
+            case Action.Pull p -> executeBatch(
+                runtime.gitShell().flatMap(shell -> shell.pull(project, p.targets(), p.all(), p.force(), p.timeout())),
+                p.json(), runtime
+            );
+            case Action.Switch sw -> executeBatch(
+                runtime.gitShell().flatMap(shell -> shell.switchBranch(project, sw.branch(), sw.useDefault(), sw.targets(), sw.all(), sw.force(), sw.timeout())),
+                sw.json(), runtime
+            );
+            case Action.StashPush sp -> executeBatch(
+                runtime.gitShell().flatMap(shell -> shell.stashPush(project, sp.targets(), sp.all(), sp.message(), sp.includeUntracked(), sp.force(), sp.timeout())),
+                sp.json(), runtime
+            );
+            case Action.StashList sl -> runtime.handleResult(
+                runtime.gitShell().flatMap(shell -> shell.stashList(project, sl.targets(), sl.all())),
+                items -> {
+                    if (sl.json()) {
+                        runtime.out().println(Json.stringify(DomainJson.gitStashList(items)));
+                    } else {
+                        renderStashListText(items, runtime.out());
+                    }
+                }
+            );
+            case Action.Cancel c -> {
+                Result<GitShell.GitCancelReport, procomp.core.common.DomainError> res =
+                    runtime.gitShell().flatMap(shell -> shell.cancel(project, c.targets(), c.all()));
+                if (res instanceof Result.Err<GitShell.GitCancelReport, procomp.core.common.DomainError>(var err)) {
+                    runtime.err().println("Error: " + err.format());
+                    yield 1;
+                }
+                GitShell.GitCancelReport report = ((Result.Ok<GitShell.GitCancelReport, procomp.core.common.DomainError>) res).value();
+                if (c.json()) {
+                    runtime.out().println(Json.stringify(DomainJson.gitCancelReport(report)));
+                } else {
+                    renderCancelText(report, runtime.out());
+                }
+                yield report.hasFailures() ? 1 : 0;
+            }
+            case Action.Logs l -> runtime.handleResult(
+                runtime.logsShell().flatMap(shell -> shell.runGit(project, l.request())),
                 result -> {
-                    if (json) {
-                        runtime.out().println(Json.stringify(DomainJson.gitHooksInstallResult(result)));
-                    } else {
-                        renderInstallText(result, runtime.out());
+                    switch (result) {
+                        case LogsResult.ResolvedPath(Path path) -> runtime.out().println(path);
+                        case LogsResult.RawTail(_, String text) -> {
+                            runtime.out().print(text);
+                            runtime.out().flush();
+                        }
+                        case LogsResult.Followed _ -> runtime.out().flush();
                     }
                 }
             );
+            case Action.Hooks(GitHooksCli.Action hooksAction) -> GitHooksCli.execute(hooksAction, project, runtime);
         };
     }
 
-    private static void renderStatusText(GitHooksReport report, PrintWriter out) {
-        out.println("Project: " + report.project());
-        switch (report) {
-            case GitHooksReport.NotConfigured _ -> out.println("Mandatory Git hooks: not configured.");
-            case GitHooksReport.SourceUnavailable unavailable -> out.println(formatWarningLine(unavailable));
-            case GitHooksReport.Configured configured -> {
-                out.println(
-                    "Mandatory Git hooks (" + configured.mode().name().toLowerCase(Locale.ROOT) + "): "
-                        + String.join(", ", configured.requiredHooks())
-                );
-                if (configured.repositories().isEmpty()) {
-                    out.println("No Repositories configured in project '" + configured.project() + "'.");
-                    return;
-                }
-                List<List<String>> rows = new ArrayList<>(configured.repositories().size());
-                for (RepositoryHookStatus repo : configured.repositories()) {
-                    switch (repo) {
-                        case RepositoryHookStatus.NotCloned nc -> rows.add(List.of(
-                            nc.displayName(),
-                            "NOT_CLONED",
-                            "-",
-                            "-",
-                            nc.repositoryRoot().toString()
-                        ));
-                        case RepositoryHookStatus.NotGitRepository ngr -> rows.add(List.of(
-                            ngr.displayName(),
-                            "NOT_GIT_REPOSITORY",
-                            "-",
-                            "-",
-                            ngr.repositoryRoot().toString()
-                        ));
-                        case RepositoryHookStatus.Checked checked -> {
-                            List<HookCheckResult> missing = checked.missingHooks();
-                            List<HookCheckResult> outdated = checked.outdatedHooks();
-                            String statusLabel;
-                            if (checked.allInstalled()) {
-                                statusLabel = "OK";
-                            } else if (!missing.isEmpty() && !outdated.isEmpty()) {
-                                statusLabel = "MISSING/OUTDATED";
-                            } else if (!missing.isEmpty()) {
-                                statusLabel = "MISSING (" + missing.size() + ")";
-                            } else {
-                                statusLabel = "OUTDATED (" + outdated.size() + ")";
-                            }
-                            String missingNames = missing.isEmpty()
-                                ? "-"
-                                : missing.stream().map(HookCheckResult::hookName).collect(Collectors.joining(", "));
-                            String outdatedNames = outdated.isEmpty()
-                                ? "-"
-                                : outdated.stream().map(HookCheckResult::hookName).collect(Collectors.joining(", "));
-                            rows.add(List.of(
-                                checked.displayName(),
-                                statusLabel,
-                                missingNames,
-                                outdatedNames,
-                                checked.repositoryRoot().toString()
-                            ));
-                        }
+    private static int executeBatch(
+        Result<GitShell.GitBatchReport, procomp.core.common.DomainError> res,
+        boolean json,
+        CliRuntime runtime
+    ) {
+        if (res instanceof Result.Err<GitShell.GitBatchReport, procomp.core.common.DomainError>(var err)) {
+            runtime.err().println("Error: " + err.format());
+            return 1;
+        }
+        GitShell.GitBatchReport report = ((Result.Ok<GitShell.GitBatchReport, procomp.core.common.DomainError>) res).value();
+        if (json) {
+            runtime.out().println(Json.stringify(DomainJson.gitBatchReport(report)));
+        } else {
+            renderBatchText(report, runtime.out());
+        }
+        return report.hasFailures() ? 1 : 0;
+    }
+
+    private record BatchOpts(List<String> targets, boolean all, boolean force, Optional<Duration> timeout, boolean json) {}
+
+    private static Result<BatchOpts, String> parseBatchOp(String op, List<String> args) {
+        List<String> targets = new ArrayList<>();
+        boolean all = false;
+        boolean force = false;
+        boolean json = false;
+        Optional<Duration> timeout = Optional.empty();
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--all" -> all = true;
+                case "--force" -> force = true;
+                case "--json" -> json = true;
+                case "--timeout" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
                     }
+                    Result<Duration, String> tRes = parsePositiveSeconds(args.get(++i));
+                    if (tRes.isErr()) return tRes.castError();
+                    timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
                 }
-                CliFormat.renderTable(out, List.of("REPOSITORY", "STATUS", "MISSING", "OUTDATED", "PATH"), rows);
-                if (configured.hasWarnings()) {
-                    out.println(formatWarningLine(configured));
-                } else {
-                    out.println("All cloned Repositories have mandatory Git hooks installed.");
+                default -> {
+                    if (arg.startsWith("--timeout=")) {
+                        Result<Duration, String> tRes = parsePositiveSeconds(arg.substring("--timeout=".length()));
+                        if (tRes.isErr()) return tRes.castError();
+                        timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                    } else if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git " + op + "'.");
+                    } else {
+                        targets.add(arg);
+                    }
                 }
             }
         }
+        return Result.ok(new BatchOpts(targets, all, force, timeout, json));
     }
 
-    private static void renderInstallText(GitHooksInstallResult result, PrintWriter out) {
-        out.println(
-            "Project: " + result.project()
-                + " (mode: " + result.mode().name().toLowerCase(Locale.ROOT) + ")"
-        );
-        if (result.repositories().isEmpty()) {
-            out.println("No Repositories configured in project '" + result.project() + "'.");
+    private static Result<Action, String> parseStatus(List<String> args) {
+        List<String> targets = new ArrayList<>();
+        boolean localOnly = false;
+        boolean fetch = false;
+        boolean all = false;
+        boolean force = false;
+        boolean json = false;
+        Optional<Duration> timeout = Optional.empty();
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--local" -> localOnly = true;
+                case "--fetch" -> fetch = true;
+                case "--all" -> all = true;
+                case "--force" -> force = true;
+                case "--json" -> json = true;
+                case "--timeout" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
+                    }
+                    Result<Duration, String> tRes = parsePositiveSeconds(args.get(++i));
+                    if (tRes.isErr()) return tRes.castError();
+                    timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                }
+                default -> {
+                    if (arg.startsWith("--timeout=")) {
+                        Result<Duration, String> tRes = parsePositiveSeconds(arg.substring("--timeout=".length()));
+                        if (tRes.isErr()) return tRes.castError();
+                        timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                    } else if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git status'.");
+                    } else {
+                        targets.add(arg);
+                    }
+                }
+            }
+        }
+        return Result.ok(new Action.Status(targets, localOnly, fetch, all, force, timeout, json));
+    }
+
+    private static Result<Action, String> parseBranches(List<String> args) {
+        String target = null;
+        boolean json = false;
+        for (String arg : args) {
+            if ("--json".equals(arg)) {
+                json = true;
+            } else if (arg.startsWith("-")) {
+                return Result.err("Unknown option '" + arg + "' for 'git branches'. Usage: procomp git branches <target> [--json]");
+            } else if (target == null) {
+                target = arg;
+            } else {
+                return Result.err("Unexpected extra argument '" + arg + "'. Usage: procomp git branches <target> [--json]");
+            }
+        }
+        if (target == null || target.isBlank()) {
+            return Result.err("Missing required <target>. Usage: procomp git branches <target> [--json]");
+        }
+        return Result.ok(new Action.Branches(target, json));
+    }
+
+    private static Result<Action, String> parseSwitch(List<String> args) {
+        Optional<String> branch = Optional.empty();
+        boolean useDefault = false;
+        List<String> targets = new ArrayList<>();
+        boolean all = false;
+        boolean force = false;
+        boolean json = false;
+        Optional<Duration> timeout = Optional.empty();
+
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--default" -> useDefault = true;
+                case "--all" -> all = true;
+                case "--force" -> force = true;
+                case "--json" -> json = true;
+                case "--timeout" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
+                    }
+                    Result<Duration, String> tRes = parsePositiveSeconds(args.get(++i));
+                    if (tRes.isErr()) return tRes.castError();
+                    timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                }
+                default -> {
+                    if (arg.startsWith("--timeout=")) {
+                        Result<Duration, String> tRes = parsePositiveSeconds(arg.substring("--timeout=".length()));
+                        if (tRes.isErr()) return tRes.castError();
+                        timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                    } else if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git switch'.");
+                    } else if (!useDefault && branch.isEmpty()) {
+                        branch = Optional.of(arg);
+                    } else {
+                        targets.add(arg);
+                    }
+                }
+            }
+        }
+        if (useDefault && branch.isPresent()) {
+            return Result.err("Cannot specify both <branch> and --default for 'git switch'.");
+        }
+        if (!useDefault && branch.isEmpty()) {
+            return Result.err("Missing required <branch> or --default. Usage: procomp git switch <branch|--default> [target...]");
+        }
+        return Result.ok(new Action.Switch(branch, useDefault, targets, all, force, timeout, json));
+    }
+
+    private static Result<Action, String> parseStash(List<String> args) {
+        if (!args.isEmpty() && "list".equals(args.get(0))) {
+            List<String> targets = new ArrayList<>();
+            boolean all = false;
+            boolean json = false;
+            for (int i = 1; i < args.size(); i++) {
+                String arg = args.get(i);
+                switch (arg) {
+                    case "--all" -> all = true;
+                    case "--json" -> json = true;
+                    default -> {
+                        if (arg.startsWith("-")) {
+                            return Result.err("Unknown option '" + arg + "' for 'git stash list'.");
+                        }
+                        targets.add(arg);
+                    }
+                }
+            }
+            return Result.ok(new Action.StashList(targets, all, json));
+        }
+
+        int startIdx = (!args.isEmpty() && "push".equals(args.get(0))) ? 1 : 0;
+        List<String> targets = new ArrayList<>();
+        boolean all = false;
+        boolean includeUntracked = false;
+        boolean force = false;
+        boolean json = false;
+        Optional<String> message = Optional.empty();
+        Optional<Duration> timeout = Optional.empty();
+
+        for (int i = startIdx; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--all" -> all = true;
+                case "-u", "--include-untracked" -> includeUntracked = true;
+                case "--force" -> force = true;
+                case "--json" -> json = true;
+                case "-m", "--message" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '" + arg + "' requires a message.");
+                    }
+                    message = Optional.of(args.get(++i));
+                }
+                case "--timeout" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '--timeout' requires a positive integer number of seconds.");
+                    }
+                    Result<Duration, String> tRes = parsePositiveSeconds(args.get(++i));
+                    if (tRes.isErr()) return tRes.castError();
+                    timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                }
+                default -> {
+                    if (arg.startsWith("--timeout=")) {
+                        Result<Duration, String> tRes = parsePositiveSeconds(arg.substring("--timeout=".length()));
+                        if (tRes.isErr()) return tRes.castError();
+                        timeout = Optional.of(((Result.Ok<Duration, String>) tRes).value());
+                    } else if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git stash'.");
+                    } else {
+                        targets.add(arg);
+                    }
+                }
+            }
+        }
+        return Result.ok(new Action.StashPush(targets, all, message, includeUntracked, force, timeout, json));
+    }
+
+    private static Result<Action, String> parseCancel(List<String> args) {
+        List<String> targets = new ArrayList<>();
+        boolean all = false;
+        boolean json = false;
+        for (String arg : args) {
+            switch (arg) {
+                case "--all" -> all = true;
+                case "--json" -> json = true;
+                default -> {
+                    if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git cancel'.");
+                    }
+                    targets.add(arg);
+                }
+            }
+        }
+        return Result.ok(new Action.Cancel(targets, all, json));
+    }
+
+    private static Result<Action, String> parseLogs(List<String> args) {
+        String target = null;
+        boolean stderr = false;
+        boolean pathOnly = false;
+        int lines = LogsRequest.DEFAULT_LINES;
+        boolean follow = false;
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            switch (arg) {
+                case "--err" -> stderr = true;
+                case "--path" -> pathOnly = true;
+                case "-f", "--follow" -> follow = true;
+                case "-n", "--lines" -> {
+                    if (i + 1 >= args.size()) {
+                        return Result.err("Option '" + arg + "' requires a non-negative integer line count.");
+                    }
+                    Result<Integer, String> parsed = LogsCli.parseNonNegativeInt(args.get(++i));
+                    if (parsed.isErr()) return parsed.castError();
+                    lines = ((Result.Ok<Integer, String>) parsed).value();
+                }
+                default -> {
+                    if (arg.startsWith("-")) {
+                        return Result.err("Unknown option '" + arg + "' for 'git logs'.");
+                    }
+                    if (target == null) {
+                        target = arg;
+                    } else {
+                        return Result.err("Unexpected extra argument '" + arg + "' for 'git logs'.");
+                    }
+                }
+            }
+        }
+        if (target == null || target.isBlank()) {
+            return Result.err("Missing required <target>. Usage: procomp git logs <target> [-n <lines>] [-f] [--err] [--path]");
+        }
+        return Result.ok(new Action.Logs(new GitLogsRequest(target, stderr, pathOnly, lines, follow)));
+    }
+
+    private static Result<Duration, String> parsePositiveSeconds(String raw) {
+        try {
+            long secs = Long.parseLong(raw.trim());
+            if (secs <= 0) {
+                return Result.err("Timeout must be a positive integer number of seconds, got '" + raw + "'.");
+            }
+            return Result.ok(Duration.ofSeconds(secs));
+        } catch (NumberFormatException e) {
+            return Result.err("Invalid timeout '" + raw + "': must be a positive integer number of seconds.");
+        }
+    }
+
+    private static void renderStatusText(GitShell.GitStatusReport report, PrintWriter out) {
+        out.println("Project: " + report.projectName());
+        if (report.repositories().isEmpty()) {
+            out.println("No repositories matched.");
             return;
         }
-        List<List<String>> rows = new ArrayList<>(result.repositories().size());
-        for (RepositoryInstallOutcome repo : result.repositories()) {
-            switch (repo) {
-                case RepositoryInstallOutcome.SkippedNotCloned s -> rows.add(List.of(
-                    s.displayName(),
-                    "SKIPPED (not cloned)",
-                    "0",
-                    "0",
-                    "0",
-                    s.repositoryRoot().toString()
-                ));
-                case RepositoryInstallOutcome.SkippedNotGitRepository s -> rows.add(List.of(
-                    s.displayName(),
-                    "SKIPPED (not a Git repository)",
-                    "0",
-                    "0",
-                    "0",
-                    s.repositoryRoot().toString()
-                ));
-                case RepositoryInstallOutcome.Applied a -> rows.add(List.of(
-                    a.displayName(),
-                    "APPLIED",
-                    Integer.toString(a.installedCount()),
-                    Integer.toString(a.upgradedCount()),
-                    Integer.toString(a.unchangedCount()),
-                    a.repositoryRoot().toString()
-                ));
+        List<List<String>> rows = new ArrayList<>(report.repositories().size());
+        for (GitShell.RepositoryStatusRow row : report.repositories()) {
+            String state;
+            String branch = "-";
+            String upstream = "-";
+            String dirty = "-";
+            String stashes = "-";
+            String fetched = "-";
+            switch (row.observation()) {
+                case RepositoryObservation.NotCloned _ -> state = "NOT_CLONED";
+                case RepositoryObservation.NotAGitRepository _ -> state = "NOT_GIT";
+                case RepositoryObservation.Cloned c -> {
+                    state = "CLONED";
+                    branch = switch (c.head()) {
+                        case RepositoryObservation.HeadState.Branch(String n) -> n;
+                        case RepositoryObservation.HeadState.Detached(String sha) -> "DETACHED@" + sha;
+                    };
+                    String ab = (c.ahead() > 0 || c.behind() > 0)
+                        ? " (↑" + c.ahead() + " ↓" + c.behind() + ")"
+                        : "";
+                    upstream = c.upstream().map(u -> u + ab).orElse("-");
+                    dirty = c.isDirty() ? (c.dirtyCount() + " (" + c.stagedCount() + "s/" + c.unstagedCount() + "m/" + c.untrackedCount() + "u)") : "clean";
+                    stashes = Integer.toString(c.stashCount());
+                    fetched = c.lastFetchedAt()
+                        .map(t -> GitEngine.formatShortAge(Duration.between(t, report.observedAt())) + " ago" + (row.fetchAgeWarning() ? " (!)" : ""))
+                        .orElse("never");
+                }
             }
+            String lastRun = row.latestRun()
+                .map(r -> r.effectiveStatus().name() + "(" + r.record().operation().cliName() + ")")
+                .orElse("-");
+            rows.add(List.of(
+                row.repository().name(),
+                String.join(", ", row.services()),
+                state,
+                branch,
+                upstream,
+                dirty,
+                stashes,
+                fetched,
+                lastRun
+            ));
         }
-        CliFormat.renderTable(out, List.of("REPOSITORY", "OUTCOME", "INSTALLED", "UPGRADED", "UNCHANGED", "PATH"), rows);
-        out.println(
-            "Summary: " + result.totalInstalled() + " installed, "
-                + result.totalUpgraded() + " upgraded, "
-                + result.totalUnchanged() + " unchanged."
+        CliFormat.renderTable(
+            out,
+            List.of("REPOSITORY", "SERVICES", "STATE", "BRANCH", "UPSTREAM", "DIRTY", "STASHES", "FETCHED", "LAST_RUN"),
+            rows
         );
     }
 
-    static String formatWarningLine(GitHooksReport report) {
-        return switch (report) {
-            case GitHooksReport.NotConfigured _ -> "";
-            case GitHooksReport.SourceUnavailable unavailable ->
-                "Warning: Mandatory Git hooks could not be checked (" + unavailable.reason() + ").";
-            case GitHooksReport.Configured configured -> {
-                List<String> parts = new ArrayList<>(2);
-                if (configured.missingHookCount() > 0) {
-                    parts.add(configured.missingHookCount() + " missing");
+    private static void renderBranchesText(GitShell.BranchesReport report, PrintWriter out) {
+        out.println("Repository: " + report.repository().name() + " (services: " + String.join(", ", report.services()) + ")");
+        if (report.branches().isEmpty()) {
+            out.println("No branches found.");
+            return;
+        }
+        List<List<String>> rows = new ArrayList<>(report.branches().size());
+        for (BranchInfo b : report.branches()) {
+            rows.add(List.of(
+                (b.current() ? "* " : "  ") + b.name(),
+                b.origin().name(),
+                COMMIT_TIME_FMT.format(b.lastCommitAt()) + "Z",
+                b.shortSubject()
+            ));
+        }
+        CliFormat.renderTable(out, List.of("BRANCH", "ORIGIN", "LAST_COMMIT", "SUBJECT"), rows);
+    }
+
+    private static void renderStashListText(List<GitShell.RepositoryStashes> items, PrintWriter out) {
+        if (items.isEmpty()) {
+            out.println("No repositories matched.");
+            return;
+        }
+        for (GitShell.RepositoryStashes item : items) {
+            out.println(item.repository().name() + ":");
+            if (item.stashes().isEmpty()) {
+                out.println("  (no stashes)");
+            } else {
+                for (StashEntry e : item.stashes()) {
+                    out.println("  " + e.ref() + ": " + e.message());
                 }
-                if (configured.outdatedHookCount() > 0) {
-                    parts.add(configured.outdatedHookCount() + " outdated");
-                }
-                String detail = parts.isEmpty() ? "" : " (" + String.join(", ", parts) + ")";
-                yield "Warning: Mandatory Git hooks need attention in "
-                    + configured.repositoriesWithIssuesCount() + "/" + configured.checkedRepositoryCount()
-                    + " Repositories" + detail
-                    + ". Run 'procomp git hooks install' to install/upgrade.";
             }
-        };
+        }
+    }
+
+    private static void renderBatchText(GitShell.GitBatchReport report, PrintWriter out) {
+        if (report.outcomes().isEmpty()) {
+            out.println("No repositories matched for 'git " + report.operation().cliName() + "'.");
+            return;
+        }
+        for (GitShell.GitRepoOutcome outcome : report.outcomes()) {
+            switch (outcome) {
+                case GitShell.GitRepoOutcome.Succeeded(var repo, GitRunRecord rec) ->
+                    out.println("OK      " + repo.name() + " (" + rec.operation().cliName() + ")");
+                case GitShell.GitRepoOutcome.Skipped(var repo, String reason) ->
+                    out.println("SKIPPED " + repo.name() + " (" + reason + ")");
+                case GitShell.GitRepoOutcome.Failed(var repo, var err, _) ->
+                    out.println("FAILED  " + repo.name() + ": " + err.format());
+            }
+        }
+    }
+
+    private static void renderCancelText(GitShell.GitCancelReport report, PrintWriter out) {
+        if (report.outcomes().isEmpty()) {
+            out.println("No repositories matched for 'git cancel'.");
+            return;
+        }
+        for (GitShell.CancelOutcome outcome : report.outcomes()) {
+            switch (outcome) {
+                case GitShell.CancelOutcome.Cancelled(var repo, GitRunRecord rec) ->
+                    out.println("CANCELLED " + repo.name() + " (PID " + rec.pid() + ")");
+                case GitShell.CancelOutcome.NoActiveRun(var repo, _) ->
+                    out.println("IDLE      " + repo.name() + " (no active Git Run)");
+                case GitShell.CancelOutcome.Failed(var repo, var err) ->
+                    out.println("FAILED    " + repo.name() + ": " + err.format());
+            }
+        }
     }
 }

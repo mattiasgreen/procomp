@@ -197,6 +197,73 @@ public final class RoutingCliTest {
         Assert.assertEquals(0, ((JsonValue.JsonArray) profObj.get("profiles").orElseThrow()).elements().size(), "empty profiles array");
     }
 
+    public static void testProfileSaveAndDeleteSnapshotExplicitNoneAndErrors() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = sampleConfigSource(root);
+        var stateStore = new InMemoryStateStore();
+
+        // 1. Snapshot current Routing Table (orders + inventory LOCAL)
+        Assert.assertEquals(0, runCli(configSource, stateStore, "route", "orders", "inventory", "local").exitCode(), "set routes");
+        Map<String, String> routingBefore = Assert.assertOk(stateStore.readRouting("acme"), "routing before save").orElseThrow();
+
+        CliResult snapRes = runCli(configSource, stateStore, "profile", "save", "my-slice");
+        Assert.assertEquals(0, snapRes.exitCode(), "profile save snapshot exits 0; stderr=" + snapRes.stderr());
+        Assert.assertContains(snapRes.stdout(), "my-slice", "save output mentions profile name");
+
+        // 2. Explicit services overwrite & --none empty slice without mutating routing.json
+        CliResult explicitRes = runCli(configSource, stateStore, "profile", "save", "payments-only", "payments");
+        Assert.assertEquals(0, explicitRes.exitCode(), "profile save explicit exits 0; stderr=" + explicitRes.stderr());
+
+        CliResult noneRes = runCli(configSource, stateStore, "profile", "save", "all-remote", "--none");
+        Assert.assertEquals(0, noneRes.exitCode(), "profile save --none exits 0; stderr=" + noneRes.stderr());
+
+        Assert.assertEquals(
+            Optional.of(routingBefore),
+            Assert.assertOk(stateStore.readRouting("acme"), "routing untouched by profile save"),
+            "UNIX separation: profile save must not mutate routing.json"
+        );
+
+        // Verify via profile list --json
+        CliResult listAfterSave = runCli(configSource, stateStore, "profile", "list", "--json");
+        Assert.assertEquals(0, listAfterSave.exitCode(), "profile list --json exits 0");
+        JsonValue.JsonArray profArr = (JsonValue.JsonArray) asObject(
+            Assert.assertOk(Json.parse(listAfterSave.stdout().trim()), "valid json")
+        ).get("profiles").orElseThrow();
+        Assert.assertEquals(5, profArr.elements().size(), "2 original + 3 newly saved profiles");
+
+        // 3. Delete profile & verify UNKNOWN_PROFILE on missing delete
+        CliResult delRes = runCli(configSource, stateStore, "profile", "delete", "payments-only");
+        Assert.assertEquals(0, delRes.exitCode(), "profile delete exits 0; stderr=" + delRes.stderr());
+        Assert.assertContains(delRes.stdout(), "payments-only", "delete output mentions profile");
+
+        CliResult delMissing = runCli(configSource, stateStore, "profile", "delete", "payments-only");
+        Assert.assertEquals(1, delMissing.exitCode(), "delete missing profile exits 1");
+        Assert.assertContains(delMissing.stderr(), "UNKNOWN_PROFILE", "stderr reports UNKNOWN_PROFILE");
+
+        // 4. Unknown service and invalid profile name fail with exit 1
+        CliResult unknownSvc = runCli(configSource, stateStore, "profile", "save", "bad-slice", "ghost");
+        Assert.assertEquals(1, unknownSvc.exitCode(), "unknown service exits 1");
+        Assert.assertContains(unknownSvc.stderr(), "UNKNOWN_SERVICE", "stderr reports UNKNOWN_SERVICE");
+
+        CliResult badName = runCli(configSource, stateStore, "profile", "save", "bad/name", "orders");
+        Assert.assertEquals(1, badName.exitCode(), "slash in profile name exits 1");
+        Assert.assertContains(badName.stderr(), "PROFILE_INVALID_NAME", "stderr reports PROFILE_INVALID_NAME");
+
+        // 5. Invalid CLI syntax exits 2
+        for (String[] badArgs : List.of(
+            new String[]{"profile", "save"},
+            new String[]{"profile", "save", "--none"},
+            new String[]{"profile", "save", "p1", "--none", "orders"},
+            new String[]{"profile", "save", "p1", "--bogus"},
+            new String[]{"profile", "delete"},
+            new String[]{"profile", "delete", "--bogus"},
+            new String[]{"profile", "delete", "p1", "extra"}
+        )) {
+            CliResult bad = runCli(configSource, stateStore, badArgs);
+            Assert.assertEquals(2, bad.exitCode(), "bad syntax " + String.join(" ", badArgs) + " exits 2");
+        }
+    }
+
     private static String routeField(JsonValue.JsonArray arr, int index, String key) {
         JsonValue.JsonObject obj = (JsonValue.JsonObject) arr.elements().get(index);
         return ((JsonValue.JsonString) obj.get(key).orElseThrow()).value();

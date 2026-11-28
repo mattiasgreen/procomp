@@ -5,6 +5,7 @@ import procomp.core.common.Result;
 import java.io.PrintWriter;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Shared package-private CLI formatting, table rendering, and option parsing utilities.
@@ -55,6 +56,23 @@ final class CliFormat {
             return minutes + "m" + seconds + "s";
         }
         return seconds + "s";
+    }
+
+    static String formatBytes(long bytes) {
+        long clamped = Math.max(0L, bytes);
+        long gbThreshold = 1024L * 1024L * 1024L;
+        if (clamped >= gbThreshold) {
+            return String.format(Locale.ROOT, "%.1f GB", clamped / (double) gbThreshold);
+        }
+        long mb = clamped / (1024L * 1024L);
+        if (mb > 0) {
+            return mb + " MB";
+        }
+        long kb = clamped / 1024L;
+        if (kb > 0) {
+            return kb + " KB";
+        }
+        return clamped + " B";
     }
 
     record ParsedOption<T>(T value, int nextIndex) {}

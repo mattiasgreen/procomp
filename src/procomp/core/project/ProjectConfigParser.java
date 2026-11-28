@@ -19,14 +19,15 @@ import java.util.Set;
 final class ProjectConfigParser {
 
     private static final Set<String> TOP_LEVEL_KEYS = Set.of(
-        "project", "repositoriesRoot", "envFiles", "defaults",
+        "project", "repositoriesRoot", "repositories", "envFiles", "defaults",
         "builders", "runtimes", "gateway", "catalog", "services", "profiles", "git"
     );
+    private static final Set<String> REPOSITORIES_KEYS = Set.of("fetchWarnAfterHours", "timeoutSeconds");
     private static final Set<String> GIT_KEYS = Set.of("hooks", "extraRepositories");
     private static final Set<String> GIT_HOOKS_KEYS = Set.of("sourceDir", "required", "files", "mode");
     private static final Set<String> ENV_FILE_KEYS = Set.of("path", "optional");
     private static final Set<String> DEFAULTS_KEYS = Set.of(
-        "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env"
+        "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env", "envFiles"
     );
     private static final Set<String> BUILDER_KEYS = Set.of(
         "command", "workingDir", "env"
@@ -80,6 +81,11 @@ final class ProjectConfigParser {
             return reposRootRes.castError();
         }
 
+        Result<RepositorySettings, DomainError> reposSettingsRes = parseOptionalRepositories(root);
+        if (reposSettingsRes.isErr()) {
+            return reposSettingsRes.castError();
+        }
+
         Result<List<EnvFileSpec>, DomainError> envFilesRes = parseOptionalEnvFiles(root, "envFiles", "procomp.json");
         if (envFilesRes.isErr()) {
             return envFilesRes.castError();
@@ -128,6 +134,7 @@ final class ProjectConfigParser {
         return Result.ok(new RawProjectConfig(
             okVal(projectRes),
             okVal(reposRootRes),
+            okVal(reposSettingsRes),
             okVal(envFilesRes),
             okVal(defaultsRes),
             okVal(buildersRes),
@@ -138,6 +145,77 @@ final class ProjectConfigParser {
             okVal(profilesRes),
             okVal(gitRes)
         ));
+    }
+
+    private static Result<RepositorySettings, DomainError> parseOptionalRepositories(JsonValue.JsonObject root) {
+        Optional<JsonValue> maybe = root.get("repositories");
+        if (maybe.isEmpty()) {
+            return Result.ok(RepositorySettings.DEFAULT);
+        }
+        Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), "repositories");
+        if (objRes.isErr()) {
+            return objRes.castError();
+        }
+        JsonValue.JsonObject obj = okVal(objRes);
+        Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, REPOSITORIES_KEYS, "repositories");
+        if (unknown.isErr()) {
+            return unknown.castError();
+        }
+
+        int fetchWarnAfterHours = RepositorySettings.DEFAULT_FETCH_WARN_AFTER_HOURS;
+        Optional<JsonValue> warnVal = obj.get("fetchWarnAfterHours");
+        if (warnVal.isPresent()) {
+            Result<Integer, DomainError> parsed = parseStrictInt(warnVal.get(), "repositories.fetchWarnAfterHours");
+            if (parsed.isErr()) {
+                return parsed.castError();
+            }
+            fetchWarnAfterHours = okVal(parsed);
+            if (fetchWarnAfterHours < 0) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Field 'repositories.fetchWarnAfterHours' must be >= 0",
+                    Map.of("field", "repositories.fetchWarnAfterHours", "value", String.valueOf(fetchWarnAfterHours))
+                ));
+            }
+        }
+
+        int timeoutSeconds = RepositorySettings.DEFAULT_TIMEOUT_SECONDS;
+        Optional<JsonValue> timeoutVal = obj.get("timeoutSeconds");
+        if (timeoutVal.isPresent()) {
+            Result<Integer, DomainError> parsed = parseStrictInt(timeoutVal.get(), "repositories.timeoutSeconds");
+            if (parsed.isErr()) {
+                return parsed.castError();
+            }
+            timeoutSeconds = okVal(parsed);
+            if (timeoutSeconds <= 0) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Field 'repositories.timeoutSeconds' must be > 0",
+                    Map.of("field", "repositories.timeoutSeconds", "value", String.valueOf(timeoutSeconds))
+                ));
+            }
+        }
+
+        return Result.ok(new RepositorySettings(fetchWarnAfterHours, timeoutSeconds));
+    }
+
+    private static Result<Integer, DomainError> parseStrictInt(JsonValue val, String fieldPath) {
+        if (!(val instanceof JsonValue.JsonNumber(String raw))) {
+            return Result.err(DomainError.of(
+                "CONFIG_INVALID_TYPE",
+                "Field '" + fieldPath + "' must be an integer",
+                Map.of("field", fieldPath)
+            ));
+        }
+        try {
+            return Result.ok(new java.math.BigDecimal(raw).intValueExact());
+        } catch (NumberFormatException | ArithmeticException e) {
+            return Result.err(DomainError.of(
+                "CONFIG_INVALID_VALUE",
+                "Field '" + fieldPath + "' must be an integer",
+                Map.of("field", fieldPath)
+            ));
+        }
     }
 
     static boolean isPathSafeIdentifier(String value) {
@@ -188,9 +266,11 @@ final class ProjectConfigParser {
         if (vars.isErr()) return vars.castError();
         Result<Map<String, String>, DomainError> env = parseOptionalStringMap(obj, "env", "defaults.env");
         if (env.isErr()) return env.castError();
+        Result<List<EnvFileSpec>, DomainError> envFiles = parseOptionalEnvFiles(obj, "envFiles", "defaults");
+        if (envFiles.isErr()) return envFiles.castError();
 
         return Result.ok(new RawProjectConfig.RawDefaultsConfig(
-            okVal(builder), okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env)
+            okVal(builder), okVal(proxyPath), okVal(remoteUrl), okVal(workingDir), okVal(vars), okVal(env), okVal(envFiles)
         ));
     }
 

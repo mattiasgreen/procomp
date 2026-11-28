@@ -9,6 +9,7 @@ import procomp.core.project.GitHooksConfig;
 import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.core.project.RepositoryRef;
+import procomp.core.project.RepositorySettings;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -110,6 +111,7 @@ public final class GitHooksEngineTest {
             root.resolve("procomp.json"),
             root,
             Optional.of(Path.of("C:/work/repos").normalize()),
+            RepositorySettings.DEFAULT,
             Map.of(),
             Map.of(),
             Optional.empty(),

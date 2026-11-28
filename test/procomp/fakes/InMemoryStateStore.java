@@ -4,17 +4,22 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitRunRecord;
+import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.StateStore;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 public final class InMemoryStateStore implements StateStore {
 
@@ -23,6 +28,7 @@ public final class InMemoryStateStore implements StateStore {
     private final Map<String, Map<String, ManagedProcessRecord>> serviceProcesses = new LinkedHashMap<>();
     private final Map<String, ManagedProcessRecord> gatewayProcesses = new LinkedHashMap<>();
     private final Map<String, Map<String, BuildRunRecord>> buildRuns = new LinkedHashMap<>();
+    private final Map<String, Map<String, GitRunRecord>> gitRuns = new LinkedHashMap<>();
     private final Map<Path, byte[]> logs = new LinkedHashMap<>();
 
     public InMemoryStateStore() {
@@ -63,6 +69,9 @@ public final class InMemoryStateStore implements StateStore {
             case ProcessKey.Build _ -> throw new IllegalArgumentException(
                 "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
             );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
+            );
         };
     }
 
@@ -74,6 +83,9 @@ public final class InMemoryStateStore implements StateStore {
             case ProcessKey.Gateway _ -> gatewayProcesses.put(project, record);
             case ProcessKey.Build _ -> throw new IllegalArgumentException(
                 "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
+            );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
             );
         }
         return Result.ok(Unit.VALUE);
@@ -92,6 +104,9 @@ public final class InMemoryStateStore implements StateStore {
             case ProcessKey.Build _ -> throw new IllegalArgumentException(
                 "ProcessKey.Build must use readBuildRun/writeBuildRun/deleteBuildRun"
             );
+            case ProcessKey.Git _ -> throw new IllegalArgumentException(
+                "ProcessKey.Git must use readGitRun/writeGitRun"
+            );
         }
         return Result.ok(Unit.VALUE);
     }
@@ -108,11 +123,23 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
+    public synchronized Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName) {
+        return Result.ok(Optional.ofNullable(gitRuns.getOrDefault(project, Map.of()).get(repositoryName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record) {
+        gitRuns.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(repositoryName, record);
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
             case ProcessKey.Gateway _ -> "gateway";
             case ProcessKey.Build(String svc) -> svc + ".build";
+            case ProcessKey.Git(String repo) -> repo + ".git";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix);
@@ -153,5 +180,45 @@ public final class InMemoryStateStore implements StateStore {
         int start = byteOffset > data.length ? 0 : (int) Math.max(0, byteOffset);
         String text = new String(data, start, data.length - start, StandardCharsets.UTF_8);
         return Result.ok(new LogChunk(text, data.length));
+    }
+
+    @Override
+    public Result<LogPage, DomainError> readLogPageBackward(
+        Path logPath,
+        OptionalLong beforeOffset,
+        int maxLines,
+        int maxBytes
+    ) {
+        if (maxLines < 0) {
+            throw new IllegalArgumentException("maxLines must be non-negative: " + maxLines);
+        }
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+        }
+        if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+            throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+        }
+        byte[] data = logs.get(logPath.toAbsolutePath().normalize());
+        if (data == null) {
+            return Result.err(DomainError.of("LOG_NOT_FOUND", "Log file not found: " + logPath, Map.of("path", logPath.toString())));
+        }
+        long size = data.length;
+        long endOffset;
+        if (beforeOffset.isPresent()) {
+            long requested = beforeOffset.getAsLong();
+            if (requested > size) {
+                return Result.ok(new LogPage("", 0L, 0L, false, true));
+            }
+            endOffset = requested;
+        } else {
+            endOffset = size;
+        }
+        if (endOffset == 0L || maxLines == 0) {
+            return Result.ok(new LogPage("", endOffset, endOffset, endOffset > 0L, false));
+        }
+        long windowStart = Math.max(0L, endOffset - maxBytes);
+        byte[] sliceBytes = Arrays.copyOfRange(data, (int) windowStart, (int) endOffset);
+        LogTailer.BackwardSlice slice = LogTailer.sliceBackward(sliceBytes, windowStart, maxLines);
+        return Result.ok(new LogPage(slice.text(), slice.startOffset(), slice.endOffset(), slice.hasOlder(), false));
     }
 }

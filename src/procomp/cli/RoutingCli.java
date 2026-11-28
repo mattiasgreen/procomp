@@ -9,23 +9,34 @@ import procomp.core.project.ServiceDefinition;
 import procomp.core.routing.Route;
 import procomp.core.routing.RoutingTable;
 import procomp.shell.DomainJson;
+import procomp.shell.ProfileConfigShell;
+import procomp.shell.ProjectLoader.LoadedProject;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * CLI argument parser and table/JSON renderer for {@code procomp route} and {@code procomp profile}.
  */
 public final class RoutingCli {
 
-    public sealed interface Action permits Action.ShowRoutes, Action.UpdateRoutes, Action.ListProfiles, Action.UseProfile {
+    public sealed interface Action permits
+        Action.ShowRoutes,
+        Action.UpdateRoutes,
+        Action.ListProfiles,
+        Action.UseProfile,
+        Action.SaveProfile,
+        Action.DeleteProfile {
         record ShowRoutes(boolean json) implements Action {}
         record UpdateRoutes(List<String> services, Route route) implements Action {}
         record ListProfiles(boolean json) implements Action {}
         record UseProfile(String profileName) implements Action {}
+        record SaveProfile(String profileName, Optional<List<String>> explicitLocalServices) implements Action {}
+        record DeleteProfile(String profileName) implements Action {}
     }
 
     private RoutingCli() {}
@@ -81,7 +92,7 @@ public final class RoutingCli {
      */
     public static Result<Action, String> parseProfile(List<String> args) {
         if (args.isEmpty()) {
-            return Result.err("Expected subcommand 'list' or 'use <name>' after 'profile'. Usage: procomp profile <list [--json] | use <name>>");
+            return Result.err("Expected subcommand 'list', 'use <name>', 'save <name> [service... | --none]', or 'delete <name>' after 'profile'.");
         }
         String subcommand = args.get(0);
         List<String> rest = args.subList(1, args.size());
@@ -101,14 +112,48 @@ public final class RoutingCli {
                 }
                 yield Result.ok(new Action.UseProfile(rest.get(0)));
             }
-            default -> Result.err("Unknown 'profile' subcommand '" + subcommand + "'. Usage: procomp profile <list [--json] | use <name>>");
+            case "save" -> parseProfileSave(rest);
+            case "delete" -> {
+                if (rest.size() != 1 || rest.get(0).startsWith("-") || rest.get(0).isBlank()) {
+                    yield Result.err("Expected '<name>' after 'profile delete'. Usage: procomp profile delete <name>");
+                }
+                yield Result.ok(new Action.DeleteProfile(rest.get(0)));
+            }
+            default -> Result.err("Unknown 'profile' subcommand '" + subcommand + "'. Usage: procomp profile <list [--json] | use <name> | save <name> [service... | --none] | delete <name>>");
         };
+    }
+
+    private static Result<Action, String> parseProfileSave(List<String> rest) {
+        if (rest.isEmpty() || rest.get(0).startsWith("-") || rest.get(0).isBlank()) {
+            return Result.err("Expected '<name>' after 'profile save'. Usage: procomp profile save <name> [service... | --none]");
+        }
+        String profileName = rest.get(0);
+        if (rest.size() == 1) {
+            return Result.ok(new Action.SaveProfile(profileName, Optional.empty()));
+        }
+        List<String> serviceArgs = rest.subList(1, rest.size());
+        if (serviceArgs.size() == 1 && "--none".equals(serviceArgs.get(0))) {
+            return Result.ok(new Action.SaveProfile(profileName, Optional.of(List.of())));
+        }
+        for (String arg : serviceArgs) {
+            if ("--none".equals(arg)) {
+                return Result.err("Option '--none' cannot be combined with explicit service names. Usage: procomp profile save <name> [service... | --none]");
+            }
+            if (arg.startsWith("-")) {
+                return Result.err("Unknown option '" + arg + "' for 'profile save'. Usage: procomp profile save <name> [service... | --none]");
+            }
+            if (arg.isBlank()) {
+                return Result.err("Service name must not be blank. Usage: procomp profile save <name> [service... | --none]");
+            }
+        }
+        return Result.ok(new Action.SaveProfile(profileName, Optional.of(List.copyOf(serviceArgs))));
     }
 
     /**
      * Executes a parsed routing/profile action against {@link CliRuntime} and writes rendered output or errors.
      */
-    static int execute(Action action, Project project, CliRuntime runtime) {
+    static int execute(Action action, LoadedProject loaded, CliRuntime runtime) {
+        Project project = loaded.project();
         return switch (action) {
             case Action.ShowRoutes(boolean json) -> runtime.handleResult(
                 runtime.routingShell().flatMap(shell -> shell.showRoutes(project)),
@@ -145,6 +190,26 @@ public final class RoutingCli {
                     int remoteCount = table.remoteServices().size();
                     runtime.out().println("Applied profile '" + profileName + "' (" + localCount + " LOCAL, " + remoteCount + " REMOTE)");
                 }
+            );
+            case Action.SaveProfile(String profileName, Optional<List<String>> explicitLocalServices) -> {
+                Result<List<String>, DomainError> localRes = explicitLocalServices.isPresent()
+                    ? Result.ok(explicitLocalServices.get())
+                    : runtime.routingShell().flatMap(shell -> shell.showRoutes(project)).map(RoutingTable::localServices);
+                Result<ProfileConfigShell.SaveProfileResult, DomainError> saveRes = localRes.flatMap(
+                    locals -> runtime.profileConfigShell().flatMap(shell -> shell.saveProfile(loaded, profileName, locals))
+                );
+                yield runtime.handleResult(
+                    saveRes,
+                    saved -> {
+                        String verb = saved.overwrote() ? "Updated" : "Saved";
+                        int localCount = saved.profile().localServices().size();
+                        runtime.out().println(verb + " profile '" + saved.profile().name() + "' (" + localCount + " LOCAL) in " + saved.loaded().configPath());
+                    }
+                );
+            }
+            case Action.DeleteProfile(String profileName) -> runtime.handleResult(
+                runtime.profileConfigShell().flatMap(shell -> shell.deleteProfile(loaded, profileName)),
+                deleted -> runtime.out().println("Deleted profile '" + deleted.deletedName() + "' from " + deleted.loaded().configPath())
             );
         };
     }

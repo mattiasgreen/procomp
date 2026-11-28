@@ -1,10 +1,13 @@
 package procomp.cli;
 
 import procomp.Assert;
-import procomp.core.common.Json;
-import procomp.core.common.JsonValue;
+import procomp.core.git.BranchInfo;
+import procomp.core.git.RepositoryObservation;
+import procomp.core.project.Project;
+import procomp.core.project.ProjectResolver;
+import procomp.core.project.RepositoryRef;
 import procomp.fakes.FakeClock;
-import procomp.fakes.FakeGitHooksStore;
+import procomp.fakes.FakeGitRepositoryReader;
 import procomp.fakes.FakeHttpClient;
 import procomp.fakes.FakePortScanner;
 import procomp.fakes.FakeProcessRunner;
@@ -16,117 +19,82 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 public final class GitCliTest {
 
-    public static void testStatusWarningAndGitHooksInstallAndUpgradeCommands() {
-        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
-        Path reposRoot = Path.of("C:/work/repos").toAbsolutePath().normalize();
-        Path ordersRepo = reposRoot.resolve("orders");
-        Path billingRepo = reposRoot.resolve("billing");
+    private static final Instant NOW = Instant.parse("2026-11-24T12:00:00Z");
 
-        var config = new InMemoryConfigSource(root).withFile(root.resolve("procomp.json"), """
+    public static void testGitCliStatusBranchesFetchSwitchAndRejectsAuthoringFlags() {
+        Path configPath = Path.of("C:/dev/acme/procomp.json").toAbsolutePath().normalize();
+        String json = """
             {
               "project": "acme",
-              "repositoriesRoot": "../repos",
-              "runtimes": { "java": { "command": ["java", "-jar", "app.jar"] } },
+              "repositoriesRoot": "..",
+              "runtimes": { "rt": { "command": ["echo"] } },
               "services": {
-                "orders": { "runtime": "java", "port": 9001, "repositoryUrl": "https://git.example/orders.git" },
-                "billing": { "runtime": "java", "port": 9002, "repositoryUrl": "https://git.example/billing.git" }
-              },
-              "git": {
-                "hooks": {
-                  "sourceDir": "{{configDir}}/hooks",
-                  "required": ["pre-commit"]
-                }
+                "orders": { "runtime": "rt", "repositoryUrl": "https://git.example/orders.git" }
               }
             }
-            """);
+            """;
+        Project project = Assert.assertOk(
+            ProjectResolver.resolve(configPath, json, _ -> procomp.core.common.Result.ok(Optional.empty()), Map.of()),
+            "resolve"
+        );
+        RepositoryRef ordersRepo = project.repository("orders").orElseThrow();
 
-        var gitHooksStore = new FakeGitHooksStore()
-            .withSourceFile(root.resolve("hooks/pre-commit"), "#!/bin/sh\necho strict-v2\n")
-            .withGitRepository(ordersRepo)
-            .withGitRepository(billingRepo)
-            .withInstalledHook(billingRepo, "pre-commit", "#!/bin/sh\necho old-v1\n", true);
+        FakeClock clock = new FakeClock(NOW);
+        InMemoryConfigSource configSource = new InMemoryConfigSource(configPath.getParent()).withFile(configPath, json);
+        InMemoryStateStore stateStore = new InMemoryStateStore();
+        FakeProcessRunner runner = new FakeProcessRunner(clock);
+        FakeGitRepositoryReader gitReader = new FakeGitRepositoryReader();
+        gitReader.putObservation(new RepositoryObservation.Cloned(
+            ordersRepo, new RepositoryObservation.HeadState.Branch("main"), Optional.of("origin/main"),
+            0, 1, 0, 0, 0, 0, Optional.of(NOW.minusSeconds(3600))
+        ));
+        gitReader.putBranches(ordersRepo.root(), List.of(
+            new BranchInfo("feature/a", BranchInfo.RefOrigin.REMOTE, NOW, "Feat A", false),
+            new BranchInfo("main", BranchInfo.RefOrigin.LOCAL_AND_REMOTE, NOW.minusSeconds(7200), "Init", true)
+        ));
 
-        var stateStore = new InMemoryStateStore();
-        var clock = new FakeClock(Instant.parse("2026-11-25T05:00:00Z"));
-        var processRunner = new FakeProcessRunner(clock);
-        var portScanner = new FakePortScanner();
-        var httpClient = new FakeHttpClient();
-        var projectFiles = new FakeProjectFiles()
-            .withDirectory(ordersRepo)
-            .withDirectory(billingRepo);
-
-        // 1. `procomp status` surfaces non-mutating Git hooks warning
-        CliResult statusBefore = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "status");
-        Assert.assertEquals(0, statusBefore.exitCode(), "status exits 0; stderr=" + statusBefore.stderr());
-        Assert.assertContains(statusBefore.stdout(), "Warning: Mandatory Git hooks need attention", "status prints git hooks warning");
-        Assert.assertContains(statusBefore.stdout(), "procomp git hooks install", "status hints install command");
-
-        // 2. `procomp git hooks status --json`
-        CliResult jsonStatus = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "git", "hooks", "status", "--json");
-        Assert.assertEquals(0, jsonStatus.exitCode(), "git hooks status --json exits 0");
-        JsonValue.JsonObject statusObj = (JsonValue.JsonObject) Assert.assertOk(Json.parse(jsonStatus.stdout()), "valid json");
-        Assert.assertEquals(true, ((JsonValue.JsonBoolean) statusObj.get("hasWarnings").orElseThrow()).value(), "hasWarnings true");
-
-        // 3. `procomp git hooks install orders` installs only orders
-        CliResult installOrders = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "git", "hooks", "install", "orders");
-        Assert.assertEquals(0, installOrders.exitCode(), "install orders exits 0; stderr=" + installOrders.stderr());
-        Assert.assertContains(installOrders.stdout(), "1 installed, 0 upgraded, 0 unchanged", "orders installed");
-
-        // 4. `procomp git hooks upgrade` upgrades remaining billing repo
-        CliResult upgradeAll = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "git", "hooks", "upgrade");
-        Assert.assertEquals(0, upgradeAll.exitCode(), "upgrade exits 0; stderr=" + upgradeAll.stderr());
-        Assert.assertContains(upgradeAll.stdout(), "0 installed, 1 upgraded, 1 unchanged", "billing upgraded");
-
-        // 5. `procomp status` no longer prints the warning
-        CliResult statusAfter = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "status");
-        Assert.assertEquals(0, statusAfter.exitCode(), "status after exits 0");
-        Assert.assertFalse(statusAfter.stdout().contains("Warning: Mandatory Git hooks"), "warning cleared after install");
-
-        // 6. Invalid subcommand returns exit code 2
-        CliResult invalid = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, gitHooksStore, clock, "git", "bogus");
-        Assert.assertEquals(2, invalid.exitCode(), "invalid subcommand exits 2");
-
-        // 7. Missing hook source dir: `procomp status` degrades gracefully to warning, `procomp git hooks status` fails fast
-        var emptyHooksStore = new FakeGitHooksStore().withGitRepository(ordersRepo);
-        CliResult degradedStatus = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, emptyHooksStore, clock, "status");
-        Assert.assertEquals(0, degradedStatus.exitCode(), "status still exits 0 when hook source is missing; stderr=" + degradedStatus.stderr());
-        Assert.assertContains(degradedStatus.stdout(), "orders", "status still renders services table");
-        Assert.assertContains(degradedStatus.stdout(), "Warning: Mandatory Git hooks could not be checked", "status prints source-unavailable warning");
-
-        CliResult failFastHooks = runCli(config, stateStore, processRunner, portScanner, httpClient, projectFiles, emptyHooksStore, clock, "git", "hooks", "status");
-        Assert.assertEquals(1, failFastHooks.exitCode(), "git hooks status fails fast on missing source");
-        Assert.assertContains(failFastHooks.stderr(), "GIT_HOOK_SOURCE_NOT_FOUND", "reports GIT_HOOK_SOURCE_NOT_FOUND");
-    }
-
-    private static CliResult runCli(
-        InMemoryConfigSource config,
-        InMemoryStateStore stateStore,
-        FakeProcessRunner processRunner,
-        FakePortScanner portScanner,
-        FakeHttpClient httpClient,
-        FakeProjectFiles projectFiles,
-        FakeGitHooksStore gitHooksStore,
-        FakeClock clock,
-        String... args
-    ) {
         StringWriter outBuf = new StringWriter();
         StringWriter errBuf = new StringWriter();
         CliRuntime runtime = CliRuntime.builder(new PrintWriter(outBuf), new PrintWriter(errBuf))
-            .configSource(config)
+            .configSource(configSource)
             .stateStore(stateStore)
-            .processRunner(processRunner)
-            .portScanner(portScanner)
-            .httpClient(httpClient)
-            .projectFiles(projectFiles)
-            .gitHooksStore(gitHooksStore)
+            .processRunner(runner)
+            .portScanner(new FakePortScanner())
+            .httpClient(new FakeHttpClient())
+            .projectFiles(new FakeProjectFiles())
+            .gitRepositoryReader(gitReader)
             .clock(clock)
             .build();
-        int code = Procomp.run(args, runtime);
-        return new CliResult(code, outBuf.toString(), errBuf.toString());
-    }
 
-    private record CliResult(int exitCode, String stdout, String stderr) {}
+        // 1. procomp git status
+        int rcStatus = Procomp.run(new String[] {"--config", configPath.toString(), "git", "status"}, runtime);
+        Assert.assertEquals(0, rcStatus, "git status exits 0");
+        Assert.assertTrue(outBuf.toString().contains("orders"), "git status includes orders");
+        Assert.assertTrue(outBuf.toString().contains("main"), "git status includes branch main");
+
+        // 2. procomp status includes GIT column
+        outBuf.getBuffer().setLength(0);
+        int rcEstate = Procomp.run(new String[] {"--config", configPath.toString(), "status"}, runtime);
+        Assert.assertEquals(0, rcEstate, "procomp status exits 0");
+        Assert.assertTrue(outBuf.toString().contains("GIT"), "procomp status renders GIT column");
+        Assert.assertTrue(outBuf.toString().contains("main ↓1"), "procomp status renders compact git state");
+
+        // 3. procomp git branches orders --json
+        outBuf.getBuffer().setLength(0);
+        int rcBranches = Procomp.run(new String[] {"--config", configPath.toString(), "git", "branches", "orders", "--json"}, runtime);
+        Assert.assertEquals(0, rcBranches, "git branches exits 0");
+        Assert.assertTrue(outBuf.toString().contains("\"feature/a\""), "branches JSON contains feature/a");
+
+        // 4. Rejects authoring flags (-c on switch, pop on stash)
+        errBuf.getBuffer().setLength(0);
+        int rcCreate = Procomp.run(new String[] {"--config", configPath.toString(), "git", "switch", "-c", "new-branch"}, runtime);
+        Assert.assertEquals(2, rcCreate, "git switch -c rejected with exit 2");
+        Assert.assertTrue(errBuf.toString().contains("Unknown option '-c'"), "rejects -c");
+    }
 }

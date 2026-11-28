@@ -4,6 +4,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.project.Project;
 import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.ProjectLoader.LoadedProject;
 
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
@@ -21,12 +22,12 @@ public final class Procomp {
     private Procomp() {}
 
     private sealed interface CliCommand permits
-        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Gateway, CliCommand.Git, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
+        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Git, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
         record Routing(RoutingCli.Action action) implements CliCommand {}
         record ProcessCommand(ProcessCli.Action action) implements CliCommand {}
         record Build(BuildCli.Action action) implements CliCommand {}
-        record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Git(GitCli.Action action) implements CliCommand {}
+        record Gateway(GatewayCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
         record Ui(UiCli.Options options) implements CliCommand {}
@@ -51,7 +52,15 @@ public final class Procomp {
         }
         ParsedArgs parsed = ((Result.Ok<ParsedArgs, String>) parsedRes).value();
 
-        if (parsed.help() || parsed.commandArgs().isEmpty()) {
+        if (parsed.help()) {
+            printUsage(runtime.out());
+            return 0;
+        }
+        if (parsed.version()) {
+            runtime.out().println("procomp " + ProcompVersion.resolve());
+            return 0;
+        }
+        if (parsed.commandArgs().isEmpty()) {
             printUsage(runtime.out());
             return 0;
         }
@@ -71,15 +80,15 @@ public final class Procomp {
             return UiCli.execute(options, parsed.configOverride(), effectiveRuntime);
         }
 
-        Result<Project, DomainError> projRes = effectiveRuntime.projectLoader()
-            .flatMap(loader -> loader.load(parsed.configOverride()));
-        if (projRes instanceof Result.Err<Project, DomainError>(DomainError error)) {
+        Result<LoadedProject, DomainError> projRes = effectiveRuntime.projectLoader()
+            .flatMap(loader -> loader.loadWithPath(parsed.configOverride()));
+        if (projRes instanceof Result.Err<LoadedProject, DomainError>(DomainError error)) {
             effectiveRuntime.err().println("Error: " + error.format());
             return 1;
         }
-        Project project = ((Result.Ok<Project, DomainError>) projRes).value();
+        LoadedProject loaded = ((Result.Ok<LoadedProject, DomainError>) projRes).value();
 
-        return executeCommand(cliCommand, project, effectiveRuntime);
+        return executeCommand(cliCommand, loaded, effectiveRuntime);
     }
 
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
@@ -87,8 +96,8 @@ public final class Procomp {
             case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
             case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "build" -> BuildCli.parse(subArgs).map(CliCommand.Build::new);
-            case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "git" -> GitCli.parse(subArgs).map(CliCommand.Git::new);
+            case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
             case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
             case "ui" -> UiCli.parse(subArgs).map(CliCommand.Ui::new);
@@ -96,13 +105,14 @@ public final class Procomp {
         };
     }
 
-    private static int executeCommand(CliCommand cliCommand, Project project, CliRuntime runtime) {
+    private static int executeCommand(CliCommand cliCommand, LoadedProject loaded, CliRuntime runtime) {
+        Project project = loaded.project();
         return switch (cliCommand) {
-            case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, project, runtime);
+            case CliCommand.Routing(RoutingCli.Action action) -> RoutingCli.execute(action, loaded, runtime);
             case CliCommand.ProcessCommand(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
             case CliCommand.Build(BuildCli.Action action) -> BuildCli.execute(action, project, runtime);
-            case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
             case CliCommand.Git(GitCli.Action action) -> GitCli.execute(action, project, runtime);
+            case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
             case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
             case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);
             case CliCommand.Ui _ -> throw new IllegalStateException("Ui command must be dispatched via UiCli.execute");
@@ -111,6 +121,7 @@ public final class Procomp {
 
     private static Result<ParsedArgs, String> parseArgs(String[] args) {
         boolean help = false;
+        boolean version = false;
         boolean verbose = false;
         Optional<Path> configOverride = Optional.empty();
         List<String> commandArgs = new ArrayList<>();
@@ -120,6 +131,10 @@ public final class Procomp {
             String arg = args[i];
             if ("--help".equals(arg) || "-h".equals(arg)) {
                 help = true;
+                continue;
+            }
+            if (!seenCommand && ("--version".equals(arg) || "-V".equals(arg))) {
+                version = true;
                 continue;
             }
             if ("--verbose".equals(arg) || "-v".equals(arg)) {
@@ -157,7 +172,7 @@ public final class Procomp {
             commandArgs.add(arg);
         }
 
-        return Result.ok(new ParsedArgs(help, verbose, configOverride, commandArgs));
+        return Result.ok(new ParsedArgs(help, version, verbose, configOverride, commandArgs));
     }
 
     private static void printUsage(PrintWriter out) {
@@ -166,18 +181,21 @@ public final class Procomp {
 
             Global options:
               -h, --help          Show this help message
+              -V, --version       Show installed procomp version
               -v, --verbose       Emit detailed elapsed-time diagnostics to stderr (never prints secrets)
                   --config <path> Use explicit procomp.json path (overrides PROCOMP_CONFIG and walk-up)
 
             Commands:
               build [service...]                  Build Service(s) with their Builder (--force, --cancel, --timeout <sec>, --json)
+              git <status|branches|clone|fetch|pull|switch|stash|cancel|logs>
+                                                  Manage Repository checkouts (non-authoring; tracked Git Runs)
               start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
-              status [--json]                     Show estate Routing Table, Process ownership, Health, Build, and Gateway
-              inspect <service>                   Deep read-only Inspection of a Service's local Process & Build Run (--json)
-              logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build)
+              status [--json]                     Show estate Routing Table, Process ownership, Health, Build, Git, and Gateway
+              inspect <service>                   Deep read-only Inspection of a Service's Process, Build Run & Repository (--json)
+              logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build|--git)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
-              profile <list|use <name>>           List or apply named routing Profiles (--json on list)
+              profile <list|use|save|delete>      List, apply, save, or delete named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
               git hooks <status|install|upgrade> [repository...]
@@ -185,5 +203,11 @@ public final class Procomp {
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 
-    private record ParsedArgs(boolean help, boolean verbose, Optional<Path> configOverride, List<String> commandArgs) {}
+    private record ParsedArgs(
+        boolean help,
+        boolean version,
+        boolean verbose,
+        Optional<Path> configOverride,
+        List<String> commandArgs
+    ) {}
 }

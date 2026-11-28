@@ -16,6 +16,7 @@ public record Project(
     Path configPath,
     Path configDir,
     Optional<Path> repositoriesRoot,
+    RepositorySettings repositorySettings,
     Map<String, BuilderDefinition> builders,
     Map<String, RuntimeDefinition> runtimes,
     Optional<GatewayDefinition> gateway,
@@ -37,8 +38,27 @@ public record Project(
         List<RepositoryRef> repositories
     ) {
         this(
-            name, configPath, configDir, repositoriesRoot, builders, runtimes,
-            gateway, services, profiles, repositories, Optional.empty()
+            name, configPath, configDir, repositoriesRoot, RepositorySettings.DEFAULT,
+            builders, runtimes, gateway, services, profiles, repositories, Optional.empty()
+        );
+    }
+
+    public Project(
+        String name,
+        Path configPath,
+        Path configDir,
+        Optional<Path> repositoriesRoot,
+        RepositorySettings repositorySettings,
+        Map<String, BuilderDefinition> builders,
+        Map<String, RuntimeDefinition> runtimes,
+        Optional<GatewayDefinition> gateway,
+        Map<String, ServiceDefinition> services,
+        Map<String, ProfileDefinition> profiles,
+        List<RepositoryRef> repositories
+    ) {
+        this(
+            name, configPath, configDir, repositoriesRoot, repositorySettings,
+            builders, runtimes, gateway, services, profiles, repositories, Optional.empty()
         );
     }
 
@@ -49,6 +69,7 @@ public record Project(
         Objects.requireNonNull(configPath);
         Objects.requireNonNull(configDir);
         Objects.requireNonNull(repositoriesRoot);
+        Objects.requireNonNull(repositorySettings);
         builders = Collections.unmodifiableMap(new LinkedHashMap<>(builders));
         runtimes = Collections.unmodifiableMap(new LinkedHashMap<>(runtimes));
         Objects.requireNonNull(gateway);
@@ -56,6 +77,15 @@ public record Project(
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
         repositories = List.copyOf(repositories);
         Objects.requireNonNull(git);
+    }
+
+    public Optional<RepositoryRef> repository(String repositoryName) {
+        for (RepositoryRef ref : repositories) {
+            if (ref.name().equals(repositoryName)) {
+                return Optional.of(ref);
+            }
+        }
+        return Optional.empty();
     }
 
     public Optional<BuilderDefinition> builder(String builderName) {
