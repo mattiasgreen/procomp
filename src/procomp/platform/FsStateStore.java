@@ -166,6 +166,11 @@ public final class FsStateStore implements StateStore {
         root.put("artifactTimestamp", record.artifactTimestamp().map(t -> (JsonValue) Json.str(t.toString())).orElse(Json.nil()));
         root.put("stdoutLog", Json.str(record.stdoutLog().toString()));
         root.put("stderrLog", Json.str(record.stderrLog().toString()));
+        if (record instanceof ManagedProcessRecord.Stopping stopping) {
+            root.put("stopRequestedAt", Json.str(stopping.stopRequestedAt().toString()));
+        } else {
+            root.put("stopRequestedAt", Json.nil());
+        }
         ReentrantReadWriteLock lock = lockFor(file);
         lock.writeLock().lock();
         try {
@@ -736,7 +741,31 @@ public final class FsStateStore implements StateStore {
             } catch (InvalidPathException e) {
                 return Result.err(corruptState(file, "Invalid log path: " + e.getMessage()));
             }
-            return Result.ok(new ManagedProcessRecord(
+            Optional<Instant> stopRequestedAt = Optional.empty();
+            Optional<JsonValue> stopVal = obj.get("stopRequestedAt");
+            if (stopVal.isPresent() && !(stopVal.get() instanceof JsonValue.JsonNull)) {
+                if (!(stopVal.get() instanceof JsonValue.JsonString(String ts))) {
+                    return Result.err(corruptState(file, "'stopRequestedAt' must be an ISO-8601 string or null"));
+                }
+                try {
+                    stopRequestedAt = Optional.of(Instant.parse(ts));
+                } catch (DateTimeParseException e) {
+                    return Result.err(corruptState(file, "Invalid 'stopRequestedAt': " + ts));
+                }
+            }
+
+            if (stopRequestedAt.isPresent()) {
+                return Result.ok(new ManagedProcessRecord.Stopping(
+                    pidOpt.getAsLong(),
+                    okVal(startedRes),
+                    stopRequestedAt.get(),
+                    commandSummary,
+                    artifactTimestamp,
+                    stdoutPath,
+                    stderrPath
+                ));
+            }
+            return Result.ok(new ManagedProcessRecord.Running(
                 pidOpt.getAsLong(),
                 okVal(startedRes),
                 commandSummary,

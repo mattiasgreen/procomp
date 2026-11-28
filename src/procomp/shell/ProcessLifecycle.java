@@ -14,8 +14,10 @@ import procomp.core.process.ObservedProcess;
 import procomp.core.process.Ownership;
 import procomp.core.process.PortBinding;
 import procomp.core.process.ProcessPlanner;
+import procomp.core.process.ProcessPlanner.RestartAction;
 import procomp.core.process.ProcessPlanner.StartAction;
 import procomp.core.process.ProcessPlanner.StopAction;
+import procomp.core.process.ProcessState;
 import procomp.core.process.ProcessTarget;
 import procomp.core.project.GatewayDefinition;
 import procomp.core.project.ServiceDefinition;
@@ -106,6 +108,13 @@ final class ProcessLifecycle {
         return portScanner.findListeners(ports);
     }
 
+    Result<Optional<ManagedProcessRecord>, DomainError> readManagedServiceRecord(
+        String projectName,
+        String serviceName
+    ) {
+        return stateStore.readManagedProcess(projectName, ProcessKey.service(serviceName));
+    }
+
     Map<Long, Long> snapshotRssBytes() {
         Map<Long, Long> snapshot = processRunner.snapshotRssBytes();
         if (snapshot.isEmpty()) {
@@ -140,6 +149,21 @@ final class ProcessLifecycle {
         return discoverTarget(projectName, ProcessKey.service(service.name()), target, Optional.of(service), portSnapshot);
     }
 
+    Result<DiscoveryContext, DomainError> discoverService(
+        String projectName,
+        ServiceDefinition service,
+        Optional<ManagedProcessRecord> preReadManagedRecord,
+        Optional<Map<Integer, PortBinding>> portSnapshot
+    ) {
+        ProcessTarget target = targetForService(projectName, service);
+        return discoverTargetWithManagedRecord(
+            target,
+            Optional.of(service),
+            preReadManagedRecord,
+            portSnapshot
+        );
+    }
+
     Result<DiscoveryContext, DomainError> discoverGateway(String projectName, GatewayDefinition gateway) {
         return discoverGateway(projectName, Optional.of(gateway));
     }
@@ -171,7 +195,15 @@ final class ProcessLifecycle {
             return Result.err(err);
         }
         Optional<ManagedProcessRecord> managedRecord = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) recRes).value();
+        return discoverTargetWithManagedRecord(target, serviceOpt, managedRecord, portSnapshot);
+    }
 
+    private Result<DiscoveryContext, DomainError> discoverTargetWithManagedRecord(
+        ProcessTarget target,
+        Optional<ServiceDefinition> serviceOpt,
+        Optional<ManagedProcessRecord> managedRecord,
+        Optional<Map<Integer, PortBinding>> portSnapshot
+    ) {
         if (managedRecord.isPresent()) {
             ManagedProcessRecord rec = managedRecord.get();
             Result<Optional<ObservedProcess>, DomainError> snapRes = processRunner.inspect(rec.pid());
@@ -180,9 +212,12 @@ final class ProcessLifecycle {
             }
             Optional<ObservedProcess> observed = ((Result.Ok<Optional<ObservedProcess>, DomainError>) snapRes).value();
 
+            Instant now = clock.now();
+            boolean activelyStopping = DiscoveryEngine.isActivelyStopping(rec, now);
+
             HealthCheck healthCheck = HealthCheck.None.INSTANCE;
             Optional<Instant> latestArtifactTs = Optional.empty();
-            if (observed.filter(ObservedProcess::alive).isPresent()) {
+            if (observed.filter(ObservedProcess::alive).isPresent() && !activelyStopping) {
                 healthCheck = checkHealth(target, false);
                 if (serviceOpt.isPresent()) {
                     Result<Optional<ArtifactInfo>, DomainError> artRes = findLatestArtifact(serviceOpt.get());
@@ -200,7 +235,8 @@ final class ProcessLifecycle {
                 Optional.empty(),
                 observed,
                 healthCheck,
-                latestArtifactTs
+                latestArtifactTs,
+                now
             ));
             observer.diagnostic(
                 DiagnosticCategory.DISCOVERY,
@@ -254,7 +290,8 @@ final class ProcessLifecycle {
             portBinding,
             observed,
             healthCheck,
-            Optional.empty()
+            Optional.empty(),
+            clock.now()
         ));
         observer.diagnostic(
             DiagnosticCategory.DISCOVERY,
@@ -319,6 +356,8 @@ final class ProcessLifecycle {
         Map<String, DiscoveryContext> preDiscovery = new LinkedHashMap<>();
         List<InspectionReport> conflicts = new ArrayList<>();
         Optional<StartTargetSpec> firstConflictSpec = Optional.empty();
+        List<String> stoppingTargets = new ArrayList<>();
+        Optional<StartTargetSpec> firstStoppingSpec = Optional.empty();
         for (StartTargetSpec spec : targets) {
             Result<DiscoveryContext, DomainError> discRes = spec.discoverer().get();
             if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
@@ -326,16 +365,25 @@ final class ProcessLifecycle {
             }
             DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
             preDiscovery.put(spec.id(), ctx);
-            if (ProcessPlanner.planStart(ctx.discovery()) == StartAction.FAIL_CONFLICT) {
+            StartAction action = ProcessPlanner.planStart(ctx.discovery());
+            if (action == StartAction.FAIL_CONFLICT) {
                 if (firstConflictSpec.isEmpty()) {
                     firstConflictSpec = Optional.of(spec);
                 }
                 conflicts.add(inspect(ctx, spec.desiredRoute(), Optional.empty()));
+            } else if (action == StartAction.FAIL_STOPPING) {
+                if (firstStoppingSpec.isEmpty()) {
+                    firstStoppingSpec = Optional.of(spec);
+                }
+                stoppingTargets.add(spec.id());
             }
         }
 
         if (firstConflictSpec.isPresent()) {
             return Result.err(conflictError(conflicts, firstConflictSpec.get()));
+        }
+        if (firstStoppingSpec.isPresent()) {
+            return Result.err(stoppingError(stoppingTargets, firstStoppingSpec.get(), "start"));
         }
 
         // 2. Pre-spawn validation & launch plan preparation for all SPAWN targets before spawning any
@@ -405,6 +453,7 @@ final class ProcessLifecycle {
                     ));
                 }
                 case FAIL_CONFLICT -> throw new IllegalStateException("Conflicts should have failed fast earlier");
+                case FAIL_STOPPING -> throw new IllegalStateException("Stopping targets should have failed fast earlier");
             }
         }
 
@@ -447,6 +496,210 @@ final class ProcessLifecycle {
         List<TargetStartOutcome> outcomes = new ArrayList<>(targets.size());
         for (StartTargetSpec spec : targets) {
             outcomes.add(new TargetStartOutcome(
+                spec.id(),
+                Objects.requireNonNull(dispositions.get(spec.id())),
+                Objects.requireNonNull(finalDiscoveries.get(spec.id()))
+            ));
+        }
+        return Result.ok(outcomes);
+    }
+
+    /**
+     * Unified 4-phase restart orchestration:
+     * 1. Pre-restart Discovery + fail-fast Conflict & STOPPING checks across all targets.
+     * 2. Pre-stop launch-plan validation across all targets that will spawn before stopping anything.
+     * 3. Stop Managed targets (Running -> Stopping -> Absent), spare Unmanaged targets, and spawn new Processes.
+     * 4. Re-discover (when detached) or wait until HEALTHY.
+     */
+    Result<List<TargetRestartOutcome>, DomainError> restartTargets(
+        String projectName,
+        List<StartTargetSpec> targets,
+        boolean detach,
+        Duration timeout,
+        Duration gracefulTimeout
+    ) {
+        Objects.requireNonNull(projectName, "projectName must not be null");
+        Objects.requireNonNull(targets, "targets must not be null");
+        Objects.requireNonNull(timeout, "timeout must not be null");
+        Objects.requireNonNull(gracefulTimeout, "gracefulTimeout must not be null");
+
+        if (targets.isEmpty()) {
+            return Result.ok(List.of());
+        }
+
+        // 1. Read-only pre-restart Discovery + fail-fast Conflict and STOPPING checks
+        Map<String, DiscoveryContext> preDiscovery = new LinkedHashMap<>();
+        List<InspectionReport> conflicts = new ArrayList<>();
+        Optional<StartTargetSpec> firstConflictSpec = Optional.empty();
+        List<String> stoppingTargets = new ArrayList<>();
+        Optional<StartTargetSpec> firstStoppingSpec = Optional.empty();
+        for (StartTargetSpec spec : targets) {
+            Result<DiscoveryContext, DomainError> discRes = spec.discoverer().get();
+            if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
+            preDiscovery.put(spec.id(), ctx);
+            RestartAction action = ProcessPlanner.planRestart(ctx.discovery());
+            if (action == RestartAction.FAIL_CONFLICT) {
+                if (firstConflictSpec.isEmpty()) {
+                    firstConflictSpec = Optional.of(spec);
+                }
+                conflicts.add(inspect(ctx, spec.desiredRoute(), Optional.empty()));
+            } else if (action == RestartAction.FAIL_STOPPING) {
+                if (firstStoppingSpec.isEmpty()) {
+                    firstStoppingSpec = Optional.of(spec);
+                }
+                stoppingTargets.add(spec.id());
+            }
+        }
+
+        if (firstConflictSpec.isPresent()) {
+            return Result.err(conflictError(conflicts, firstConflictSpec.get()));
+        }
+        if (firstStoppingSpec.isPresent()) {
+            return Result.err(stoppingError(stoppingTargets, firstStoppingSpec.get(), "restart"));
+        }
+
+        // 2. Pre-stop launch-plan validation for every target that will be spawned
+        Map<String, LaunchPlan> launchPlans = new LinkedHashMap<>();
+        for (StartTargetSpec spec : targets) {
+            DiscoveryContext ctx = Objects.requireNonNull(preDiscovery.get(spec.id()));
+            RestartAction action = ProcessPlanner.planRestart(ctx.discovery());
+            if (action == RestartAction.SPAWN
+                || action == RestartAction.CLEAN_AND_SPAWN
+                || action == RestartAction.STOP_AND_SPAWN) {
+                Result<LaunchPlan, DomainError> planRes = spec.launchPlanner().get();
+                if (planRes instanceof Result.Err<LaunchPlan, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+                launchPlans.put(spec.id(), ((Result.Ok<LaunchPlan, DomainError>) planRes).value());
+            }
+        }
+
+        // 3. Execute stop/clean/spawn/spare decisions
+        Map<String, TargetRestartDisposition> dispositions = new LinkedHashMap<>();
+        List<StartTargetSpec> pendingHealth = new ArrayList<>();
+        for (StartTargetSpec spec : targets) {
+            DiscoveryContext ctx = Objects.requireNonNull(preDiscovery.get(spec.id()));
+            RestartAction action = ProcessPlanner.planRestart(ctx.discovery());
+            switch (action) {
+                case SPAWN -> {
+                    LaunchPlan plan = Objects.requireNonNull(launchPlans.get(spec.id()));
+                    Result<SpawnedProcess, DomainError> spawnRes = spawnAndRecord(
+                        projectName, spec.key(), plan.spawnRequest(), plan.artifactTimestamp()
+                    );
+                    if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
+                        return Result.err(err);
+                    }
+                    SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnRes).value();
+                    dispositions.put(spec.id(), TargetRestartDisposition.SPAWNED);
+                    pendingHealth.add(spec);
+                    observer.onEvent(new ProgressEvent.StatusMessage(
+                        spec.id(),
+                        "Spawned Managed " + spec.processNoun() + " (PID " + spawned.pid() + ")"
+                    ));
+                }
+                case CLEAN_AND_SPAWN -> {
+                    Result<Unit, DomainError> delRes = stateStore.deleteManagedProcess(projectName, spec.key());
+                    if (delRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                        return Result.err(err);
+                    }
+                    LaunchPlan plan = Objects.requireNonNull(launchPlans.get(spec.id()));
+                    Result<SpawnedProcess, DomainError> spawnRes = spawnAndRecord(
+                        projectName, spec.key(), plan.spawnRequest(), plan.artifactTimestamp()
+                    );
+                    if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
+                        return Result.err(err);
+                    }
+                    SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnRes).value();
+                    dispositions.put(spec.id(), TargetRestartDisposition.SPAWNED);
+                    pendingHealth.add(spec);
+                    observer.onEvent(new ProgressEvent.StatusMessage(
+                        spec.id(),
+                        "Spawned Managed " + spec.processNoun() + " (PID " + spawned.pid() + ")"
+                    ));
+                }
+                case STOP_AND_SPAWN -> {
+                    ProcessState.Managed managed = (ProcessState.Managed) ctx.discovery().state();
+                    long oldPid = managed.managedPid();
+                    Result<Unit, DomainError> stopRes = stopManagedProcess(
+                        projectName, spec.key(), ctx.managedRecord(), oldPid, true, gracefulTimeout
+                    );
+                    if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                        return Result.err(err);
+                    }
+                    observer.onEvent(new ProgressEvent.StatusMessage(
+                        spec.id(),
+                        "Stopped Managed " + spec.processNoun() + " (PID " + oldPid + ")"
+                    ));
+                    LaunchPlan plan = Objects.requireNonNull(launchPlans.get(spec.id()));
+                    Result<SpawnedProcess, DomainError> spawnRes = spawnAndRecord(
+                        projectName, spec.key(), plan.spawnRequest(), plan.artifactTimestamp()
+                    );
+                    if (spawnRes instanceof Result.Err<SpawnedProcess, DomainError>(DomainError err)) {
+                        return Result.err(err);
+                    }
+                    SpawnedProcess spawned = ((Result.Ok<SpawnedProcess, DomainError>) spawnRes).value();
+                    dispositions.put(spec.id(), TargetRestartDisposition.RESTARTED);
+                    pendingHealth.add(spec);
+                    observer.onEvent(new ProgressEvent.StatusMessage(
+                        spec.id(),
+                        "Restarted Managed " + spec.processNoun() + " (PID " + spawned.pid() + ")"
+                    ));
+                }
+                case SPARE_UNMANAGED -> {
+                    dispositions.put(spec.id(), TargetRestartDisposition.SPARED_UNMANAGED);
+                    observer.onEvent(new ProgressEvent.StatusMessage(
+                        spec.id(),
+                        "Spared Unmanaged " + spec.processNoun()
+                            + ctx.discovery().pid().map(p -> " (PID " + p + ")").orElse("")
+                    ));
+                }
+                case FAIL_CONFLICT -> throw new IllegalStateException("Conflicts should have failed fast earlier");
+                case FAIL_STOPPING -> throw new IllegalStateException("Stopping targets should have failed fast earlier");
+            }
+        }
+
+        // 4. Wait for HEALTHY unless detached
+        Map<String, DiscoveryResult> finalDiscoveries = new LinkedHashMap<>();
+        if (detach) {
+            for (StartTargetSpec spec : targets) {
+                Result<DiscoveryContext, DomainError> discRes = spec.discoverer().get();
+                if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+                finalDiscoveries.put(spec.id(), ((Result.Ok<DiscoveryContext, DomainError>) discRes).value().discovery());
+            }
+        } else {
+            if (!pendingHealth.isEmpty()) {
+                List<HealthWaitTarget> waitTargets = new ArrayList<>(pendingHealth.size());
+                for (StartTargetSpec spec : pendingHealth) {
+                    waitTargets.add(new HealthWaitTarget(
+                        spec.id(),
+                        spec.detailKey(),
+                        spec.displayLabel(),
+                        spec.healthyMessage(),
+                        spec.discoverer()
+                    ));
+                }
+                Result<Map<String, DiscoveryResult>, DomainError> waitRes =
+                    waitUntilHealthy(timeout, waitTargets);
+                if (waitRes instanceof Result.Err<Map<String, DiscoveryResult>, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+                finalDiscoveries.putAll(((Result.Ok<Map<String, DiscoveryResult>, DomainError>) waitRes).value());
+            }
+            for (StartTargetSpec spec : targets) {
+                if (!finalDiscoveries.containsKey(spec.id())) {
+                    finalDiscoveries.put(spec.id(), Objects.requireNonNull(preDiscovery.get(spec.id())).discovery());
+                }
+            }
+        }
+
+        List<TargetRestartOutcome> outcomes = new ArrayList<>(targets.size());
+        for (StartTargetSpec spec : targets) {
+            outcomes.add(new TargetRestartOutcome(
                 spec.id(),
                 Objects.requireNonNull(dispositions.get(spec.id())),
                 Objects.requireNonNull(finalDiscoveries.get(spec.id()))
@@ -503,16 +756,18 @@ final class ProcessLifecycle {
         if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
             return Result.err(err);
         }
-        DiscoveryResult disc = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value().discovery();
+        DiscoveryContext ctx = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value();
+        DiscoveryResult disc = ctx.discovery();
         StopAction action = ProcessPlanner.planStop(disc, killConflict);
         boolean isGateway = key instanceof ProcessKey.Gateway;
 
         return switch (action) {
             case KILL_MANAGED -> {
-                long pid = disc.pid().orElseThrow();
-                boolean alive = disc.health() != HealthState.CRASHED;
+                ProcessState.Managed managed = (ProcessState.Managed) disc.state();
+                long pid = managed.managedPid();
+                boolean alive = !(managed instanceof ProcessState.Managed.Crashed);
                 Result<Unit, DomainError> stopRes = stopManagedProcess(
-                    projectName, key, pid, alive, gracefulTimeout
+                    projectName, key, ctx.managedRecord(), pid, alive, gracefulTimeout
                 );
                 if (stopRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
                     yield Result.err(err);
@@ -579,8 +834,15 @@ final class ProcessLifecycle {
                 ));
                 yield Result.ok(new TargetStopOutcome(TargetStopDisposition.KILLED_CONFLICT, disc));
             }
-            case ALREADY_STOPPED ->
-                Result.ok(new TargetStopOutcome(TargetStopDisposition.ALREADY_STOPPED, disc));
+            case ALREADY_STOPPED -> {
+                if (ctx.managedRecord().isPresent()) {
+                    Result<Unit, DomainError> cleanRes = stateStore.deleteManagedProcess(projectName, key);
+                    if (cleanRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                        yield Result.err(err);
+                    }
+                }
+                yield Result.ok(new TargetStopOutcome(TargetStopDisposition.ALREADY_STOPPED, disc));
+            }
         };
     }
 
@@ -636,7 +898,7 @@ final class ProcessLifecycle {
             DiagnosticCategory.PROCESS,
             label + ": spawned PID " + spawned.pid()
         );
-        ManagedProcessRecord record = new ManagedProcessRecord(
+        ManagedProcessRecord record = new ManagedProcessRecord.Running(
             spawned.pid(),
             spawned.startedAt(),
             spawnRequest.command(),
@@ -731,11 +993,19 @@ final class ProcessLifecycle {
     private Result<Unit, DomainError> stopManagedProcess(
         String projectName,
         ProcessKey key,
+        Optional<ManagedProcessRecord> managedRecord,
         long pid,
         boolean stopOsTree,
         Duration gracefulTimeout
     ) {
         if (stopOsTree) {
+            if (managedRecord.isPresent()) {
+                ManagedProcessRecord.Stopping stoppingRecord = managedRecord.get().requestStop(clock.now());
+                Result<Unit, DomainError> markRes = stateStore.writeManagedProcess(projectName, key, stoppingRecord);
+                if (markRes instanceof Result.Err<Unit, DomainError>(DomainError err)) {
+                    return Result.err(err);
+                }
+            }
             String label = keyLabel(key);
             observer.diagnostic(
                 DiagnosticCategory.PROCESS,
@@ -747,6 +1017,9 @@ final class ProcessLifecycle {
                     DiagnosticCategory.PROCESS,
                     label + ": failed stopping PID " + pid + " (" + err.message() + ")"
                 );
+                if (managedRecord.isPresent()) {
+                    stateStore.writeManagedProcess(projectName, key, managedRecord.get().abortStop());
+                }
                 return stopRes;
             }
             observer.diagnostic(
@@ -819,6 +1092,18 @@ final class ProcessLifecycle {
         return DomainError.of("PORT_CONFLICT", msg.toString(), details);
     }
 
+    private static DomainError stoppingError(List<String> stoppingIds, StartTargetSpec firstSpec, String operation) {
+        String list = String.join(", ", stoppingIds);
+        String subject = stoppingIds.size() == 1
+            ? firstSpec.displayLabel()
+            : "service(s): " + list;
+        return DomainError.of(
+            "PROCESS_STOPPING",
+            "Cannot " + operation + " " + subject + ": process is currently STOPPING",
+            Map.of(firstSpec.detailKey(), list)
+        );
+    }
+
     private static Map<String, String> conflictDetails(InspectionReport first, String targetKeyName) {
         Map<String, String> details = new LinkedHashMap<>();
         details.put(targetKeyName, first.service());
@@ -867,6 +1152,18 @@ final class ProcessLifecycle {
     record TargetStartOutcome(
         String id,
         TargetStartDisposition disposition,
+        DiscoveryResult discovery
+    ) {}
+
+    enum TargetRestartDisposition {
+        RESTARTED,
+        SPAWNED,
+        SPARED_UNMANAGED
+    }
+
+    record TargetRestartOutcome(
+        String id,
+        TargetRestartDisposition disposition,
         DiscoveryResult discovery
     ) {}
 

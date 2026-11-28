@@ -15,6 +15,7 @@ import procomp.core.routing.RoutingTable;
 import procomp.shell.ProcessLifecycle.DiscoveryContext;
 import procomp.shell.ProcessLifecycle.LaunchPlan;
 import procomp.shell.ProcessLifecycle.StartTargetSpec;
+import procomp.shell.ProcessLifecycle.TargetRestartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStopOutcome;
 import procomp.shell.ports.Clock;
@@ -130,6 +131,51 @@ public final class GatewayShell {
             case REUSED_UNMANAGED -> GatewayStartDisposition.REUSED_UNMANAGED;
         };
         return Result.ok(new GatewayStartResult(disposition, outcome.discovery(), gateway, request.detach()));
+    }
+
+    /**
+     * Restarts a Managed Gateway Process (or starts it when Stopped/CRASHED), spares an Unmanaged Gateway,
+     * and fails fast on Conflict or STOPPING. Validates launch plan before stopping. Never mutates the Routing Table.
+     */
+    public Result<GatewayRestartResult, DomainError> restart(Project project, GatewayRestartRequest request) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+
+        Result<GatewayDefinition, DomainError> gwRes = requireGateway(project);
+        if (gwRes instanceof Result.Err<GatewayDefinition, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
+
+        StartTargetSpec spec = new StartTargetSpec(
+            "gateway",
+            ProcessKey.gateway(),
+            "target",
+            "Gateway",
+            "Gateway",
+            "Gateway is HEALTHY",
+            Optional.empty(),
+            () -> lifecycle.discoverGateway(project.name(), gateway),
+            () -> prepareGatewayLaunchPlan(project, gateway)
+        );
+
+        Result<List<TargetRestartOutcome>, DomainError> restartRes = lifecycle.restartTargets(
+            project.name(),
+            List.of(spec),
+            request.detach(),
+            request.timeout(),
+            request.gracefulTimeout()
+        );
+        if (restartRes instanceof Result.Err<List<TargetRestartOutcome>, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        TargetRestartOutcome outcome = ((Result.Ok<List<TargetRestartOutcome>, DomainError>) restartRes).value().get(0);
+        GatewayRestartDisposition disposition = switch (outcome.disposition()) {
+            case RESTARTED -> GatewayRestartDisposition.RESTARTED;
+            case SPAWNED -> GatewayRestartDisposition.SPAWNED;
+            case SPARED_UNMANAGED -> GatewayRestartDisposition.SPARED_UNMANAGED;
+        };
+        return Result.ok(new GatewayRestartResult(disposition, outcome.discovery(), gateway, request.detach()));
     }
 
     /**
@@ -588,6 +634,45 @@ public final class GatewayShell {
         public GatewayStopResult {
             Objects.requireNonNull(disposition, "disposition must not be null");
             Objects.requireNonNull(pid, "pid must not be null");
+        }
+    }
+
+    public record GatewayRestartRequest(boolean detach, Duration timeout, Duration gracefulTimeout) {
+        public static final Duration DEFAULT_TIMEOUT = GatewayStartRequest.DEFAULT_TIMEOUT;
+        public static final Duration DEFAULT_GRACEFUL_TIMEOUT = GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT;
+
+        public GatewayRestartRequest(boolean detach, Duration timeout) {
+            this(detach, timeout, DEFAULT_GRACEFUL_TIMEOUT);
+        }
+
+        public GatewayRestartRequest {
+            Objects.requireNonNull(timeout, "timeout must not be null");
+            Objects.requireNonNull(gracefulTimeout, "gracefulTimeout must not be null");
+            if (timeout.isNegative()) {
+                throw new IllegalArgumentException("timeout must not be negative");
+            }
+            if (gracefulTimeout.isNegative()) {
+                throw new IllegalArgumentException("gracefulTimeout must not be negative");
+            }
+        }
+    }
+
+    public enum GatewayRestartDisposition {
+        RESTARTED,
+        SPAWNED,
+        SPARED_UNMANAGED
+    }
+
+    public record GatewayRestartResult(
+        GatewayRestartDisposition disposition,
+        DiscoveryResult discovery,
+        GatewayDefinition gateway,
+        boolean detached
+    ) {
+        public GatewayRestartResult {
+            Objects.requireNonNull(disposition, "disposition must not be null");
+            Objects.requireNonNull(discovery, "discovery must not be null");
+            Objects.requireNonNull(gateway, "gateway must not be null");
         }
     }
 

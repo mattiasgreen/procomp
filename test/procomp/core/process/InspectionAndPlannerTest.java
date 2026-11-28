@@ -27,7 +27,7 @@ public final class InspectionAndPlannerTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedProcessRecord rec = new ManagedProcessRecord(
+        ManagedProcessRecord rec = new ManagedProcessRecord.Running(
             4201L,
             T0,
             List.of("java", "-Xmx512m", "-jar", "orders.jar"),
@@ -51,7 +51,8 @@ public final class InspectionAndPlannerTest {
             Optional.empty(),
             Optional.of(proc),
             new HealthCheck.HttpResult(200, "OK"),
-            Optional.of(T1)
+            Optional.of(T1),
+            T1
         ));
 
         InspectionReport report = DiscoveryEngine.inspect(
@@ -91,7 +92,8 @@ public final class InspectionAndPlannerTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedProcessRecord rec = new ManagedProcessRecord(4201L, T0, List.of("java"), Optional.empty(), target.stdoutLog(), target.stderrLog());
+        ManagedProcessRecord rec = new ManagedProcessRecord.Running(4201L, T0, List.of("java"), Optional.empty(), target.stdoutLog(), target.stderrLog());
+        ManagedProcessRecord stoppingRec = rec.requestStop(T1);
         ObservedProcess aliveProc = new ObservedProcess(4201L, true, Optional.of(T0), Optional.of("java"), List.of(), List.of(), Optional.empty(), Optional.of("java"));
         ObservedProcess ideProc = new ObservedProcess(
             5501L,
@@ -106,27 +108,30 @@ public final class InspectionAndPlannerTest {
         PortBinding binding = new PortBinding(9001, Optional.of(5501L), "127.0.0.1:9001");
 
         DiscoveryResult noneStopped = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty()
+            target, Optional.empty(), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty(), T1
         ));
         DiscoveryResult managedHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         DiscoveryResult managedStarting = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(503, "Unavailable"), Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpResult(503, "Unavailable"), Optional.empty(), T1
+        ));
+        DiscoveryResult managedStopping = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.of(stoppingRec), Optional.empty(), Optional.of(aliveProc), new HealthCheck.HttpFailure("refused"), Optional.empty(), T1.plusSeconds(3)
         ));
         DiscoveryResult managedCrashed = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty(), T1
         ));
         DiscoveryResult unmanagedHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         DiscoveryResult unmanagedStarting = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpFailure("refused"), Optional.empty()
+            target, Optional.empty(), Optional.of(binding), Optional.of(ideProc), new HealthCheck.HttpFailure("refused"), Optional.empty(), T1
         ));
         DiscoveryResult conflict = DiscoveryEngine.discover(new DiscoveryInput(
             target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(7777L), "127.0.0.1:9001")),
             Optional.of(new ObservedProcess(7777L, true, Optional.of(T0), Optional.of("python"), List.of(), List.of(), Optional.empty(), Optional.of("python"))),
-            new HealthCheck.HttpFailure("refused"), Optional.empty()
+            new HealthCheck.HttpFailure("refused"), Optional.empty(), T1
         ));
 
         Assert.assertEquals(ProcessPlanner.StartAction.SPAWN, ProcessPlanner.planStart(noneStopped), "NONE -> SPAWN");
@@ -135,15 +140,26 @@ public final class InspectionAndPlannerTest {
         Assert.assertEquals(ProcessPlanner.StartAction.REUSE_HEALTHY, ProcessPlanner.planStart(unmanagedHealthy), "UNMANAGED HEALTHY -> REUSE_HEALTHY");
         Assert.assertEquals(ProcessPlanner.StartAction.REUSE_WAIT, ProcessPlanner.planStart(managedStarting), "MANAGED STARTING -> REUSE_WAIT");
         Assert.assertEquals(ProcessPlanner.StartAction.REUSE_WAIT, ProcessPlanner.planStart(unmanagedStarting), "UNMANAGED STARTING -> REUSE_WAIT");
+        Assert.assertEquals(ProcessPlanner.StartAction.FAIL_STOPPING, ProcessPlanner.planStart(managedStopping), "MANAGED STOPPING -> FAIL_STOPPING");
         Assert.assertEquals(ProcessPlanner.StartAction.FAIL_CONFLICT, ProcessPlanner.planStart(conflict), "CONFLICT -> FAIL_CONFLICT");
 
         Assert.assertEquals(ProcessPlanner.StopAction.KILL_MANAGED, ProcessPlanner.planStop(managedHealthy, false), "MANAGED -> KILL_MANAGED");
+        Assert.assertEquals(ProcessPlanner.StopAction.KILL_MANAGED, ProcessPlanner.planStop(managedStopping, false), "MANAGED STOPPING -> KILL_MANAGED");
         Assert.assertEquals(ProcessPlanner.StopAction.KILL_MANAGED, ProcessPlanner.planStop(managedCrashed, false), "CRASHED -> KILL_MANAGED (cleanup)");
         Assert.assertEquals(ProcessPlanner.StopAction.SPARE_UNMANAGED, ProcessPlanner.planStop(unmanagedHealthy, false), "UNMANAGED -> SPARE_UNMANAGED");
         Assert.assertEquals(ProcessPlanner.StopAction.SPARE_UNMANAGED, ProcessPlanner.planStop(unmanagedHealthy, true), "UNMANAGED spared even with killConflict flag");
         Assert.assertEquals(ProcessPlanner.StopAction.SPARE_CONFLICT, ProcessPlanner.planStop(conflict, false), "CONFLICT without consent -> SPARE_CONFLICT");
         Assert.assertEquals(ProcessPlanner.StopAction.KILL_CONFLICT_WITH_CONSENT, ProcessPlanner.planStop(conflict, true), "CONFLICT with consent -> KILL_CONFLICT_WITH_CONSENT");
         Assert.assertEquals(ProcessPlanner.StopAction.ALREADY_STOPPED, ProcessPlanner.planStop(noneStopped, false), "NONE -> ALREADY_STOPPED");
+
+        Assert.assertEquals(ProcessPlanner.RestartAction.SPAWN, ProcessPlanner.planRestart(noneStopped), "NONE -> SPAWN");
+        Assert.assertEquals(ProcessPlanner.RestartAction.CLEAN_AND_SPAWN, ProcessPlanner.planRestart(managedCrashed), "CRASHED -> CLEAN_AND_SPAWN");
+        Assert.assertEquals(ProcessPlanner.RestartAction.STOP_AND_SPAWN, ProcessPlanner.planRestart(managedHealthy), "MANAGED HEALTHY -> STOP_AND_SPAWN");
+        Assert.assertEquals(ProcessPlanner.RestartAction.STOP_AND_SPAWN, ProcessPlanner.planRestart(managedStarting), "MANAGED STARTING -> STOP_AND_SPAWN");
+        Assert.assertEquals(ProcessPlanner.RestartAction.FAIL_STOPPING, ProcessPlanner.planRestart(managedStopping), "MANAGED STOPPING -> FAIL_STOPPING");
+        Assert.assertEquals(ProcessPlanner.RestartAction.SPARE_UNMANAGED, ProcessPlanner.planRestart(unmanagedHealthy), "UNMANAGED HEALTHY -> SPARE_UNMANAGED");
+        Assert.assertEquals(ProcessPlanner.RestartAction.SPARE_UNMANAGED, ProcessPlanner.planRestart(unmanagedStarting), "UNMANAGED STARTING -> SPARE_UNMANAGED");
+        Assert.assertEquals(ProcessPlanner.RestartAction.FAIL_CONFLICT, ProcessPlanner.planRestart(conflict), "CONFLICT -> FAIL_CONFLICT");
     }
 
     public static void testResolvesDeferredArtifactTemplateAtLaunchTimeAndFailsFastWhenMissing() {
@@ -194,7 +210,7 @@ public final class InspectionAndPlannerTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedProcessRecord rec = new ManagedProcessRecord(
+        ManagedProcessRecord rec = new ManagedProcessRecord.Running(
             4201L, T0, List.of("java", "-Xmx256m", "-jar", "orders.jar"), Optional.of(T0), target.stdoutLog(), target.stderrLog()
         );
 
@@ -205,7 +221,7 @@ public final class InspectionAndPlannerTest {
             Optional.of("C:\\Program Files\\Java\\jdk-25\\bin\\java.exe")
         );
         DiscoveryResult discWithoutNmt = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.of(jvmWithoutNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.of(jvmWithoutNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         InspectionReport reportWithoutNmt = DiscoveryEngine.inspect(
             target, discWithoutNmt, Optional.of(rec), Optional.of("LOCAL"), Optional.empty(), T1
@@ -225,7 +241,7 @@ public final class InspectionAndPlannerTest {
         );
         DiscoveryResult discWithNmt = DiscoveryEngine.discover(new DiscoveryInput(
             target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(4202L), "127.0.0.1:9001")),
-            Optional.of(jvmWithNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            Optional.of(jvmWithNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         InspectionReport reportWithNmt = DiscoveryEngine.inspect(
             target, discWithNmt, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
@@ -241,7 +257,7 @@ public final class InspectionAndPlannerTest {
         );
         DiscoveryResult discNmtOff = DiscoveryEngine.discover(new DiscoveryInput(
             target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(4203L), "127.0.0.1:9001")),
-            Optional.of(jvmNmtOff), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            Optional.of(jvmNmtOff), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         InspectionReport reportNmtOff = DiscoveryEngine.inspect(
             target, discNmtOff, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
@@ -255,7 +271,7 @@ public final class InspectionAndPlannerTest {
         );
         DiscoveryResult discNode = DiscoveryEngine.discover(new DiscoveryInput(
             target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(5500L), "127.0.0.1:9001")),
-            Optional.of(nodeProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty()
+            Optional.of(nodeProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
         ));
         InspectionReport reportNode = DiscoveryEngine.inspect(
             target, discNode, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
@@ -264,7 +280,7 @@ public final class InspectionAndPlannerTest {
 
         // 5. Stopped or crashed process gets empty list
         DiscoveryResult discCrashed = DiscoveryEngine.discover(new DiscoveryInput(
-            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty()
+            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty(), T1
         ));
         InspectionReport reportCrashed = DiscoveryEngine.inspect(
             target, discCrashed, Optional.of(rec), Optional.of("LOCAL"), Optional.empty(), T1

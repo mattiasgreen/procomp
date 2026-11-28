@@ -94,7 +94,7 @@ public final class Procomp {
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
         return switch (command) {
             case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
-            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
+            case "start", "stop", "restart", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "build" -> BuildCli.parse(subArgs).map(CliCommand.Build::new);
             case "git" -> GitCli.parse(subArgs).map(CliCommand.Git::new);
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
@@ -191,12 +191,13 @@ public final class Procomp {
                                                   Manage Repository checkouts (non-authoring; tracked Git Runs)
               start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
+              restart [service...]                Restart Managed Service Process(es) (-d|--detach, --timeout <sec>)
               status [--json]                     Show estate Routing Table, Process ownership, Health, Build, Git, and Gateway
               inspect <service>                   Deep read-only Inspection of a Service's Process, Build Run & Repository (--json)
               logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build|--git)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
               profile <list|use|save|delete>      List, apply, save, or delete named routing Profiles (--json on list)
-              gateway <start|stop|status|reconcile|logs>
+              gateway <start|stop|restart|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
               git hooks <status|install|upgrade> [repository...]
                                                   Check or install/upgrade mandatory Git hooks across Repositories (--json)

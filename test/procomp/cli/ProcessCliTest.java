@@ -40,7 +40,7 @@ public final class ProcessCliTest {
 
         Path outLog = stateStore.logPath("acme", ProcessKey.service("orders"), false);
         Path errLog = stateStore.logPath("acme", ProcessKey.service("orders"), true);
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             3001L,
             Instant.parse("2026-11-20T11:50:00Z"),
             List.of("java", "-jar", "orders/app.jar"),
@@ -230,6 +230,37 @@ public final class ProcessCliTest {
         // Unknown stop flag exits 2
         CliResult badStopFlag = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "stop", "--bogus");
         Assert.assertEquals(2, badStopFlag.exitCode(), "unknown stop flag exits 2");
+    }
+
+    public static void testRestartCliHandlesBareExplicitDetachAndSyntaxValidation() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = sampleConfigSource(root, "secret-token-xyz");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient()
+            .stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "OK");
+        var projectFiles = new FakeProjectFiles()
+            .withDirectory(root.resolve("orders"))
+            .withDirectory(root.resolve("billing"))
+            .withFile(root.resolve("orders/app.jar"), Instant.parse("2026-11-20T11:00:00Z"));
+
+        // 1. Bare restart when nothing is running -> exits 0 with helpful message
+        CliResult bareEmpty = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "restart");
+        Assert.assertEquals(0, bareEmpty.exitCode(), "bare restart with no managed services exits 0");
+        Assert.assertContains(bareEmpty.stdout(), "No running Managed Services", "mentions nothing to restart");
+
+        // 2. Start orders, then bare restart restarts it
+        Assert.assertEquals(0, runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "start", "orders", "-d").exitCode(), "start orders -d");
+        CliResult restartBare = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "restart", "-d");
+        Assert.assertEquals(0, restartBare.exitCode(), "bare restart -d exits 0; stderr=" + restartBare.stderr());
+        Assert.assertContains(restartBare.stdout(), "restarted", "stdout mentions restarted");
+        Assert.assertContains(restartBare.stdout(), "orders", "stdout mentions orders");
+
+        // 3. Unknown restart flag exits 2
+        CliResult badRestartFlag = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "restart", "--bogus");
+        Assert.assertEquals(2, badRestartFlag.exitCode(), "unknown restart flag exits 2");
     }
 
     static CliResult runCli(

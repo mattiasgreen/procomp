@@ -206,6 +206,13 @@ export function stopGateway() {
   });
 }
 
+export function restartGateway({ detach = false, timeoutSeconds = 30 } = {}) {
+  return requestJson('/api/gateway/restart', {
+    method: 'POST',
+    body: JSON.stringify({ detach, timeoutSeconds }),
+  });
+}
+
 export function reconcileGateway() {
   return requestJson('/api/gateway/reconcile', {
     method: 'POST',
@@ -259,6 +266,14 @@ export function fetchGatewayLogs({ lines = 200, err = false, beforeOffset = null
  * }} handlers
  */
 export function streamStartServices(services = [], handlers = {}) {
+  return streamLifecycleEndpoint('/api/services/start/stream', 'Start', services, handlers);
+}
+
+export function streamRestartServices(services = [], handlers = {}) {
+  return streamLifecycleEndpoint('/api/services/restart/stream', 'Restart', services, handlers);
+}
+
+function streamLifecycleEndpoint(endpoint, label, services = [], handlers = {}) {
   const timeoutSeconds = handlers.timeoutSeconds ?? 30;
   const controller = new AbortController();
   let closed = false;
@@ -302,7 +317,7 @@ export function streamStartServices(services = [], handlers = {}) {
               0,
               {
                 code: 'STREAM_DISCONNECTED',
-                message: 'Start progress stream disconnected unexpectedly.',
+                message: `${label} progress stream disconnected unexpectedly.`,
                 details: {},
               },
               null,
@@ -316,7 +331,7 @@ export function streamStartServices(services = [], handlers = {}) {
   (async () => {
     let response;
     try {
-      response = await fetch('/api/services/start/stream', {
+      response = await fetch(endpoint, {
         method: 'POST',
         cache: 'no-store',
         signal: controller.signal,

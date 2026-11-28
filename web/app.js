@@ -16,11 +16,13 @@ import {
   gitSwitch,
   installGitHooks,
   reconcileGateway,
+  restartGateway,
   saveProfile,
   startGateway,
   stopGateway,
   stopServices,
   streamGatewayLogs,
+  streamRestartServices,
   streamServiceLogs,
   streamStartServices,
   updateRoutes,
@@ -156,6 +158,7 @@ const dom = {
   chkGatewayAutoReconcile: document.getElementById('chk-gateway-auto-reconcile'),
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
   btnGatewayStart: document.getElementById('btn-gateway-start'),
+  btnGatewayRestart: document.getElementById('btn-gateway-restart'),
   btnGatewayStop: document.getElementById('btn-gateway-stop'),
   btnGatewayLogs: document.getElementById('btn-gateway-logs'),
   gatewayDriftAlert: document.getElementById('gateway-drift-alert'),
@@ -167,6 +170,7 @@ const dom = {
   btnGitFetchLocal: document.getElementById('btn-git-fetch-local'),
   btnGitPullLocal: document.getElementById('btn-git-pull-local'),
   btnStartLocal: document.getElementById('btn-start-local'),
+  btnRestartManaged: document.getElementById('btn-restart-managed'),
   btnStopManaged: document.getElementById('btn-stop-managed'),
 
   servicesSummary: document.getElementById('services-summary'),
@@ -323,6 +327,8 @@ function healthBadgeClass(health) {
       return 'badge-healthy';
     case 'STARTING':
       return 'badge-starting';
+    case 'STOPPING':
+      return 'badge-stopping';
     case 'CRASHED':
       return 'badge-crashed';
     case 'STOPPED':
@@ -733,12 +739,28 @@ function renderGateway() {
   if (gw.owner === 'UNMANAGED') {
     dom.btnGatewayStop.disabled = true;
     dom.btnGatewayStop.title = 'Unmanaged Gateway Process — never killed by procomp';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Unmanaged Gateway Process — never killed by procomp';
+  } else if (gw.owner === 'CONFLICT') {
+    dom.btnGatewayStop.disabled = true;
+    dom.btnGatewayStop.title = 'Conflict Process occupying Gateway port — resolve conflict first';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Conflict Process occupying Gateway port — resolve conflict first';
   } else if (gw.owner === 'NONE' || !gw.owner) {
     dom.btnGatewayStop.disabled = true;
     dom.btnGatewayStop.title = 'Gateway Process is not running';
+    dom.btnGatewayRestart.disabled = false;
+    dom.btnGatewayRestart.title = 'Start Managed Gateway Process';
+  } else if (gw.health === 'STOPPING') {
+    dom.btnGatewayStop.disabled = true;
+    dom.btnGatewayStop.title = 'Gateway Process is stopping';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Gateway Process is currently stopping';
   } else {
     dom.btnGatewayStop.disabled = false;
     dom.btnGatewayStop.title = 'Stop Managed Gateway Process';
+    dom.btnGatewayRestart.disabled = false;
+    dom.btnGatewayRestart.title = 'Restart Managed Gateway Process';
   }
 
   if (isDrifted) {
@@ -1379,18 +1401,26 @@ function handleUseProfile(profileName, btn) {
 }
 
 function handleStartServices(services = []) {
-  const id = `start-${++state.startSeq}`;
-  const label = services.length > 0 ? services.join(', ') : 'LOCAL';
+  return runStreamingLifecycle('start', services, 'LOCAL', 'Starting…', streamStartServices);
+}
+
+function handleRestartServices(services = []) {
+  return runStreamingLifecycle('restart', services, 'Managed', 'Restarting…', streamRestartServices);
+}
+
+function runStreamingLifecycle(prefix, services, emptyLabel, initialMessage, streamFn) {
+  const id = `${prefix}-${++state.startSeq}`;
+  const label = services.length > 0 ? services.join(', ') : emptyLabel;
   const entry = {
     label,
     services,
     target: label,
-    message: 'Starting…',
+    message: initialMessage,
     stream: null,
     historyEntry: null,
   };
 
-  entry.stream = streamStartServices(services, {
+  entry.stream = streamFn(services, {
     timeoutSeconds: 30,
     onMeta(payload) {
       if (payload.cliCommand) {
@@ -1399,7 +1429,7 @@ function handleStartServices(services = []) {
     },
     onProgress(payload) {
       entry.target = payload.target || label;
-      entry.message = payload.message || 'Starting…';
+      entry.message = payload.message || initialMessage;
       renderProgressStrip();
     },
     onDone(payload) {
@@ -2258,12 +2288,23 @@ function openPillMenu(kind, row, anchorEl) {
   if (kind === 'health') {
     dom.pillActionMenu.append(el('div', 'pill-menu-header mono', `Process · ${row.service}`));
     const starting = isServiceStarting(row.service);
+    const isStopping = row.health === 'STOPPING' || state.pendingStops.has(row.service);
     addPillMenuItem(starting ? 'Starting…' : 'Start', {
-      disabled: starting,
+      disabled: starting || isStopping,
       action: 'start',
-      title: `Start ${row.service}`,
+      title: isStopping ? `${row.service} is currently stopping` : `Start ${row.service}`,
       onClick: () => handleStartServices([row.service]),
     });
+    if (row.owner === 'MANAGED') {
+      addPillMenuItem('Restart', {
+        disabled: starting || isStopping,
+        action: 'restart',
+        title: row.stale
+          ? `Restart stale Managed Process for ${row.service}`
+          : `Restart Managed Process for ${row.service}`,
+        onClick: () => handleRestartServices([row.service]),
+      });
+    }
     if (row.owner === 'CONFLICT') {
       addPillMenuItem('Kill Conflict…', {
         danger: true,
@@ -2272,15 +2313,16 @@ function openPillMenu(kind, row, anchorEl) {
         onClick: () => openConflictDialog(row.service),
       });
     } else {
-      const stopPending = state.pendingStops.has(row.service);
-      const canStop = row.owner === 'MANAGED' && !stopPending;
+      const canStop = row.owner === 'MANAGED' && !isStopping;
       const stopTitle =
         row.owner === 'MANAGED'
-          ? `Stop Managed Process for ${row.service}`
+          ? isStopping
+            ? `Stopping ${row.service}…`
+            : `Stop Managed Process for ${row.service}`
           : row.owner === 'UNMANAGED'
             ? 'Unmanaged Process — never killed by procomp'
             : 'No running Process';
-      addPillMenuItem('Stop', {
+      addPillMenuItem(isStopping ? 'Stopping…' : 'Stop', {
         disabled: !canStop,
         action: 'stop',
         title: stopTitle,
@@ -3236,6 +3278,9 @@ function init() {
       },
     }),
   );
+  dom.btnGatewayRestart.addEventListener('click', () =>
+    handleGatewayAction(() => restartGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayRestart),
+  );
   dom.btnGatewayStop.addEventListener('click', () =>
     runAction([dom.btnGatewayStop], () => stopGateway(), {
       activity: {
@@ -3255,6 +3300,7 @@ function init() {
   );
 
   dom.btnStartLocal.addEventListener('click', () => handleStartServices([]));
+  dom.btnRestartManaged.addEventListener('click', () => handleRestartServices([]));
   dom.btnStopManaged.addEventListener('click', () => handleStopServices([], dom.btnStopManaged));
 
   dom.servicesFilterInput.addEventListener('input', () => {

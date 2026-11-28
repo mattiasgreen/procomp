@@ -77,6 +77,15 @@ public final class StaticAssetsTest {
         Path discoveredRoot = discovered.webRoot().orElseThrow();
         Assert.assertTrue(Files.isRegularFile(discoveredRoot.resolve("index.html")), "discovered web/ has index.html");
         Assert.assertTrue(Files.isRegularFile(discoveredRoot.resolve("app.js")), "discovered web/ has app.js");
+        String indexHtml = Files.readString(discoveredRoot.resolve("index.html"), StandardCharsets.UTF_8);
+        String appJs = Files.readString(discoveredRoot.resolve("app.js"), StandardCharsets.UTF_8);
+        String apiJs = Files.readString(discoveredRoot.resolve("api.js"), StandardCharsets.UTF_8);
+        String stylesCss = Files.readString(discoveredRoot.resolve("styles.css"), StandardCharsets.UTF_8);
+        Assert.assertContains(indexHtml, "btn-gateway-restart", "index.html includes gateway restart button");
+        Assert.assertContains(appJs, "badge-stopping", "app.js maps STOPPING health badge");
+        Assert.assertContains(appJs, "handleRestartServices", "app.js wires service restart handler");
+        Assert.assertContains(apiJs, "/api/services/restart/stream", "api.js targets restart SSE stream");
+        Assert.assertContains(stylesCss, ".badge-stopping", "styles.css styles STOPPING badge");
 
         Path tempRoot = Files.createTempDirectory("procomp-static-discover-test");
         try {

@@ -10,8 +10,10 @@ import procomp.core.gateway.StaleManagedMapping;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.InspectionReport;
+import procomp.core.process.ObservedProcess;
 import procomp.core.process.Ownership;
 import procomp.core.process.ParentProcess;
+import procomp.core.process.ProcessState;
 import procomp.core.project.GatewayDefinition;
 import procomp.core.project.ProfileDefinition;
 import procomp.core.project.Project;
@@ -49,17 +51,15 @@ public final class DomainJsonAndCliFormatTest {
 
     public static void testDomainJsonSerializesEstateStatusConfiguredAndUnconfiguredGateway() {
         GatewayDefinition gwDef = sampleGateway();
+        ObservedProcess gwProc = new ObservedProcess(
+            8080L, true, Optional.of(Instant.parse("2026-11-20T11:57:55Z")),
+            Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        );
         DiscoveryResult gwDiscovery = new DiscoveryResult(
             "gateway",
-            Ownership.MANAGED,
-            Optional.empty(),
-            HealthState.HEALTHY,
-            Optional.of(8080L),
-            Optional.of(Instant.parse("2026-11-20T11:57:55Z")),
-            false,
+            new ProcessState.Managed.Healthy(8080L, Instant.parse("2026-11-20T11:57:55Z"), false, gwProc),
             Optional.of("http://127.0.0.1:8080/__admin/health"),
-            "HTTP 200",
-            Optional.empty()
+            "HTTP 200"
         );
         GatewayDriftReport drift = new GatewayDriftReport(
             GatewaySyncStatus.DRIFTED,
@@ -96,7 +96,7 @@ public final class DomainJsonAndCliFormatTest {
         Assert.assertEquals(8080L, num(gwObj, "port"), "gateway port");
         Assert.assertEquals("http://127.0.0.1:8080", str(gwObj, "adminUrl"), "gateway adminUrl");
         Assert.assertEquals("MANAGED", str(gwObj, "owner"), "gateway owner");
-        Assert.assertTrue(gwObj.get("provenance").orElseThrow() instanceof JsonValue.JsonNull, "gateway provenance null");
+        Assert.assertEquals("procomp", str(gwObj, "provenance"), "gateway provenance procomp");
         Assert.assertEquals("HEALTHY", str(gwObj, "health"), "gateway health");
         Assert.assertEquals(8080L, num(gwObj, "pid"), "gateway pid");
         Assert.assertEquals(125L, num(gwObj, "uptimeSeconds"), "gateway uptimeSeconds");
@@ -182,8 +182,7 @@ public final class DomainJsonAndCliFormatTest {
             "acme",
             sampleGateway(),
             new DiscoveryResult(
-                "gateway", Ownership.NONE, Optional.empty(), HealthState.STOPPED,
-                Optional.empty(), Optional.empty(), false, Optional.empty(), "stopped", Optional.empty()
+                "gateway", ProcessState.Stopped.INSTANCE, Optional.empty(), "stopped"
             ),
             Optional.empty(),
             new GatewayDriftReport(GatewaySyncStatus.OFFLINE, List.of(), List.of(), Map.of())
@@ -195,10 +194,15 @@ public final class DomainJsonAndCliFormatTest {
     }
 
     public static void testDomainJsonSerializesMutationsErrorsAndProgressEvents() {
+        ObservedProcess ordersProc = new ObservedProcess(
+            3001L, true, Optional.of(Instant.parse("2026-11-20T12:00:00Z")),
+            Optional.of("java -jar orders.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        );
         DiscoveryResult disc = new DiscoveryResult(
-            "orders", Ownership.MANAGED, Optional.empty(), HealthState.HEALTHY, Optional.of(3001L),
-            Optional.of(Instant.parse("2026-11-20T12:00:00Z")), false,
-            Optional.of("http://127.0.0.1:9001/health"), "HTTP 200", Optional.empty()
+            "orders",
+            new ProcessState.Managed.Healthy(3001L, Instant.parse("2026-11-20T12:00:00Z"), false, ordersProc),
+            Optional.of("http://127.0.0.1:9001/health"),
+            "HTTP 200"
         );
         StartResult startRes = new StartResult(
             true,

@@ -436,6 +436,12 @@ body {
   border-color: var(--amber-border);
 }
 
+.badge-stopping {
+  color: #f0883e;
+  background: var(--orange-bg);
+  border-color: var(--orange-border);
+}
+
 .badge-danger,
 .badge-crashed,
 .badge-conflict,
