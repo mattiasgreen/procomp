@@ -7,5 +7,6 @@ public enum HealthState {
     STOPPED,
     STARTING,
     HEALTHY,
+    STOPPING,
     CRASHED
 }

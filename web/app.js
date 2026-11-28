@@ -5,10 +5,12 @@ import {
   fetchInspect,
   fetchStatus,
   reconcileGateway,
+  restartGateway,
   startGateway,
   stopGateway,
   stopServices,
   streamGatewayLogs,
+  streamRestartServices,
   streamServiceLogs,
   streamStartServices,
   updateRoutes,
@@ -85,6 +87,7 @@ const dom = {
   chkGatewayAutoReconcile: document.getElementById('chk-gateway-auto-reconcile'),
   btnGatewayReconcile: document.getElementById('btn-gateway-reconcile'),
   btnGatewayStart: document.getElementById('btn-gateway-start'),
+  btnGatewayRestart: document.getElementById('btn-gateway-restart'),
   btnGatewayStop: document.getElementById('btn-gateway-stop'),
   btnGatewayLogs: document.getElementById('btn-gateway-logs'),
   gatewayDriftAlert: document.getElementById('gateway-drift-alert'),
@@ -93,6 +96,7 @@ const dom = {
 
   profileList: document.getElementById('profile-list'),
   btnStartLocal: document.getElementById('btn-start-local'),
+  btnRestartManaged: document.getElementById('btn-restart-managed'),
   btnStopManaged: document.getElementById('btn-stop-managed'),
 
   servicesSummary: document.getElementById('services-summary'),
@@ -209,6 +213,8 @@ function healthBadgeClass(health) {
       return 'badge-healthy';
     case 'STARTING':
       return 'badge-starting';
+    case 'STOPPING':
+      return 'badge-stopping';
     case 'CRASHED':
       return 'badge-crashed';
     case 'STOPPED':
@@ -455,12 +461,28 @@ function renderGateway() {
   if (gw.owner === 'UNMANAGED') {
     dom.btnGatewayStop.disabled = true;
     dom.btnGatewayStop.title = 'Unmanaged Gateway Process — never killed by procomp';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Unmanaged Gateway Process — never killed by procomp';
+  } else if (gw.owner === 'CONFLICT') {
+    dom.btnGatewayStop.disabled = true;
+    dom.btnGatewayStop.title = 'Conflict Process occupying Gateway port — resolve conflict first';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Conflict Process occupying Gateway port — resolve conflict first';
   } else if (gw.owner === 'NONE' || !gw.owner) {
     dom.btnGatewayStop.disabled = true;
     dom.btnGatewayStop.title = 'Gateway Process is not running';
+    dom.btnGatewayRestart.disabled = false;
+    dom.btnGatewayRestart.title = 'Start Managed Gateway Process';
+  } else if (gw.health === 'STOPPING') {
+    dom.btnGatewayStop.disabled = true;
+    dom.btnGatewayStop.title = 'Gateway Process is stopping';
+    dom.btnGatewayRestart.disabled = true;
+    dom.btnGatewayRestart.title = 'Gateway Process is currently stopping';
   } else {
     dom.btnGatewayStop.disabled = false;
     dom.btnGatewayStop.title = 'Stop Managed Gateway Process';
+    dom.btnGatewayRestart.disabled = false;
+    dom.btnGatewayRestart.title = 'Restart Managed Gateway Process';
   }
 
   if (isDrifted) {
@@ -647,14 +669,32 @@ function renderServices() {
     }
 
     const starting = isServiceStarting(row.service);
+    const isStopping = row.health === 'STOPPING' || state.pendingStops.has(row.service);
     const btnStart = el('button', 'btn btn-secondary btn-xs', starting ? 'Starting…' : 'Start');
     btnStart.type = 'button';
-    btnStart.disabled = starting;
+    btnStart.disabled = starting || isStopping;
     btnStart.dataset.service = row.service;
     btnStart.dataset.action = 'start';
-    btnStart.title = `Start ${row.service}`;
+    btnStart.title = isStopping ? `${row.service} is currently stopping` : `Start ${row.service}`;
     btnStart.addEventListener('click', () => handleStartServices([row.service]));
     actionsWrap.append(btnStart);
+
+    if (row.owner === 'MANAGED') {
+      const btnRestart = el(
+        'button',
+        row.stale ? 'btn btn-warning btn-xs' : 'btn btn-secondary btn-xs',
+        'Restart',
+      );
+      btnRestart.type = 'button';
+      btnRestart.disabled = starting || isStopping;
+      btnRestart.dataset.service = row.service;
+      btnRestart.dataset.action = 'restart';
+      btnRestart.title = row.stale
+        ? `Restart stale Managed Process for ${row.service}`
+        : `Restart Managed Process for ${row.service}`;
+      btnRestart.addEventListener('click', () => handleRestartServices([row.service]));
+      actionsWrap.append(btnRestart);
+    }
 
     if (row.owner === 'CONFLICT') {
       const btnKillConflict = el('button', 'btn btn-danger btn-xs', 'Kill Conflict…');
@@ -665,14 +705,13 @@ function renderServices() {
       btnKillConflict.addEventListener('click', () => openConflictDialog(row.service));
       actionsWrap.append(btnKillConflict);
     } else {
-      const stopPending = state.pendingStops.has(row.service);
-      const btnStop = el('button', 'btn btn-secondary btn-xs', 'Stop');
+      const btnStop = el('button', 'btn btn-secondary btn-xs', isStopping ? 'Stopping…' : 'Stop');
       btnStop.type = 'button';
       btnStop.dataset.service = row.service;
       btnStop.dataset.action = 'stop';
       if (row.owner === 'MANAGED') {
-        btnStop.disabled = stopPending;
-        btnStop.title = `Stop Managed Process for ${row.service}`;
+        btnStop.disabled = isStopping;
+        btnStop.title = isStopping ? `Stopping ${row.service}…` : `Stop Managed Process for ${row.service}`;
         btnStop.addEventListener('click', () => handleStopServices([row.service], btnStop));
       } else if (row.owner === 'UNMANAGED') {
         btnStop.disabled = true;
@@ -917,18 +956,26 @@ function handleUseProfile(profileName, btn) {
 }
 
 function handleStartServices(services = []) {
-  const id = `start-${++state.startSeq}`;
-  const label = services.length > 0 ? services.join(', ') : 'LOCAL';
+  return runStreamingLifecycle('start', services, 'LOCAL', 'Starting…', streamStartServices);
+}
+
+function handleRestartServices(services = []) {
+  return runStreamingLifecycle('restart', services, 'Managed', 'Restarting…', streamRestartServices);
+}
+
+function runStreamingLifecycle(prefix, services, emptyLabel, initialMessage, streamFn) {
+  const id = `${prefix}-${++state.startSeq}`;
+  const label = services.length > 0 ? services.join(', ') : emptyLabel;
   const entry = {
     label,
     services,
     target: label,
-    message: 'Starting…',
+    message: initialMessage,
     stream: null,
     historyEntry: null,
   };
 
-  entry.stream = streamStartServices(services, {
+  entry.stream = streamFn(services, {
     timeoutSeconds: 30,
     onMeta(payload) {
       if (payload.cliCommand) {
@@ -937,7 +984,7 @@ function handleStartServices(services = []) {
     },
     onProgress(payload) {
       entry.target = payload.target || label;
-      entry.message = payload.message || 'Starting…';
+      entry.message = payload.message || initialMessage;
       renderProgressStrip();
     },
     onDone(payload) {
@@ -1465,12 +1512,16 @@ function init() {
   dom.btnGatewayStart.addEventListener('click', () =>
     handleGatewayAction(() => startGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayStart),
   );
+  dom.btnGatewayRestart.addEventListener('click', () =>
+    handleGatewayAction(() => restartGateway({ detach: false, timeoutSeconds: 30 }), dom.btnGatewayRestart),
+  );
   dom.btnGatewayStop.addEventListener('click', () =>
     handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
   );
   dom.btnGatewayLogs.addEventListener('click', () => openGatewayLogsDrawer());
 
   dom.btnStartLocal.addEventListener('click', () => handleStartServices([]));
+  dom.btnRestartManaged.addEventListener('click', () => handleRestartServices([]));
   dom.btnStopManaged.addEventListener('click', () => handleStopServices([], dom.btnStopManaged));
 
   dom.tabInspect.addEventListener('click', () => switchDrawerTab('inspect'));

@@ -84,7 +84,7 @@ public final class Procomp {
     private static Result<CliCommand, String> parseCommand(String command, List<String> subArgs) {
         return switch (command) {
             case "route", "profile" -> RoutingCli.parse(command, subArgs).map(CliCommand.Routing::new);
-            case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
+            case "start", "stop", "restart", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "build" -> BuildCli.parse(subArgs).map(CliCommand.Build::new);
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
@@ -170,12 +170,13 @@ public final class Procomp {
               build [service...]                  Build Service(s) with their Builder (--force, --cancel, --timeout <sec>, --json)
               start [service...]                  Start local Service Process(es) (-d|--detach, --timeout <sec>)
               stop [service...]                   Stop Managed Service Process(es) (--all, --kill-conflict)
+              restart [service...]                Restart Managed Service Process(es) (-d|--detach, --timeout <sec>)
               status [--json]                     Show estate Routing Table, Process ownership, Health, Build, and Gateway
               inspect <service>                   Deep read-only Inspection of a Service's local Process & Build Run (--json)
               logs <service>                      Read raw stdout/stderr logs (-n|--lines <n>, -f|--follow, --err, --path, --build)
               route [service... <local|remote>]   Show or update the Project's Routing Table (--json)
               profile <list|use <name>>           List or apply named routing Profiles (--json on list)
-              gateway <start|stop|status|reconcile|logs>
+              gateway <start|stop|restart|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }

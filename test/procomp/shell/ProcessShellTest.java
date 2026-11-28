@@ -52,7 +52,7 @@ public final class ProcessShellTest {
         // Managed process started at 11:45 with artifact from 11:40, newer non-plain jar built at 11:50 -> stale=true
         Path outLog = stateStore.logPath("acme", ProcessKey.service("orders"), false);
         Path errLog = stateStore.logPath("acme", ProcessKey.service("orders"), true);
-        ManagedProcessRecord rec = new ManagedProcessRecord(
+        ManagedProcessRecord rec = new ManagedProcessRecord.Running(
             4100L,
             Instant.parse("2026-11-20T11:45:00Z"),
             List.of("java", "-jar", "orders-1.0.jar"),
@@ -88,7 +88,7 @@ public final class ProcessShellTest {
         Assert.assertNotContains(ordersReport.toString(), "super-secret-db-pass", "report never contains secret env");
 
         // Now verify *-plain.jar newer timestamp alone doesn't falsely mark not-stale as stale when excluded
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L,
             Instant.parse("2026-11-20T11:45:00Z"),
             List.of("java", "-jar", "orders-1.0.jar"),
@@ -382,7 +382,7 @@ public final class ProcessShellTest {
         Assert.assertEquals(0, processRunner.spawnedRequests().size(), "IDE process never duplicated");
 
         // 3. Crashed managed record gets replaced by a fresh spawn
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("worker"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("worker"), new ManagedProcessRecord.Running(
             9999L, Instant.parse("2026-11-20T11:00:00Z"), List.of("node", "server.js"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.service("worker"), false),
             stateStore.logPath("acme", ProcessKey.service("worker"), true)
@@ -444,7 +444,7 @@ public final class ProcessShellTest {
         Assert.assertOk(new RoutingShell(stateStore).updateRoutes(project, List.of("orders"), Route.LOCAL), "route orders local");
 
         // 1. orders: MANAGED alive (PID 4100)
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L, clock.now(), List.of("java", "-jar", "orders.jar"), Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
             stateStore.logPath("acme", ProcessKey.service("orders"), true)
@@ -463,14 +463,14 @@ public final class ProcessShellTest {
         ));
 
         // 3. worker: CRASHED managed record (PID 6300 dead)
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("worker"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("worker"), new ManagedProcessRecord.Running(
             6300L, clock.now(), List.of("node", "server.js"), Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("worker"), false),
             stateStore.logPath("acme", ProcessKey.service("worker"), true)
         )), "seed crashed worker");
 
         // 4. gateway: MANAGED alive (PID 7400)
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             7400L, clock.now(), List.of("java", "-jar", "wiremock.jar"), Optional.empty(),
             stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
@@ -572,6 +572,194 @@ public final class ProcessShellTest {
         // Routing table remained untouched throughout all stop operations
         RoutingTable routesAfter = Assert.assertOk(new RoutingShell(stateStore).showRoutes(project), "read routes after stop");
         Assert.assertEquals(Route.LOCAL, routesAfter.routeOf("orders").orElseThrow(), "stop never mutates Routing Table");
+    }
+
+    public static void testStoppingLifecyclePersistsStoppingRevertsOnErrorAndBlocksStart() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Project project = loadSampleProject(root, "top-secret");
+
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var baseRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient();
+        var projectFiles = new FakeProjectFiles()
+            .withDirectory(root.resolve("orders"))
+            .withFile(root.resolve("orders/build/libs/orders-1.0.jar"), clock.now());
+
+        ManagedProcessRecord.Running running = new ManagedProcessRecord.Running(
+            4100L, clock.now().minusSeconds(30), List.of("java", "-jar", "orders.jar"), Optional.of(clock.now().minusSeconds(60)),
+            stateStore.logPath("acme", ProcessKey.service("orders"), false),
+            stateStore.logPath("acme", ProcessKey.service("orders"), true)
+        );
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), running), "seed running");
+        baseRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(clock.now().minusSeconds(30)), Optional.of("java -jar orders.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+
+        // 1. While stopTree is executing, managed record on disk is Stopping and start fails fast with PROCESS_STOPPING
+        final boolean[] sawStoppingDuringStop = {false};
+        final boolean[] failStop = {true};
+        procomp.shell.ports.ProcessRunner observingRunner = new procomp.shell.ports.ProcessRunner() {
+            @Override
+            public procomp.core.common.Result<SpawnedProcess, DomainError> spawnDetached(SpawnRequest request) {
+                return baseRunner.spawnDetached(request);
+            }
+            @Override
+            public procomp.core.common.Result<RunningProcess, DomainError> spawnAttached(SpawnRequest request) {
+                return baseRunner.spawnAttached(request);
+            }
+            @Override
+            public procomp.core.common.Result<Optional<ObservedProcess>, DomainError> inspect(long pid) {
+                return baseRunner.inspect(pid);
+            }
+            @Override
+            public boolean isAlive(long pid) {
+                return baseRunner.isAlive(pid);
+            }
+            @Override
+            public procomp.core.common.Result<procomp.core.common.Unit, DomainError> stopTree(long pid, Duration gracefulTimeout) {
+                Optional<ManagedProcessRecord> mid = Assert.assertOk(
+                    stateStore.readManagedProcess("acme", ProcessKey.service("orders")), "read mid-stop"
+                );
+                sawStoppingDuringStop[0] = mid.isPresent() && mid.get() instanceof ManagedProcessRecord.Stopping;
+                if (failStop[0]) {
+                    return procomp.core.common.Result.err(DomainError.of("PROCESS_STOP_FAILED", "simulated failure"));
+                }
+                return baseRunner.stopTree(pid, gracefulTimeout);
+            }
+        };
+
+        ProcessShell shell = new ProcessShell(
+            stateStore, observingRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
+        );
+
+        // Failed stopTree -> saw Stopping during stopTree, then reverted back to Running
+        DomainError stopErr = Assert.assertErr(
+            shell.stop(project, new ProcessShell.StopRequest(List.of("orders"), false, false, Duration.ofSeconds(5))),
+            "simulated stopTree error propagates"
+        );
+        Assert.assertEquals("PROCESS_STOP_FAILED", stopErr.code(), "error code");
+        Assert.assertTrue(sawStoppingDuringStop[0], "managed record transitioned to Stopping before stopTree");
+        Optional<ManagedProcessRecord> afterFailedStop = Assert.assertOk(
+            stateStore.readManagedProcess("acme", ProcessKey.service("orders")), "read after failed stop"
+        );
+        Assert.assertTrue(afterFailedStop.isPresent() && afterFailedStop.get() instanceof ManagedProcessRecord.Running, "reverted to Running on failure");
+
+        // Start while Stopping fails fast with PROCESS_STOPPING
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), running.requestStop(clock.now())), "mark stopping");
+        DomainError startWhileStopping = Assert.assertErr(
+            shell.start(project, new ProcessShell.StartRequest(List.of("orders"), true, Duration.ofSeconds(5))),
+            "start while STOPPING fails fast"
+        );
+        Assert.assertEquals("PROCESS_STOPPING", startWhileStopping.code(), "PROCESS_STOPPING error code");
+
+        // Stale Stopping record whose OS process is already dead -> stop cleans record and reports ALREADY_STOPPED
+        baseRunner.stopTree(4100L, Duration.ofSeconds(1));
+        ProcessShell.StopResult cleanedStaleStopping = Assert.assertOk(
+            shell.stop(project, new ProcessShell.StopRequest(List.of("orders"), false, false, Duration.ofSeconds(5))),
+            "stop cleans dead stopping record"
+        );
+        Assert.assertEquals(ProcessShell.StopDisposition.ALREADY_STOPPED, cleanedStaleStopping.outcomes().get(0).disposition(), "dead stopping -> ALREADY_STOPPED");
+        Assert.assertEquals(
+            Optional.empty(),
+            Assert.assertOk(stateStore.readManagedProcess("acme", ProcessKey.service("orders")), "read after cleanup"),
+            "stale stopping record deleted"
+        );
+    }
+
+    public static void testRestartPreflightBareTargetingUnmanagedSparingAndStoppingFailFast() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Project project = loadSampleProject(root, "top-secret");
+
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient()
+            .stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "{\"status\":\"UP\"}")
+            .stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "{\"status\":\"UP\"}");
+        var projectFiles = new FakeProjectFiles()
+            .withDirectory(root.resolve("orders"))
+            .withDirectory(root.resolve("billing"))
+            .withDirectory(root.resolve("worker"))
+            // Intentionally omit orders jar first to verify preflight fails BEFORE stopping!
+            .withFile(root.resolve("billing/build/libs/billing-1.0.jar"), clock.now());
+
+        // Seed orders as MANAGED HEALTHY (PID 4100)
+        ManagedProcessRecord.Running ordersRec = new ManagedProcessRecord.Running(
+            4100L, clock.now().minusSeconds(60), List.of("java", "-jar", "orders.jar"), Optional.of(clock.now().minusSeconds(60)),
+            stateStore.logPath("acme", ProcessKey.service("orders"), false),
+            stateStore.logPath("acme", ProcessKey.service("orders"), true)
+        );
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), ordersRec), "seed orders");
+        processRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(clock.now().minusSeconds(60)), Optional.of("java -jar orders.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+
+        // Seed billing as UNMANAGED IDE (PID 5200)
+        portScanner.bind(9002, 5200L);
+        processRunner.registerProcess(new ObservedProcess(
+            5200L, true, Optional.of(clock.now()), Optional.of("java -jar billing.jar"),
+            List.of(), List.of(new ParentProcess(10L, Optional.empty(), Optional.of("idea64.exe"))),
+            Optional.empty(), Optional.of("java")
+        ));
+
+        // worker is STOPPED and LOCAL in Routing Table — bare restart must NOT start it
+        Assert.assertOk(new RoutingShell(stateStore).updateRoutes(project, List.of("orders", "worker"), Route.LOCAL), "set routes");
+
+        ProcessShell shell = new ProcessShell(
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
+        );
+
+        // 1. Preflight fails BEFORE stopping running orders when artifact is missing!
+        DomainError missingArtifact = Assert.assertErr(
+            shell.restart(project, new ProcessShell.RestartRequest(List.of("orders"), false, Duration.ofSeconds(5))),
+            "restart fails fast when artifact missing"
+        );
+        Assert.assertEquals("ARTIFACT_NOT_FOUND", missingArtifact.code(), "ARTIFACT_NOT_FOUND code");
+        Assert.assertTrue(processRunner.isAlive(4100L), "running orders was NOT stopped when preflight failed");
+        Assert.assertEquals(List.of(), processRunner.stoppedPids(), "no process stopped on preflight failure");
+
+        // 2. Add artifact -> bare restart targets ONLY running Managed orders (does NOT start worker, spares billing)
+        projectFiles.withFile(root.resolve("orders/build/libs/orders-2.0.jar"), clock.now().plusSeconds(10));
+        ProcessShell.RestartResult bareRes = Assert.assertOk(
+            shell.restart(project, new ProcessShell.RestartRequest(List.of(), false, Duration.ofSeconds(5))),
+            "bare restart succeeds"
+        );
+        Assert.assertFalse(bareRes.explicitTargets(), "bare restart explicitTargets=false");
+        Assert.assertEquals(1, bareRes.outcomes().size(), "only running managed orders restarted");
+        Assert.assertEquals("orders", bareRes.outcomes().get(0).service(), "orders restarted");
+        Assert.assertEquals(ProcessShell.RestartDisposition.RESTARTED, bareRes.outcomes().get(0).disposition(), "RESTARTED disposition");
+        Assert.assertFalse(processRunner.isAlive(4100L), "old orders PID stopped");
+        Assert.assertTrue(bareRes.outcomes().get(0).discovery().pid().orElseThrow() != 4100L, "new PID spawned");
+        Assert.assertEquals(
+            Optional.empty(),
+            Assert.assertOk(stateStore.readManagedProcess("acme", ProcessKey.service("worker")), "worker still stopped"),
+            "bare restart did not start stopped LOCAL worker"
+        );
+
+        // 3. Explicit restart on UNMANAGED billing spares it; explicit restart on STOPPED worker spawns it
+        ProcessShell.RestartResult mixedRes = Assert.assertOk(
+            shell.restart(project, new ProcessShell.RestartRequest(List.of("billing", "worker"), false, Duration.ofSeconds(5))),
+            "explicit restart billing+worker succeeds"
+        );
+        Assert.assertEquals(ProcessShell.RestartDisposition.SPARED_UNMANAGED, mixedRes.outcomes().get(0).disposition(), "billing spared");
+        Assert.assertTrue(processRunner.isAlive(5200L), "unmanaged billing never killed");
+        Assert.assertEquals(ProcessShell.RestartDisposition.SPAWNED, mixedRes.outcomes().get(1).disposition(), "stopped worker spawned");
+
+        // 4. Restart while STOPPING fails fast with PROCESS_STOPPING
+        ManagedProcessRecord currentOrders = Assert.assertOk(
+            stateStore.readManagedProcess("acme", ProcessKey.service("orders")), "read orders"
+        ).orElseThrow();
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), currentOrders.requestStop(clock.now())), "mark stopping");
+        DomainError stoppingErr = Assert.assertErr(
+            shell.restart(project, new ProcessShell.RestartRequest(List.of("orders"), true, Duration.ofSeconds(5))),
+            "restart while STOPPING fails fast"
+        );
+        Assert.assertEquals("PROCESS_STOPPING", stoppingErr.code(), "PROCESS_STOPPING code");
     }
 
     static Project loadSampleProject(Path root, String secretValue) {

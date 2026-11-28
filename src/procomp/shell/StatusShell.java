@@ -6,6 +6,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
+import procomp.core.process.ManagedProcessRecord;
 import procomp.core.process.Ownership;
 import procomp.core.process.PortBinding;
 import procomp.core.project.Project;
@@ -148,19 +149,39 @@ public final class StatusShell {
         }
         RoutingTable routing = ((Result.Ok<RoutingTable, DomainError>) routingRes).value();
 
-        Result<Map<Integer, PortBinding>, DomainError> portSnapRes = processShell.snapshotServicePorts(project);
+        // Causal snapshot ordering: read Managed Process records BEFORE scanning OS ports,
+        // and only scan ports for Services with no managed record, preventing stop-vs-status CONFLICT races.
+        Result<Map<String, Optional<ManagedProcessRecord>>, DomainError> managedRes =
+            processShell.readManagedServiceRecords(project);
+        if (managedRes.isErr()) {
+            return managedRes.castError();
+        }
+        Map<String, Optional<ManagedProcessRecord>> managedRecords =
+            ((Result.Ok<Map<String, Optional<ManagedProcessRecord>>, DomainError>) managedRes).value();
+
+        List<ServiceDefinition> serviceList = List.copyOf(project.services().values());
+        List<ServiceDefinition> unmanagedServices = new ArrayList<>();
+        for (ServiceDefinition service : serviceList) {
+            if (managedRecords.getOrDefault(service.name(), Optional.empty()).isEmpty()) {
+                unmanagedServices.add(service);
+            }
+        }
+
+        Result<Map<Integer, PortBinding>, DomainError> portSnapRes =
+            processShell.snapshotServicePorts(project, unmanagedServices);
         if (portSnapRes.isErr()) {
             return portSnapRes.castError();
         }
         Map<Integer, PortBinding> portSnapshot = ((Result.Ok<Map<Integer, PortBinding>, DomainError>) portSnapRes).value();
 
         Instant now = clock.now();
-        List<ServiceDefinition> serviceList = List.copyOf(project.services().values());
         List<ServiceStatusRow> rows = new ArrayList<>(serviceList.size());
         if (serviceList.size() <= 1) {
             for (ServiceDefinition service : serviceList) {
+                Optional<ManagedProcessRecord> managedRecord =
+                    managedRecords.getOrDefault(service.name(), Optional.empty());
                 Result<ServiceStatusRow, DomainError> rowRes =
-                    discoverServiceRow(project, service, routing, portSnapshot, now);
+                    discoverServiceRow(project, service, routing, managedRecord, portSnapshot, now);
                 if (rowRes.isErr()) {
                     return rowRes.castError();
                 }
@@ -170,8 +191,10 @@ public final class StatusShell {
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 List<Future<Result<ServiceStatusRow, DomainError>>> futures = new ArrayList<>(serviceList.size());
                 for (ServiceDefinition service : serviceList) {
+                    Optional<ManagedProcessRecord> managedRecord =
+                        managedRecords.getOrDefault(service.name(), Optional.empty());
                     futures.add(executor.submit(() ->
-                        discoverServiceRow(project, service, routing, portSnapshot, now)
+                        discoverServiceRow(project, service, routing, managedRecord, portSnapshot, now)
                     ));
                 }
                 for (Future<Result<ServiceStatusRow, DomainError>> future : futures) {
@@ -215,10 +238,12 @@ public final class StatusShell {
         Project project,
         ServiceDefinition service,
         RoutingTable routing,
+        Optional<ManagedProcessRecord> managedRecord,
         Map<Integer, PortBinding> portSnapshot,
         Instant now
     ) {
-        Result<DiscoveryResult, DomainError> discRes = processShell.discoverService(project, service.name(), portSnapshot);
+        Result<DiscoveryResult, DomainError> discRes =
+            processShell.discoverService(project, service.name(), managedRecord, portSnapshot);
         if (discRes.isErr()) {
             return discRes.castError();
         }

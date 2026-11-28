@@ -91,7 +91,7 @@ public final class FsStateStoreAndConfigTest {
 
             Path outLog = store.logPath("acme", ProcessKey.service("service1"), false);
             Path errLog = store.logPath("acme", ProcessKey.service("service1"), true);
-            ManagedProcessRecord rec = new ManagedProcessRecord(
+            ManagedProcessRecord rec = new ManagedProcessRecord.Running(
                 4242L,
                 Instant.parse("2026-11-20T12:00:00Z"),
                 List.of("java", "-Xmx512m", "-jar", "service1.jar"),
@@ -103,10 +103,40 @@ public final class FsStateStoreAndConfigTest {
             Assert.assertEquals(
                 Optional.of(rec),
                 Assert.assertOk(store.readManagedProcess("acme", ProcessKey.service("service1")), "read service record"),
-                "service ManagedProcessRecord round-trips"
+                "service ManagedProcessRecord.Running round-trips"
             );
 
-            ManagedProcessRecord gwRec = new ManagedProcessRecord(
+            ManagedProcessRecord.Stopping stoppingRec = rec.requestStop(Instant.parse("2026-11-20T12:02:00Z"));
+            Assert.assertOk(store.writeManagedProcess("acme", ProcessKey.service("service1"), stoppingRec), "write stopping record");
+            Assert.assertEquals(
+                Optional.of(stoppingRec),
+                Assert.assertOk(store.readManagedProcess("acme", ProcessKey.service("service1")), "read stopping record"),
+                "service ManagedProcessRecord.Stopping round-trips"
+            );
+
+            // Legacy JSON file without stopRequestedAt still parses as ManagedProcessRecord.Running
+            Path legacyFile = tempRoot.resolve("acme").resolve("processes").resolve("service1.json");
+            String legacyJson = """
+                {
+                  "pid": 4242,
+                  "startedAt": "2026-11-20T12:00:00Z",
+                  "commandSummary": ["java", "-Xmx512m", "-jar", "service1.jar"],
+                  "artifactTimestamp": "2026-11-20T11:55:00Z",
+                  "stdoutLog": "%s",
+                  "stderrLog": "%s"
+                }
+                """.formatted(
+                    outLog.toString().replace("\\", "\\\\"),
+                    errLog.toString().replace("\\", "\\\\")
+                );
+            Files.writeString(legacyFile, legacyJson);
+            Assert.assertEquals(
+                Optional.of(rec),
+                Assert.assertOk(store.readManagedProcess("acme", ProcessKey.service("service1")), "read legacy record"),
+                "legacy JSON without stopRequestedAt parses as Running"
+            );
+
+            ManagedProcessRecord gwRec = new ManagedProcessRecord.Running(
                 5252L,
                 Instant.parse("2026-11-20T12:01:00Z"),
                 List.of("java", "-jar", "wiremock.jar"),

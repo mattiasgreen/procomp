@@ -79,7 +79,7 @@ An unrelated Process occupying a Service's local port that is neither Managed no
 _Avoid_: Port-conflict, collision
 
 **Health State**:
-The observed runtime condition of a Service's local Process: `STOPPED` (no Process), `STARTING` (Process alive, health check not yet passing), `HEALTHY` (Process alive and passing health check, or no health check defined), or `CRASHED` (a Managed Process exited unexpectedly).
+The observed runtime condition of a Service's local Process: `STOPPED` (no Process), `STARTING` (Process alive, health check not yet passing), `HEALTHY` (Process alive and passing health check, or no health check defined), `STOPPING` (a Managed Process whose graceful/forced termination has been initiated), or `CRASHED` (a Managed Process exited unexpectedly).
 _Avoid_: StatusText, service state
 
 **Stale**:

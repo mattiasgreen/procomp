@@ -1,8 +1,10 @@
 package procomp.shell;
 
 import procomp.core.routing.Route;
+import procomp.shell.GatewayShell.GatewayRestartRequest;
 import procomp.shell.GatewayShell.GatewayStartRequest;
 import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.ProcessShell.RestartRequest;
 import procomp.shell.ProcessShell.StartRequest;
 
 import java.nio.file.Path;
@@ -111,6 +113,23 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String restart(List<String> services, boolean detach, Duration timeout) {
+        Objects.requireNonNull(services, "services must not be null");
+        Objects.requireNonNull(timeout, "timeout must not be null");
+        List<String> tokens = base("restart");
+        for (String svc : services) {
+            tokens.add(quoteArg(svc));
+        }
+        if (detach) {
+            tokens.add("-d");
+        }
+        if (!timeout.equals(RestartRequest.DEFAULT_TIMEOUT)) {
+            tokens.add("--timeout");
+            tokens.add(Long.toString(timeout.toSeconds()));
+        }
+        return join(tokens);
+    }
+
     public String inspect(String service, boolean json) {
         Objects.requireNonNull(service, "service must not be null");
         List<String> tokens = base("inspect");
@@ -198,6 +217,20 @@ public final class CliCommandFormatter {
     public String gatewayStop() {
         List<String> tokens = base("gateway");
         tokens.add("stop");
+        return join(tokens);
+    }
+
+    public String gatewayRestart(boolean detach, Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout must not be null");
+        List<String> tokens = base("gateway");
+        tokens.add("restart");
+        if (detach) {
+            tokens.add("-d");
+        }
+        if (!timeout.equals(GatewayRestartRequest.DEFAULT_TIMEOUT)) {
+            tokens.add("--timeout");
+            tokens.add(Long.toString(timeout.toSeconds()));
+        }
         return join(tokens);
     }
 

@@ -56,16 +56,17 @@ Project
    - Otherwise → **`Conflict`**.
 3. Otherwise → **`None`** (`STOPPED`).
 
-### Health State (4 Pure, Stateless Values)
+### Health State (5 Pure Values)
 
 | State | Meaning |
 | :--- | :--- |
 | `STOPPED` | No active local `Process`. |
 | `STARTING` | `Process` is alive, but its health check is not currently passing. |
 | `HEALTHY` | `Process` is alive and passing its health check. |
+| `STOPPING` | A `Managed` `Process` whose graceful/forced termination has been initiated (bounded by the termination period). |
 | `CRASHED` | A `Managed` `Process` exited unexpectedly. |
 
-Uptime is displayed alongside `Health State` so a human can tell whether a `STARTING` process just booted or has been running and is currently failing health—without introducing a 5th state or mutable health timestamps.
+Uptime is displayed alongside `Health State` so a human can tell whether a `STARTING` process just booted or has been running and is currently failing health. `STOPPING` is persisted in the `Managed` `Process` record (`stopRequestedAt`) for the duration of the termination window so CLI and Web UI agree without client-side state.
 
 ### Health Check Evaluation
 
@@ -104,6 +105,7 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp build [service...]` | Runs tracked in-place `Build Run`(s) sequentially (fail-fast) using each target's configured `Builder`. Bare `build` targets all `LOCAL`-routed Services with a `Builder`. Rejects overlapping `RUNNING` or `UNKNOWN` (dead-PID) runs unless `--force` is passed; supports `--cancel <service...>`, `--timeout <seconds>`, and `--json`. Never mutates the `Routing Table` or starts/restarts Services. |
 | `procomp start [service...]` | Runs pre-start `Discovery` per target (`None`/`CRASHED` → spawn `Managed`; `Managed`/`Unmanaged` → reuse without duplicating; `Conflict` → fail fast with `Inspection` details). Bare `start` targets all `LOCAL`-routed Services. Waits for `HEALTHY` by default (`-d`/`--detach` to return immediately). Never auto-builds or mutates the `Routing Table`. |
 | `procomp stop [service...]` | Stops `Managed` Service `Process`(es) cleanly. Bare `stop` stops all `Managed` Services while leaving the `Gateway` running (`--all` also stops a `Managed` `Gateway`). Never kills `Unmanaged` Processes. Killing a `Conflict` requires explicit consent. |
+| `procomp restart [service...]` | Restarts `Managed` Service `Process`(es) with preflight validation (conflicts, `STOPPING` state, and launch plans) *before* stopping any running `Process`. Bare `restart` targets currently running `Managed` Services only; explicit targets start `STOPPED`/`CRASHED` Services, spare `Unmanaged` Services, and fail fast on `Conflict` or `STOPPING`. Supports `-d`/`--detach` and `--timeout <seconds>`. Never mutates the `Routing Table` or `Gateway`. |
 | `procomp status` | Prints a concise table (`SERVICE`, `ROUTE`, `OWNER`, `HEALTH`, `BUILD`, `PORT`, `PID`, `UPTIME`, `STALE`) plus a one-line `Gateway` summary. `BUILD` spells out explicit states (`RUNNING`, `SUCCEEDED`, `FAILED`, `UNKNOWN`, `ARTIFACT_PRESENT`, `NOT_BUILT`, `NO_BUILDER`). |
 | `procomp inspect <service>` | Deep read-only `Inspection` of a Service's local `Process` and latest `Build Run`. |
 | `procomp logs <service>` | Minimal raw log reader for `<service>.out.log` (or `<service>.err.log` with `--err`, or build logs with `--build`). Supports `-n <lines>`, `-f` (follow), `--err`, `--build`, and `--path`. Zero JSON parsing, merging, or filtering in v1. |
@@ -123,6 +125,7 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | :--- | :--- |
 | `procomp gateway start` | Runs `Discovery` on the `Gateway` (`Unmanaged` → reuse; `None`/`CRASHED` → spawn `Managed`; `Conflict` → fail fast). |
 | `procomp gateway stop` | Stops a `Managed` `Gateway` `Process` (never kills an `Unmanaged` `Gateway`). |
+| `procomp gateway restart` | Restarts a `Managed` `Gateway` `Process` (or starts when `STOPPED`/`CRASHED`; spares `Unmanaged`; fails fast on `Conflict` or `STOPPING`). Supports `-d`/`--detach` and `--timeout <seconds>`. |
 | `procomp gateway status` | Shows `Gateway` ownership, `Health State`, and whether live mappings match the `Routing Table`. |
 | `procomp gateway reconcile` | Converges the live `Gateway` mappings to match the Project's `Routing Table`. |
 | `procomp gateway logs` | Minimal raw log reader for `gateway.out.log` (or `gateway.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. |

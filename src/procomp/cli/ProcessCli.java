@@ -9,6 +9,9 @@ import procomp.core.process.ParentProcess;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
 import procomp.shell.DomainJson;
+import procomp.shell.ProcessShell.RestartRequest;
+import procomp.shell.ProcessShell.RestartResult;
+import procomp.shell.ProcessShell.RestartServiceOutcome;
 import procomp.shell.ProcessShell.StartDisposition;
 import procomp.shell.ProcessShell.StartRequest;
 import procomp.shell.ProcessShell.StartResult;
@@ -27,10 +30,11 @@ import java.util.List;
  */
 public final class ProcessCli {
 
-    public sealed interface Action permits Action.Inspect, Action.Start, Action.Stop {
+    public sealed interface Action permits Action.Inspect, Action.Start, Action.Stop, Action.Restart {
         record Inspect(String serviceName, boolean json) implements Action {}
         record Start(List<String> services, boolean detach, Duration timeout) implements Action {}
         record Stop(List<String> services, boolean all, boolean killConflict) implements Action {}
+        record Restart(List<String> services, boolean detach, Duration timeout) implements Action {}
     }
 
     private ProcessCli() {}
@@ -40,6 +44,7 @@ public final class ProcessCli {
             case "inspect" -> parseInspect(args);
             case "start" -> parseStart(args);
             case "stop" -> parseStop(args);
+            case "restart" -> parseRestart(args);
             default -> Result.err("Unknown process command '" + command + "'.");
         };
     }
@@ -103,6 +108,37 @@ public final class ProcessCli {
         return Result.ok(new Action.Start(services, detach, timeout));
     }
 
+    private static Result<Action, String> parseRestart(List<String> args) {
+        boolean detach = false;
+        Duration timeout = RestartRequest.DEFAULT_TIMEOUT;
+        List<String> services = new ArrayList<>();
+
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if ("-d".equals(arg) || "--detach".equals(arg)) {
+                detach = true;
+            } else if (CliFormat.isTimeoutOption(arg)) {
+                Result<CliFormat.ParsedOption<Duration>, String> tRes = CliFormat.parseTimeoutOption(args, i);
+                if (tRes instanceof Result.Err<CliFormat.ParsedOption<Duration>, String>(String msg)) {
+                    return Result.err(msg);
+                }
+                var opt = ((Result.Ok<CliFormat.ParsedOption<Duration>, String>) tRes).value();
+                timeout = opt.value();
+                i = opt.nextIndex();
+            } else if (arg.startsWith("-")) {
+                return Result.err(
+                    "Unknown option '" + arg + "' for 'restart'. Usage: procomp restart [service...] [-d|--detach] [--timeout <seconds>]"
+                );
+            } else {
+                if (arg.isBlank()) {
+                    return Result.err("Service name must not be blank.");
+                }
+                services.add(arg);
+            }
+        }
+        return Result.ok(new Action.Restart(services, detach, timeout));
+    }
+
     private static Result<Action, String> parseInspect(List<String> args) {
         String serviceName = null;
         boolean json = false;
@@ -138,6 +174,10 @@ public final class ProcessCli {
                     new StopRequest(services, all, killConflict, StopRequest.DEFAULT_GRACEFUL_TIMEOUT)
                 )),
                 result -> renderStopResult(result, runtime.out())
+            );
+            case Action.Restart(List<String> services, boolean detach, Duration timeout) -> runtime.handleResult(
+                runtime.processShell().flatMap(shell -> shell.restart(project, new RestartRequest(services, detach, timeout))),
+                result -> renderRestartResult(result, runtime.out())
             );
             case Action.Inspect(String serviceName, boolean json) -> runtime.handleResult(
                 runtime.processShell().flatMap(shell -> shell.inspect(project, serviceName)),
@@ -182,6 +222,45 @@ public final class ProcessCli {
             }
         }
         out.println("Summary: " + spawned + " started, " + reused + " reused" + (result.detached() ? " (detached)." : "."));
+    }
+
+    private static void renderRestartResult(RestartResult result, PrintWriter out) {
+        if (result.outcomes().isEmpty()) {
+            out.println("No running Managed Services — nothing to restart.");
+            return;
+        }
+        int restarted = 0;
+        int spawned = 0;
+        int sparedUnmanaged = 0;
+        for (RestartServiceOutcome item : result.outcomes()) {
+            String pidText = item.discovery().pid().map(p -> "PID " + p).orElse("PID -");
+            String ownerText = item.discovery().ownership().name()
+                + item.discovery().provenance().map(p -> " (" + p + ")").orElse("");
+            switch (item.disposition()) {
+                case RESTARTED -> {
+                    restarted++;
+                    out.println(item.service() + ": restarted " + ownerText + " [" + pidText + ", " + item.discovery().health().name() + "]");
+                }
+                case SPAWNED -> {
+                    spawned++;
+                    out.println(item.service() + ": spawned " + ownerText + " [" + pidText + ", " + item.discovery().health().name() + "]");
+                }
+                case SPARED_UNMANAGED -> {
+                    sparedUnmanaged++;
+                    out.println(item.service() + ": spared Unmanaged Process [" + pidText + "] (never killed by procomp)");
+                }
+            }
+        }
+        StringBuilder summary = new StringBuilder();
+        summary.append("Summary: ").append(restarted).append(" restarted");
+        if (spawned > 0) {
+            summary.append(", ").append(spawned).append(" started");
+        }
+        if (sparedUnmanaged > 0) {
+            summary.append(", ").append(sparedUnmanaged).append(" Unmanaged spared");
+        }
+        summary.append(result.detached() ? " (detached)." : ".");
+        out.println(summary);
     }
 
     private static void renderStopResult(StopResult result, PrintWriter out) {

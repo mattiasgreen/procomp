@@ -63,7 +63,7 @@ public final class StatusCliTest {
         Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
         // orders: LOCAL + MANAGED + HEALTHY + STALE
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders-1.0.jar"),
             Optional.of(Instant.parse("2026-11-20T11:40:00Z")),
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
@@ -95,7 +95,7 @@ public final class StatusCliTest {
         ));
 
         // inventory: REMOTE + CRASHED
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord.Running(
             7400L, Instant.parse("2026-11-20T11:10:00Z"), List.of("java", "-jar", "inventory.jar"),
             Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("inventory"), false),
@@ -136,7 +136,7 @@ public final class StatusCliTest {
             }
             return Result.ok(new HttpResponseData(200, Map.of(), "{}"));
         });
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             8100L, Instant.parse("2026-11-20T11:50:00Z"), List.of("java", "-jar", "wiremock.jar"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
@@ -206,7 +206,7 @@ public final class StatusCliTest {
         var richConfig = richConfigSource(root, "top-secret-json-status");
         Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders-1.0.jar"),
             Optional.of(Instant.parse("2026-11-20T11:40:00Z")),
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
@@ -235,7 +235,7 @@ public final class StatusCliTest {
             Optional.empty(), Optional.of("python")
         ));
 
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord.Running(
             7400L, Instant.parse("2026-11-20T11:10:00Z"), List.of("java", "-jar", "inventory.jar"),
             Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("inventory"), false),
@@ -249,7 +249,7 @@ public final class StatusCliTest {
             List<JsonValue> arr = new ArrayList<>(liveMappings.values());
             return Result.ok(new HttpResponseData(200, Map.of(), Json.stringify(Json.obj(Map.of("mappings", Json.arr(arr))))));
         });
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             8100L, Instant.parse("2026-11-20T11:50:00Z"), List.of("java", "-jar", "wiremock.jar"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)

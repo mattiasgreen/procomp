@@ -20,9 +20,12 @@ import procomp.shell.BuildShell.BuildResult;
 import procomp.shell.BuildShell.BuildServiceOutcome;
 import procomp.shell.BuildShell.CancelResult;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
+import procomp.shell.GatewayShell.GatewayRestartResult;
 import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStatusReport;
 import procomp.shell.GatewayShell.GatewayStopResult;
+import procomp.shell.ProcessShell.RestartResult;
+import procomp.shell.ProcessShell.RestartServiceOutcome;
 import procomp.shell.ProcessShell.StartResult;
 import procomp.shell.ProcessShell.StartServiceOutcome;
 import procomp.shell.ProcessShell.StopResult;
@@ -336,6 +339,29 @@ public final class DomainJson {
         return Json.obj(root);
     }
 
+    public static JsonValue.JsonObject restartResult(RestartResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("explicitTargets", Json.bool(result.explicitTargets()));
+        root.put("detached", Json.bool(result.detached()));
+        List<JsonValue> outcomes = new ArrayList<>(result.outcomes().size());
+        for (RestartServiceOutcome item : result.outcomes()) {
+            Map<String, JsonValue> oObj = new LinkedHashMap<>();
+            oObj.put("service", Json.str(item.service()));
+            oObj.put("disposition", Json.str(item.disposition().name()));
+            oObj.put("desiredRoute", Json.str(item.desiredRoute().name()));
+            oObj.put("owner", Json.str(item.discovery().ownership().name()));
+            oObj.put("provenance", strOrNull(item.discovery().provenance()));
+            oObj.put("health", Json.str(item.discovery().health().name()));
+            oObj.put("pid", numOrNull(item.discovery().pid()));
+            oObj.put("healthEndpoint", strOrNull(item.discovery().healthEndpoint()));
+            oObj.put("healthResponse", Json.str(item.discovery().healthResponse()));
+            outcomes.add(Json.obj(oObj));
+        }
+        root.put("outcomes", Json.arr(outcomes));
+        return Json.obj(root);
+    }
+
     public static JsonValue.JsonObject gatewayStartResult(GatewayStartResult result) {
         Objects.requireNonNull(result, "result must not be null");
         Map<String, JsonValue> root = new LinkedHashMap<>();
@@ -358,6 +384,23 @@ public final class DomainJson {
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("disposition", Json.str(result.disposition().name()));
         root.put("pid", numOrNull(result.pid()));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gatewayRestartResult(GatewayRestartResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("disposition", Json.str(result.disposition().name()));
+        root.put("detached", Json.bool(result.detached()));
+        root.put("type", Json.str(result.gateway().type()));
+        root.put("port", Json.num(result.gateway().port()));
+        root.put("adminUrl", Json.str(result.gateway().adminUrl()));
+        root.put("owner", Json.str(result.discovery().ownership().name()));
+        root.put("provenance", strOrNull(result.discovery().provenance()));
+        root.put("health", Json.str(result.discovery().health().name()));
+        root.put("pid", numOrNull(result.discovery().pid()));
+        root.put("healthEndpoint", strOrNull(result.discovery().healthEndpoint()));
+        root.put("healthResponse", Json.str(result.discovery().healthResponse()));
         return Json.obj(root);
     }
 

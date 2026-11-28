@@ -353,12 +353,69 @@ public final class ApiRouterTest {
         Assert.assertEquals("procomp gateway reconcile", str(reconcileRoot, "cliCommand"), "gateway reconcile cliCommand");
         Assert.assertEquals("IN_SYNC", str(obj(reconcileRoot, "data"), "syncStatus"), "gateway IN_SYNC");
 
+        // POST /api/gateway/restart
+        ApiResponse gwRestartRes = fx.router.handle(ApiRequest.of(
+            "POST",
+            "/api/gateway/restart",
+            LOCAL_HEADERS,
+            "{\"detach\":false,\"timeoutSeconds\":30}"
+        ));
+        Assert.assertEquals(200, gwRestartRes.statusCode(), "gateway restart 200: " + gwRestartRes.body());
+        JsonValue.JsonObject gwRestartRoot = parseObj(gwRestartRes.body());
+        Assert.assertEquals("procomp gateway restart", str(gwRestartRoot, "cliCommand"), "gateway restart cliCommand");
+        Assert.assertEquals("RESTARTED", str(obj(gwRestartRoot, "data"), "disposition"), "gateway RESTARTED");
+
         // POST /api/gateway/stop
         ApiResponse stopRes = fx.router.handle(ApiRequest.of("POST", "/api/gateway/stop", LOCAL_HEADERS, ""));
         Assert.assertEquals(200, stopRes.statusCode(), "gateway stop 200: " + stopRes.body());
         JsonValue.JsonObject stopRoot = parseObj(stopRes.body());
         Assert.assertEquals("procomp gateway stop", str(stopRoot, "cliCommand"), "gateway stop cliCommand");
         Assert.assertEquals("STOPPED_MANAGED", str(obj(stopRoot, "data"), "disposition"), "gateway STOPPED_MANAGED");
+
+        // POST /api/services/restart & POST /api/services/restart/stream + 409 PROCESS_STOPPING
+        fx.httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "OK");
+        ApiResponse svcRestartRes = fx.router.handle(ApiRequest.of(
+            "POST",
+            "/api/services/restart",
+            LOCAL_HEADERS,
+            "{\"services\":[\"orders\"],\"detach\":true,\"timeoutSeconds\":30}"
+        ));
+        Assert.assertEquals(200, svcRestartRes.statusCode(), "services restart 200: " + svcRestartRes.body());
+        JsonValue.JsonObject svcRestartRoot = parseObj(svcRestartRes.body());
+        Assert.assertEquals("procomp restart orders -d", str(svcRestartRoot, "cliCommand"), "services restart cliCommand");
+        Assert.assertEquals("SPAWNED", str((JsonValue.JsonObject) arr(obj(svcRestartRoot, "data"), "outcomes").elements().get(0), "disposition"), "stopped orders SPAWNED");
+
+        Assert.assertTrue(fx.router.isSseEndpoint("POST", "/api/services/restart/stream"), "restart stream is POST SSE");
+        ByteArrayOutputStream restartSseOut = new ByteArrayOutputStream();
+        SseStream restartSse = new SseStream(restartSseOut);
+        fx.router.handleSse(ApiRequest.of(
+            "POST",
+            "/api/services/restart/stream",
+            LOCAL_HEADERS,
+            "{\"services\":[\"orders\"],\"detach\":false,\"timeoutSeconds\":30}"
+        ), restartSse);
+        String restartWire = restartSseOut.toString(StandardCharsets.UTF_8);
+        Assert.assertContains(restartWire, "event: meta\n", "restart SSE meta");
+        Assert.assertContains(restartWire, "procomp restart orders", "restart SSE cliCommand");
+        Assert.assertContains(restartWire, "event: done\n", "restart SSE done");
+        Assert.assertContains(restartWire, "\"disposition\":\"RESTARTED\"", "restart SSE RESTARTED");
+
+        // Mark orders STOPPING -> POST /api/services/restart returns 409 PROCESS_STOPPING
+        procomp.core.process.ManagedProcessRecord ordersRec = Assert.assertOk(
+            fx.stateStore.readManagedProcess("acme", ProcessKey.service("orders")), "read orders"
+        ).orElseThrow();
+        Assert.assertOk(
+            fx.stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), ordersRec.requestStop(fx.clock.now())),
+            "mark orders stopping"
+        );
+        ApiResponse stoppingRestart = fx.router.handle(ApiRequest.of(
+            "POST",
+            "/api/services/restart",
+            LOCAL_HEADERS,
+            "{\"services\":[\"orders\"],\"detach\":true,\"timeoutSeconds\":30}"
+        ));
+        Assert.assertEquals(409, stoppingRestart.statusCode(), "restart while STOPPING returns 409");
+        Assert.assertEquals("PROCESS_STOPPING", str(obj(parseObj(stoppingRestart.body()), "error"), "code"), "PROCESS_STOPPING code");
 
         // Unmanaged gateway stop -> 409 GATEWAY_UNMANAGED
         fx.portScanner.bind(8080, 9999L);

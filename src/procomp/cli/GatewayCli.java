@@ -8,6 +8,8 @@ import procomp.core.gateway.StaleManagedMapping;
 import procomp.core.project.Project;
 import procomp.shell.DomainJson;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
+import procomp.shell.GatewayShell.GatewayRestartRequest;
+import procomp.shell.GatewayShell.GatewayRestartResult;
 import procomp.shell.GatewayShell.GatewayStartDisposition;
 import procomp.shell.GatewayShell.GatewayStartRequest;
 import procomp.shell.GatewayShell.GatewayStartResult;
@@ -30,11 +32,12 @@ import java.util.List;
 public final class GatewayCli {
 
     private static final String USAGE =
-        "Usage: procomp gateway <start [-d|--detach] [--timeout <sec>] | stop | status [--json] | reconcile | logs [-n <lines>] [-f] [--err] [--path]>";
+        "Usage: procomp gateway <start [-d|--detach] [--timeout <sec>] | stop | restart [-d|--detach] [--timeout <sec>] | status [--json] | reconcile | logs [-n <lines>] [-f] [--err] [--path]>";
 
-    public sealed interface Action permits Action.Start, Action.Stop, Action.Status, Action.Reconcile, Action.Logs {
+    public sealed interface Action permits Action.Start, Action.Stop, Action.Restart, Action.Status, Action.Reconcile, Action.Logs {
         record Start(boolean detach, Duration timeout) implements Action {}
         record Stop() implements Action {}
+        record Restart(boolean detach, Duration timeout) implements Action {}
         record Status(boolean json) implements Action {}
         record Reconcile() implements Action {}
         record Logs(GatewayLogsRequest request) implements Action {}
@@ -44,7 +47,7 @@ public final class GatewayCli {
 
     public static Result<Action, String> parse(List<String> args) {
         if (args.isEmpty()) {
-            return Result.err("Expected subcommand 'start', 'stop', 'status', 'reconcile', or 'logs' after 'gateway'. " + USAGE);
+            return Result.err("Expected subcommand 'start', 'stop', 'restart', 'status', 'reconcile', or 'logs' after 'gateway'. " + USAGE);
         }
         String sub = args.get(0);
         List<String> rest = args.subList(1, args.size());
@@ -53,6 +56,7 @@ public final class GatewayCli {
             case "stop" -> rest.isEmpty()
                 ? Result.ok(new Action.Stop())
                 : Result.err("Unexpected argument '" + rest.get(0) + "' for 'gateway stop'. Usage: procomp gateway stop");
+            case "restart" -> parseRestart(rest);
             case "status" -> parseStatus(rest);
             case "reconcile" -> rest.isEmpty()
                 ? Result.ok(new Action.Reconcile())
@@ -131,6 +135,31 @@ public final class GatewayCli {
         return Result.ok(new Action.Start(detach, timeout));
     }
 
+    private static Result<Action, String> parseRestart(List<String> args) {
+        boolean detach = false;
+        Duration timeout = GatewayRestartRequest.DEFAULT_TIMEOUT;
+
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if ("-d".equals(arg) || "--detach".equals(arg)) {
+                detach = true;
+            } else if (CliFormat.isTimeoutOption(arg)) {
+                Result<CliFormat.ParsedOption<Duration>, String> tRes = CliFormat.parseTimeoutOption(args, i);
+                if (tRes instanceof Result.Err<CliFormat.ParsedOption<Duration>, String>(String msg)) {
+                    return Result.err(msg);
+                }
+                var opt = ((Result.Ok<CliFormat.ParsedOption<Duration>, String>) tRes).value();
+                timeout = opt.value();
+                i = opt.nextIndex();
+            } else if (arg.startsWith("-")) {
+                return Result.err("Unknown option '" + arg + "' for 'gateway restart'. Usage: procomp gateway restart [-d|--detach] [--timeout <seconds>]");
+            } else {
+                return Result.err("Unexpected argument '" + arg + "' for 'gateway restart'. Usage: procomp gateway restart [-d|--detach] [--timeout <seconds>]");
+            }
+        }
+        return Result.ok(new Action.Restart(detach, timeout));
+    }
+
     private static Result<Action, String> parseStatus(List<String> args) {
         boolean json = false;
         for (String arg : args) {
@@ -154,6 +183,10 @@ public final class GatewayCli {
             case Action.Stop _ -> runtime.handleResult(
                 runtime.gatewayShell().flatMap(shell -> shell.stop(project, new GatewayStopRequest(GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT))),
                 res -> renderStop(res, runtime.out())
+            );
+            case Action.Restart(boolean detach, Duration timeout) -> runtime.handleResult(
+                runtime.gatewayShell().flatMap(shell -> shell.restart(project, new GatewayRestartRequest(detach, timeout))),
+                res -> renderRestart(res, runtime.out())
             );
             case Action.Status(boolean json) -> runtime.handleResult(
                 runtime.gatewayShell().flatMap(shell -> shell.status(project)),
@@ -201,6 +234,19 @@ public final class GatewayCli {
             case CLEANED_CRASHED -> out.println("Gateway: cleaned up crashed Managed Gateway record" + pidText);
             case ALREADY_STOPPED -> out.println("Gateway: already stopped");
         }
+    }
+
+    private static void renderRestart(GatewayRestartResult result, PrintWriter out) {
+        String verb = switch (result.disposition()) {
+            case RESTARTED -> "restarted";
+            case SPAWNED -> "spawned";
+            case SPARED_UNMANAGED -> "spared";
+        };
+        String ownerText = result.discovery().ownership().name()
+            + result.discovery().provenance().map(p -> " (" + p + ")").orElse("");
+        String pidText = result.discovery().pid().map(p -> "PID " + p).orElse("PID -");
+        out.println("Gateway: " + verb + " " + ownerText + " [" + pidText + ", " + result.discovery().health().name()
+            + "] -> " + result.gateway().adminUrl() + (result.detached() ? " (detached)" : ""));
     }
 
     private static void renderReconcile(GatewayReconcileResult result, PrintWriter out) {
