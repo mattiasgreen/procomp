@@ -10,9 +10,15 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -23,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Cross-platform (Windows, Linux, macOS) TCP port listener discovery and connect-check adapter.
@@ -119,6 +126,8 @@ public final class OsPortScanner implements PortScanner {
                 if (lsof.isPresent()) {
                     osSnapshotSucceeded = true;
                     parsePosixLsofBatch(lsof.get(), ports, found);
+                } else if (readLinuxProcListeners(ports, found)) {
+                    osSnapshotSucceeded = true;
                 }
             }
         }
@@ -236,6 +245,193 @@ public final class OsPortScanner implements PortScanner {
                 }
             }
         }
+    }
+
+    public enum IpVersion {
+        V4,
+        V6
+    }
+
+    public record ProcTcpSocket(int port, String localAddress, long inode) {
+    }
+
+    public static List<ProcTcpSocket> parseLinuxProcNetTcp(
+        String content,
+        IpVersion ipVersion,
+        ByteOrder byteOrder,
+        Set<Integer> targetPorts
+    ) {
+        if (content == null || content.isBlank() || targetPorts.isEmpty()) {
+            return List.of();
+        }
+        List<ProcTcpSocket> sockets = new ArrayList<>();
+        for (String line : content.lines().toList()) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("sl")) {
+                continue;
+            }
+            String[] cols = trimmed.split("\\s+", -1);
+            if (cols.length < 10 || !"0A".equalsIgnoreCase(cols[3])) {
+                continue;
+            }
+            int colon = cols[1].indexOf(':');
+            if (colon <= 0 || colon >= cols[1].length() - 1) {
+                continue;
+            }
+            int port;
+            try {
+                port = Integer.parseInt(cols[1].substring(colon + 1), 16);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (port < 1 || port > 65535 || !targetPorts.contains(port)) {
+                continue;
+            }
+            Optional<String> host = decodeProcLoopbackOrWildcardHost(cols[1].substring(0, colon), ipVersion, byteOrder);
+            if (host.isEmpty()) {
+                continue;
+            }
+            long inode;
+            try {
+                inode = Long.parseLong(cols[9]);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            sockets.add(new ProcTcpSocket(port, host.get() + ":" + port, inode));
+        }
+        return sockets;
+    }
+
+    private static boolean readLinuxProcListeners(Set<Integer> targetPorts, Map<Integer, PortBinding> out) {
+        ByteOrder byteOrder = ByteOrder.nativeOrder();
+        List<ProcTcpSocket> sockets = new ArrayList<>();
+        boolean readAny = readProcNetTcpFile(Path.of("/proc/net/tcp"), IpVersion.V4, byteOrder, targetPorts, sockets);
+        readAny |= readProcNetTcpFile(Path.of("/proc/net/tcp6"), IpVersion.V6, byteOrder, targetPorts, sockets);
+        if (!readAny || sockets.isEmpty()) {
+            return readAny;
+        }
+
+        Set<Long> targetInodes = new HashSet<>();
+        for (ProcTcpSocket socket : sockets) {
+            if (socket.inode() > 0) {
+                targetInodes.add(socket.inode());
+            }
+        }
+        Map<Long, Long> inodeToPid = resolveLinuxSocketInodesToPids(targetInodes);
+        for (ProcTcpSocket socket : sockets) {
+            Optional<Long> pid = Optional.ofNullable(inodeToPid.get(socket.inode()));
+            PortBinding candidate = new PortBinding(socket.port(), pid, socket.localAddress());
+            out.put(socket.port(), pickBetterListener(Optional.ofNullable(out.get(socket.port())), candidate));
+        }
+        return true;
+    }
+
+    private static boolean readProcNetTcpFile(
+        Path path,
+        IpVersion ipVersion,
+        ByteOrder byteOrder,
+        Set<Integer> targetPorts,
+        List<ProcTcpSocket> sockets
+    ) {
+        if (!Files.isReadable(path)) {
+            return false;
+        }
+        try {
+            sockets.addAll(parseLinuxProcNetTcp(Files.readString(path, StandardCharsets.UTF_8), ipVersion, byteOrder, targetPorts));
+            return true;
+        } catch (IOException ignored) {
+            return false;
+        }
+    }
+
+    private static Map<Long, Long> resolveLinuxSocketInodesToPids(Set<Long> targetInodes) {
+        if (targetInodes.isEmpty()) {
+            return Map.of();
+        }
+        Path procDir = Path.of("/proc");
+        if (!Files.isDirectory(procDir)) {
+            return Map.of();
+        }
+        Map<Long, Long> found = new HashMap<>();
+        try (Stream<Path> procEntries = Files.list(procDir)) {
+            for (Path entry : procEntries.toList()) {
+                Path fileName = entry.getFileName();
+                if (fileName == null) {
+                    continue;
+                }
+                Optional<Long> pidOpt = parsePositivePid(fileName.toString());
+                if (pidOpt.isEmpty()) {
+                    continue;
+                }
+                Path fdDir = entry.resolve("fd");
+                if (!Files.isDirectory(fdDir)) {
+                    continue;
+                }
+                try (Stream<Path> fds = Files.list(fdDir)) {
+                    for (Path fd : fds.toList()) {
+                        try {
+                            String target = Files.readSymbolicLink(fd).toString();
+                            if (target.startsWith("socket:[") && target.endsWith("]")) {
+                                long inode = Long.parseLong(target.substring("socket:[".length(), target.length() - 1));
+                                if (targetInodes.contains(inode)) {
+                                    found.putIfAbsent(inode, pidOpt.get());
+                                    if (found.size() == targetInodes.size()) {
+                                        return found;
+                                    }
+                                }
+                            }
+                        } catch (IOException | SecurityException | NumberFormatException ignored) {
+                            // Process may exit or belong to another user.
+                        }
+                    }
+                } catch (IOException | SecurityException ignored) {
+                    // Unreadable /proc/<pid>/fd directory.
+                }
+            }
+        } catch (IOException | SecurityException ignored) {
+            // Unreadable /proc directory.
+        }
+        return found;
+    }
+
+    private static Optional<String> decodeProcLoopbackOrWildcardHost(String hexAddr, IpVersion ipVersion, ByteOrder byteOrder) {
+        String upper = hexAddr.toUpperCase(Locale.ROOT);
+        boolean littleEndian = byteOrder == ByteOrder.LITTLE_ENDIAN;
+        if (ipVersion == IpVersion.V4) {
+            if (upper.length() != 8) {
+                return Optional.empty();
+            }
+            if ("00000000".equals(upper)) {
+                return Optional.of("0.0.0.0");
+            }
+            String loopback = littleEndian ? "0100007F" : "7F000001";
+            return loopback.equals(upper) ? Optional.of("127.0.0.1") : Optional.empty();
+        }
+        if (upper.length() != 32) {
+            return Optional.empty();
+        }
+        if ("00000000000000000000000000000000".equals(upper)) {
+            return Optional.of("[::]");
+        }
+        String ipv6Loopback = littleEndian
+            ? "00000000000000000000000001000000"
+            : "00000000000000000000000000000001";
+        if (ipv6Loopback.equals(upper)) {
+            return Optional.of("[::1]");
+        }
+        String mappedLoopback = littleEndian
+            ? "0000000000000000FFFF00000100007F"
+            : "00000000000000000000FFFF7F000001";
+        if (mappedLoopback.equals(upper)) {
+            return Optional.of("[::ffff:127.0.0.1]");
+        }
+        String mappedWildcard = littleEndian
+            ? "0000000000000000FFFF000000000000"
+            : "00000000000000000000FFFF00000000";
+        if (mappedWildcard.equals(upper)) {
+            return Optional.of("[::]");
+        }
+        return Optional.empty();
     }
 
     private static PortBinding pickBetterListener(Optional<PortBinding> currentOpt, PortBinding candidate) {

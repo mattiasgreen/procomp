@@ -1,6 +1,6 @@
 # Coding Standards
 
-Judgement-call standards enforced during `/code-review` (mechanical import, purity, and banned-synonym checks are enforced deterministically by `ArchitectureRulesTest` in `test/TestRunner.java`).
+Judgement-call standards enforced during `/code-review` (mechanical import, purity, and banned-synonym checks are enforced deterministically by `ArchitectureRulesTest` in `gradle fastCheck`).
 
 ## Modality Isolation
 

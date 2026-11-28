@@ -1,5 +1,5 @@
 * text=auto
 procomp text eol=lf
-procomp-test text eol=lf
+*.java text eol=lf
 *.sh text eol=lf
 *.cmd text eol=crlf

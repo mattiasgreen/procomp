@@ -53,7 +53,7 @@ Requires **JDK 25 LTS** (zero external runtime dependencies via JEP 458):
 ```sh
 ./procomp --help          # POSIX (macOS / Linux / Git Bash / WSL)
 procomp.cmd --help        # Windows
-./procomp-test --fast     # Offline fast test suite (Levels 1-2)
+gradle fastCheck          # Fast inner-loop verification (Spotless, Error Prone + NullAway, Levels 1-2)
 gradle check              # Full Gradle verification (Spotless, Error Prone + NullAway, Levels 1-3, JEP 458, Scenarios, Demos)
 ```
 

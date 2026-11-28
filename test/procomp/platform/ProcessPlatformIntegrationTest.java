@@ -17,6 +17,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 
 public final class ProcessPlatformIntegrationTest {
@@ -166,6 +168,31 @@ public final class ProcessPlatformIntegrationTest {
             java    7771 dev   42u  IPv6 0x1234      0t0  TCP *:9001 (LISTEN)
             """;
         Assert.assertEquals(Optional.of(7771L), OsPortScanner.parsePosixLsof(lsofSample, 9001).flatMap(PortBinding::pid), "parse POSIX lsof");
+
+        String procNetTcpSample = """
+              sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+               0: 0100007F:2329 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 123456 1 0000000000000000 100 0 0 10 0
+               1: 00000000:232A 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 999999 1 0000000000000000 100 0 0 10 0
+            """;
+        List<OsPortScanner.ProcTcpSocket> procV4 = OsPortScanner.parseLinuxProcNetTcp(
+            procNetTcpSample, OsPortScanner.IpVersion.V4, ByteOrder.LITTLE_ENDIAN, Set.of(9001, 9002)
+        );
+        Assert.assertEquals(1, procV4.size(), "parse /proc/net/tcp matches LISTEN only");
+        Assert.assertEquals(9001, procV4.get(0).port(), "parse /proc/net/tcp port");
+        Assert.assertEquals("127.0.0.1:9001", procV4.get(0).localAddress(), "parse /proc/net/tcp loopback address");
+        Assert.assertEquals(123456L, procV4.get(0).inode(), "parse /proc/net/tcp inode");
+
+        String procNetTcp6Sample = """
+              sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+               0: 00000000000000000000000000000000:232A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 654321 1 0000000000000000 100 0 0 10 0
+            """;
+        List<OsPortScanner.ProcTcpSocket> procV6 = OsPortScanner.parseLinuxProcNetTcp(
+            procNetTcp6Sample, OsPortScanner.IpVersion.V6, ByteOrder.LITTLE_ENDIAN, Set.of(9002)
+        );
+        Assert.assertEquals(1, procV6.size(), "parse /proc/net/tcp6 wildcard listener");
+        Assert.assertEquals(9002, procV6.get(0).port(), "parse /proc/net/tcp6 port");
+        Assert.assertEquals("[::]:9002", procV6.get(0).localAddress(), "parse /proc/net/tcp6 wildcard address");
+        Assert.assertEquals(654321L, procV6.get(0).inode(), "parse /proc/net/tcp6 inode");
     }
 
     public static void testOsProcessRunnerSpawnsInspectsParentChainAndStopsTree() throws Exception {
