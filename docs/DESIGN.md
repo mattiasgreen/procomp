@@ -127,6 +127,13 @@ All CLI flags use standard `--kebab-case`. Global flags (`--config <path>`, `-v`
 | `procomp gateway reconcile` | Converges the live `Gateway` mappings to match the Project's `Routing Table`. |
 | `procomp gateway logs` | Minimal raw log reader for `gateway.out.log` (or `gateway.err.log` with `--err`). Supports `-n <lines>`, `-f` (follow), `--err`, and `--path`. |
 
+### Git Hooks
+
+| Command | Behavior |
+| :--- | :--- |
+| `procomp git hooks [status] [--json]` | Read-only check of mandatory Git hooks across all cloned `Repository` checkouts configured in `procomp.json` (plus `git.extraRepositories`). Reports `OK`, `MISSING`, `OUTDATED`, `NOT_CLONED`, and `NOT_GIT_REPOSITORY`. |
+| `procomp git hooks install [repository...] [--json]` | Installs missing mandatory Git hooks and upgrades outdated hooks in all (or specified) cloned `Repository` checkouts using the configured mode (`copy` or `symlink`). `upgrade` is an alias for `install`. |
+
 ---
 
 ## 6. Explicitly Deferred (Post-v1)

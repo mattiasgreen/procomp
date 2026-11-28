@@ -20,8 +20,10 @@ final class ProjectConfigParser {
 
     private static final Set<String> TOP_LEVEL_KEYS = Set.of(
         "project", "repositoriesRoot", "envFiles", "defaults",
-        "builders", "runtimes", "gateway", "catalog", "services", "profiles"
+        "builders", "runtimes", "gateway", "catalog", "services", "profiles", "git"
     );
+    private static final Set<String> GIT_KEYS = Set.of("hooks", "extraRepositories");
+    private static final Set<String> GIT_HOOKS_KEYS = Set.of("sourceDir", "required", "files", "mode");
     private static final Set<String> ENV_FILE_KEYS = Set.of("path", "optional");
     private static final Set<String> DEFAULTS_KEYS = Set.of(
         "builder", "proxyPathTemplate", "remoteUrlTemplate", "workingDir", "vars", "env"
@@ -118,6 +120,11 @@ final class ProjectConfigParser {
             return profilesRes.castError();
         }
 
+        Result<Optional<RawProjectConfig.RawGitConfig>, DomainError> gitRes = parseOptionalGit(root);
+        if (gitRes.isErr()) {
+            return gitRes.castError();
+        }
+
         return Result.ok(new RawProjectConfig(
             okVal(projectRes),
             okVal(reposRootRes),
@@ -128,7 +135,8 @@ final class ProjectConfigParser {
             okVal(gatewayRes),
             okVal(catalogRes),
             okVal(servicesRes),
-            okVal(profilesRes)
+            okVal(profilesRes),
+            okVal(gitRes)
         ));
     }
 
@@ -503,6 +511,135 @@ final class ProjectConfigParser {
             profiles.put(profileName, new ProfileDefinition(profileName, okVal(localListRes)));
         }
         return Result.ok(profiles);
+    }
+
+    private static Result<Optional<RawProjectConfig.RawGitConfig>, DomainError> parseOptionalGit(JsonValue.JsonObject root) {
+        Optional<JsonValue> maybe = root.get("git");
+        if (maybe.isEmpty()) {
+            return Result.ok(Optional.empty());
+        }
+        Result<JsonValue.JsonObject, DomainError> objRes = asObject(maybe.get(), "git");
+        if (objRes.isErr()) return objRes.castError();
+        JsonValue.JsonObject obj = okVal(objRes);
+
+        Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, GIT_KEYS, "git");
+        if (unknown.isErr()) return unknown.castError();
+
+        Optional<RawProjectConfig.RawGitHooksConfig> hooks = Optional.empty();
+        Optional<JsonValue> hooksVal = obj.get("hooks");
+        if (hooksVal.isPresent()) {
+            Result<RawProjectConfig.RawGitHooksConfig, DomainError> hooksRes = parseGitHooks(hooksVal.get());
+            if (hooksRes.isErr()) return hooksRes.castError();
+            hooks = Optional.of(okVal(hooksRes));
+        }
+
+        List<String> extraRepos = List.of();
+        Optional<JsonValue> extraVal = obj.get("extraRepositories");
+        if (extraVal.isPresent()) {
+            Result<List<String>, DomainError> listRes = parseStringArray(extraVal.get(), "git.extraRepositories", false);
+            if (listRes.isErr()) return listRes.castError();
+            List<String> rawList = okVal(listRes);
+            for (int i = 0; i < rawList.size(); i++) {
+                if (rawList.get(i).isBlank()) {
+                    return Result.err(DomainError.of(
+                        "CONFIG_INVALID_VALUE",
+                        "'git.extraRepositories[" + i + "]' must not be blank",
+                        Map.of("field", "git.extraRepositories[" + i + "]")
+                    ));
+                }
+            }
+            extraRepos = rawList;
+        }
+
+        return Result.ok(Optional.of(new RawProjectConfig.RawGitConfig(hooks, extraRepos)));
+    }
+
+    private static Result<RawProjectConfig.RawGitHooksConfig, DomainError> parseGitHooks(JsonValue value) {
+        Result<JsonValue.JsonObject, DomainError> objRes = asObject(value, "git.hooks");
+        if (objRes.isErr()) return objRes.castError();
+        JsonValue.JsonObject obj = okVal(objRes);
+
+        Result<procomp.core.common.Unit, DomainError> unknown = rejectUnknownKeys(obj, GIT_HOOKS_KEYS, "git.hooks");
+        if (unknown.isErr()) return unknown.castError();
+
+        Result<Optional<String>, DomainError> sourceDirRes = optionalNonBlankString(obj, "sourceDir", "git.hooks");
+        if (sourceDirRes.isErr()) return sourceDirRes.castError();
+        Optional<String> sourceDir = okVal(sourceDirRes);
+
+        List<String> required = List.of();
+        Optional<JsonValue> reqVal = obj.get("required");
+        if (reqVal.isPresent()) {
+            Result<List<String>, DomainError> reqRes = parseStringArray(reqVal.get(), "git.hooks.required", true);
+            if (reqRes.isErr()) return reqRes.castError();
+            List<String> reqList = okVal(reqRes);
+            for (int i = 0; i < reqList.size(); i++) {
+                String hookName = reqList.get(i);
+                if (!isPathSafeIdentifier(hookName)) {
+                    return Result.err(DomainError.of(
+                        "CONFIG_INVALID_VALUE",
+                        "Invalid git hook name '" + hookName + "': must be a single path-safe segment",
+                        Map.of("field", "git.hooks.required[" + i + "]", "value", hookName)
+                    ));
+                }
+            }
+            required = reqList;
+        }
+
+        Result<Map<String, String>, DomainError> filesRes = parseOptionalStringMap(obj, "files", "git.hooks.files");
+        if (filesRes.isErr()) return filesRes.castError();
+        Map<String, String> files = okVal(filesRes);
+        for (Map.Entry<String, String> entry : files.entrySet()) {
+            String hookName = entry.getKey();
+            if (!isPathSafeIdentifier(hookName)) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Invalid git hook name '" + hookName + "': must be a single path-safe segment",
+                    Map.of("field", "git.hooks.files." + hookName, "value", hookName)
+                ));
+            }
+            if (entry.getValue().isBlank()) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "'git.hooks.files." + hookName + "' must not be blank",
+                    Map.of("field", "git.hooks.files." + hookName)
+                ));
+            }
+        }
+
+        GitHookInstallMode mode = GitHookInstallMode.COPY;
+        Result<Optional<String>, DomainError> modeRes = optionalNonBlankString(obj, "mode", "git.hooks");
+        if (modeRes.isErr()) return modeRes.castError();
+        if (okVal(modeRes).isPresent()) {
+            String rawMode = okVal(modeRes).get();
+            if ("copy".equals(rawMode)) {
+                mode = GitHookInstallMode.COPY;
+            } else if ("symlink".equals(rawMode)) {
+                mode = GitHookInstallMode.SYMLINK;
+            } else {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Unsupported git.hooks.mode '" + rawMode + "' (expected 'copy' or 'symlink')",
+                    Map.of("field", "git.hooks.mode", "value", rawMode)
+                ));
+            }
+        }
+
+        if (sourceDir.isEmpty() && files.isEmpty()) {
+            return Result.err(DomainError.of(
+                "CONFIG_MISSING_FIELD",
+                "git.hooks must configure at least 'sourceDir' or 'files'",
+                Map.of("field", "git.hooks")
+            ));
+        }
+        if (sourceDir.isEmpty() && !required.isEmpty()) {
+            return Result.err(DomainError.of(
+                "CONFIG_MISSING_FIELD",
+                "git.hooks.required requires 'git.hooks.sourceDir' to be configured",
+                Map.of("field", "git.hooks.sourceDir")
+            ));
+        }
+
+        return Result.ok(new RawProjectConfig.RawGitHooksConfig(sourceDir, required, files, mode));
     }
 
     private static Result<List<EnvFileSpec>, DomainError> parseOptionalEnvFiles(JsonValue.JsonObject parent, String key, String context) {

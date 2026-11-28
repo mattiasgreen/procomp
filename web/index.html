@@ -56,6 +56,31 @@
         <ul id="progress-list" class="progress-list"></ul>
       </section>
 
+      <!-- Mandatory Git Hooks Warning Banner -->
+      <section id="git-hooks-banner" class="git-hooks-banner" role="status" aria-live="polite" hidden>
+        <div class="git-hooks-banner-header">
+          <div class="git-hooks-banner-title">
+            <span class="badge badge-stale">GIT HOOKS</span>
+            <span id="git-hooks-summary" class="git-hooks-summary"></span>
+          </div>
+          <div class="git-hooks-banner-actions">
+            <button
+              id="btn-git-hooks-toggle"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              aria-expanded="true"
+              aria-controls="git-hooks-list"
+            >
+              Hide Details
+            </button>
+            <button id="btn-git-hooks-install-all" type="button" class="btn btn-primary btn-sm">
+              Install / Upgrade All
+            </button>
+          </div>
+        </div>
+        <ul id="git-hooks-list" class="git-hooks-list"></ul>
+      </section>
+
       <!-- Gateway Summary Bar -->
       <section id="gateway-section" class="card gateway-card" aria-labelledby="gateway-heading">
         <div class="gateway-row">

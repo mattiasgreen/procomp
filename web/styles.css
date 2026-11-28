@@ -465,6 +465,75 @@ body {
   word-break: break-word;
 }
 
+/* Mandatory Git Hooks Warning Banner */
+.git-hooks-banner {
+  padding: 11px 14px;
+  border-radius: var(--radius-md);
+  background: var(--orange-bg);
+  border: 1px solid var(--orange-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.git-hooks-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.git-hooks-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.git-hooks-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.git-hooks-summary {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.git-hooks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.git-hooks-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(13, 17, 23, 0.45);
+  border: 1px solid var(--border);
+}
+
+.git-hooks-item-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.git-hooks-repo {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /* Progress Strip */
 .progress-strip {
   padding: 10px 14px;

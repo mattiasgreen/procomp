@@ -4,6 +4,7 @@ import {
   cancelBuild,
   fetchInspect,
   fetchStatus,
+  installGitHooks,
   reconcileGateway,
   startGateway,
   stopGateway,
@@ -33,6 +34,7 @@ const state = {
   cliHistory: [],
   cliHistoryOpen: false,
   cliHistorySeq: 0,
+  gitHooksCollapsed: false,
   pollErrorActive: false,
   pendingRoutes: new Set(),
   pendingStops: new Set(),
@@ -71,6 +73,12 @@ const dom = {
 
   progressStrip: document.getElementById('progress-strip'),
   progressList: document.getElementById('progress-list'),
+
+  gitHooksBanner: document.getElementById('git-hooks-banner'),
+  gitHooksSummary: document.getElementById('git-hooks-summary'),
+  gitHooksList: document.getElementById('git-hooks-list'),
+  btnGitHooksToggle: document.getElementById('btn-git-hooks-toggle'),
+  btnGitHooksInstallAll: document.getElementById('btn-git-hooks-install-all'),
 
   gatewayType: document.getElementById('gateway-type'),
   gatewayEndpoint: document.getElementById('gateway-endpoint'),
@@ -400,6 +408,109 @@ function renderHeader() {
   document.title = `${project} — procomp`;
   dom.configPath.textContent = state.configPath || '';
   dom.configPath.title = state.configPath || '';
+}
+
+function renderGitHooks() {
+  const gitHooks = state.estate?.gitHooks;
+  if (!gitHooks || !gitHooks.configured || !gitHooks.hasWarnings) {
+    dom.gitHooksBanner.hidden = true;
+    dom.gitHooksList.replaceChildren();
+    return;
+  }
+
+  if (gitHooks.sourceError) {
+    dom.gitHooksSummary.textContent = `Mandatory Git hooks could not be checked: ${gitHooks.sourceError}`;
+    dom.btnGitHooksInstallAll.hidden = true;
+    dom.btnGitHooksToggle.hidden = true;
+    dom.gitHooksList.hidden = true;
+    dom.gitHooksList.replaceChildren();
+    dom.gitHooksBanner.hidden = false;
+    return;
+  }
+
+  dom.btnGitHooksInstallAll.hidden = false;
+  dom.btnGitHooksToggle.hidden = false;
+
+  const allRepos = gitHooks.repositories || [];
+  const nameCounts = new Map();
+  for (const repo of allRepos) {
+    nameCounts.set(repo.repository, (nameCounts.get(repo.repository) || 0) + 1);
+  }
+
+  const issueRepos = allRepos.filter(
+    (repo) => repo.status === 'MISSING_HOOKS' || repo.status === 'OUTDATED_HOOKS',
+  );
+  const parts = [];
+  if (gitHooks.missingHookCount > 0) {
+    parts.push(`${gitHooks.missingHookCount} missing`);
+  }
+  if (gitHooks.outdatedHookCount > 0) {
+    parts.push(`${gitHooks.outdatedHookCount} outdated`);
+  }
+  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+  dom.gitHooksSummary.textContent =
+    `Mandatory Git hooks need attention in ${gitHooks.repositoriesWithIssuesCount}/${gitHooks.checkedRepositoryCount} Repositories${detail}.`;
+
+  dom.gitHooksList.replaceChildren();
+  for (const repo of issueRepos) {
+    const li = el('li', 'git-hooks-item');
+    const info = el('div', 'git-hooks-item-info');
+    const isAmbiguous = (nameCounts.get(repo.repository) || 0) > 1;
+    const repoLabel = isAmbiguous ? repo.path : repo.repository;
+    const targetFilter = isAmbiguous ? repo.path : repo.repository;
+    info.append(el('span', 'mono git-hooks-repo', repoLabel));
+
+    const missing = (repo.hooks || []).filter((h) => h.state === 'MISSING').map((h) => h.name);
+    const outdated = (repo.hooks || [])
+      .filter((h) => h.state === 'OUTDATED' || h.state === 'NOT_EXECUTABLE')
+      .map((h) => h.name);
+    const repoParts = [];
+    if (missing.length > 0) {
+      repoParts.push(`missing: ${missing.join(', ')}`);
+    }
+    if (outdated.length > 0) {
+      repoParts.push(`outdated: ${outdated.join(', ')}`);
+    }
+    info.append(el('span', 'muted mono', repoParts.join(' · ')));
+
+    const btn = el(
+      'button',
+      'btn btn-secondary btn-sm',
+      missing.length > 0 && outdated.length > 0
+        ? 'Install / Upgrade'
+        : missing.length > 0
+          ? 'Install'
+          : 'Upgrade',
+    );
+    btn.type = 'button';
+    btn.addEventListener('click', () => handleInstallGitHooks([targetFilter], btn));
+
+    li.append(info, btn);
+    dom.gitHooksList.append(li);
+  }
+
+  dom.gitHooksList.hidden = state.gitHooksCollapsed;
+  dom.btnGitHooksToggle.textContent = state.gitHooksCollapsed ? 'Show Details' : 'Hide Details';
+  dom.btnGitHooksToggle.setAttribute('aria-expanded', String(!state.gitHooksCollapsed));
+  dom.gitHooksBanner.hidden = false;
+}
+
+async function handleInstallGitHooks(repositories, triggerBtn) {
+  clearError();
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+  }
+  try {
+    const payload = await installGitHooks(repositories);
+    setCliCommand(payload.cliCommand, { explicit: true });
+    await refreshStatus({ explicit: false });
+  } catch (err) {
+    showError(err);
+  } finally {
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+    }
+  }
 }
 
 function renderGateway() {
@@ -765,6 +876,7 @@ async function refreshStatus({ explicit = false } = {}) {
         : null;
 
     renderHeader();
+    renderGitHooks();
     renderGateway();
     renderProfiles();
     renderServices();
@@ -1469,6 +1581,13 @@ function init() {
     handleGatewayAction(() => stopGateway(), dom.btnGatewayStop),
   );
   dom.btnGatewayLogs.addEventListener('click', () => openGatewayLogsDrawer());
+  dom.btnGitHooksToggle.addEventListener('click', () => {
+    state.gitHooksCollapsed = !state.gitHooksCollapsed;
+    renderGitHooks();
+  });
+  dom.btnGitHooksInstallAll.addEventListener('click', () =>
+    handleInstallGitHooks([], dom.btnGitHooksInstallAll),
+  );
 
   dom.btnStartLocal.addEventListener('click', () => handleStartServices([]));
   dom.btnStopManaged.addEventListener('click', () => handleStopServices([], dom.btnStopManaged));

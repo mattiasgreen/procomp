@@ -82,6 +82,9 @@ public final class StatusCli {
             );
         }
         out.println(formatGatewayLine(status.gateway()));
+        if (status.gitHooks().isPresent() && status.gitHooks().get().hasWarnings()) {
+            out.println(GitCli.formatWarningLine(status.gitHooks().get()));
+        }
     }
 
     private static void renderJson(EstateStatus status, PrintWriter out) {

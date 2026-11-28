@@ -21,11 +21,12 @@ public final class Procomp {
     private Procomp() {}
 
     private sealed interface CliCommand permits
-        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Gateway, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
+        CliCommand.Routing, CliCommand.ProcessCommand, CliCommand.Build, CliCommand.Gateway, CliCommand.Git, CliCommand.Status, CliCommand.Logs, CliCommand.Ui {
         record Routing(RoutingCli.Action action) implements CliCommand {}
         record ProcessCommand(ProcessCli.Action action) implements CliCommand {}
         record Build(BuildCli.Action action) implements CliCommand {}
         record Gateway(GatewayCli.Action action) implements CliCommand {}
+        record Git(GitCli.Action action) implements CliCommand {}
         record Status(StatusCli.Action action) implements CliCommand {}
         record Logs(LogsRequest request) implements CliCommand {}
         record Ui(UiCli.Options options) implements CliCommand {}
@@ -87,6 +88,7 @@ public final class Procomp {
             case "start", "stop", "inspect" -> ProcessCli.parse(command, subArgs).map(CliCommand.ProcessCommand::new);
             case "build" -> BuildCli.parse(subArgs).map(CliCommand.Build::new);
             case "gateway" -> GatewayCli.parse(subArgs).map(CliCommand.Gateway::new);
+            case "git" -> GitCli.parse(subArgs).map(CliCommand.Git::new);
             case "status" -> StatusCli.parse(subArgs).map(CliCommand.Status::new);
             case "logs" -> LogsCli.parse(subArgs).map(CliCommand.Logs::new);
             case "ui" -> UiCli.parse(subArgs).map(CliCommand.Ui::new);
@@ -100,6 +102,7 @@ public final class Procomp {
             case CliCommand.ProcessCommand(ProcessCli.Action action) -> ProcessCli.execute(action, project, runtime);
             case CliCommand.Build(BuildCli.Action action) -> BuildCli.execute(action, project, runtime);
             case CliCommand.Gateway(GatewayCli.Action action) -> GatewayCli.execute(action, project, runtime);
+            case CliCommand.Git(GitCli.Action action) -> GitCli.execute(action, project, runtime);
             case CliCommand.Status(StatusCli.Action action) -> StatusCli.execute(action, project, runtime);
             case CliCommand.Logs(LogsRequest request) -> LogsCli.execute(request, project, runtime);
             case CliCommand.Ui _ -> throw new IllegalStateException("Ui command must be dispatched via UiCli.execute");
@@ -177,6 +180,8 @@ public final class Procomp {
               profile <list|use <name>>           List or apply named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
+              git hooks <status|install|upgrade> [repository...]
+                                                  Check or install/upgrade mandatory Git hooks across Repositories (--json)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 

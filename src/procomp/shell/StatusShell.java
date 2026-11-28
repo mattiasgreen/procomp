@@ -4,6 +4,7 @@ import procomp.core.build.BuildDisplayState;
 import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
+import procomp.core.git.GitHooksReport;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.Ownership;
@@ -43,6 +44,7 @@ public final class StatusShell {
     private final ProcessShell processShell;
     private final GatewayShell gatewayShell;
     private final Optional<BuildShell> buildShell;
+    private final Optional<GitHooksShell> gitHooksShell;
     private final Clock clock;
 
     public StatusShell(
@@ -72,7 +74,30 @@ public final class StatusShell {
             httpClient,
             projectFiles,
             clock,
-            observer
+            observer,
+            Optional.empty()
+        );
+    }
+
+    public StatusShell(
+        StateStore stateStore,
+        ProcessRunner processRunner,
+        PortScanner portScanner,
+        HttpClient httpClient,
+        ProjectFiles projectFiles,
+        Clock clock,
+        ProgressObserver observer,
+        GitHooksShell gitHooksShell
+    ) {
+        this(
+            new RoutingShell(stateStore),
+            new ProcessLifecycle(stateStore, processRunner, portScanner, httpClient, projectFiles, clock, observer),
+            new BuildShell(stateStore, processRunner, projectFiles, clock, observer),
+            httpClient,
+            projectFiles,
+            clock,
+            observer,
+            Optional.of(Objects.requireNonNull(gitHooksShell, "gitHooksShell must not be null"))
         );
     }
 
@@ -83,7 +108,8 @@ public final class StatusShell {
         HttpClient httpClient,
         ProjectFiles projectFiles,
         Clock clock,
-        ProgressObserver observer
+        ProgressObserver observer,
+        Optional<GitHooksShell> gitHooksShell
     ) {
         this(
             routingShell,
@@ -91,7 +117,8 @@ public final class StatusShell {
             buildShell,
             projectFiles,
             lifecycle,
-            clock
+            clock,
+            gitHooksShell
         );
     }
 
@@ -101,13 +128,15 @@ public final class StatusShell {
         BuildShell buildShell,
         ProjectFiles projectFiles,
         ProcessLifecycle lifecycle,
-        Clock clock
+        Clock clock,
+        Optional<GitHooksShell> gitHooksShell
     ) {
         this(
             routingShell,
             new ProcessShell(projectFiles, routingShell, gatewayShell, lifecycle),
             gatewayShell,
             Optional.of(buildShell),
+            gitHooksShell,
             clock
         );
     }
@@ -118,7 +147,7 @@ public final class StatusShell {
         GatewayShell gatewayShell,
         Clock clock
     ) {
-        this(routingShell, processShell, gatewayShell, Optional.empty(), clock);
+        this(routingShell, processShell, gatewayShell, Optional.empty(), Optional.empty(), clock);
     }
 
     private StatusShell(
@@ -126,12 +155,14 @@ public final class StatusShell {
         ProcessShell processShell,
         GatewayShell gatewayShell,
         Optional<BuildShell> buildShell,
+        Optional<GitHooksShell> gitHooksShell,
         Clock clock
     ) {
         this.routingShell = Objects.requireNonNull(routingShell, "routingShell must not be null");
         this.processShell = Objects.requireNonNull(processShell, "processShell must not be null");
         this.gatewayShell = Objects.requireNonNull(gatewayShell, "gatewayShell must not be null");
         this.buildShell = Objects.requireNonNull(buildShell, "buildShell must not be null");
+        this.gitHooksShell = Objects.requireNonNull(gitHooksShell, "gitHooksShell must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
@@ -208,7 +239,16 @@ public final class StatusShell {
             gatewaySummary = GatewaySummary.of(((Result.Ok<GatewayStatusReport, DomainError>) gwRes).value());
         }
 
-        return Result.ok(new EstateStatus(project.name(), gatewaySummary, rows));
+        Optional<GitHooksReport> gitHooksReport = Optional.empty();
+        if (gitHooksShell.isPresent() && project.git().flatMap(g -> g.hooks()).isPresent()) {
+            Result<GitHooksReport, DomainError> hooksRes = gitHooksShell.get().statusForEstate(project);
+            if (hooksRes instanceof Result.Err<GitHooksReport, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            gitHooksReport = Optional.of(((Result.Ok<GitHooksReport, DomainError>) hooksRes).value());
+        }
+
+        return Result.ok(new EstateStatus(project.name(), gatewaySummary, rows, gitHooksReport));
     }
 
     private Result<ServiceStatusRow, DomainError> discoverServiceRow(
@@ -262,14 +302,24 @@ public final class StatusShell {
     public record EstateStatus(
         String project,
         GatewaySummary gateway,
-        List<ServiceStatusRow> services
+        List<ServiceStatusRow> services,
+        Optional<GitHooksReport> gitHooks
     ) {
+        public EstateStatus(
+            String project,
+            GatewaySummary gateway,
+            List<ServiceStatusRow> services
+        ) {
+            this(project, gateway, services, Optional.empty());
+        }
+
         public EstateStatus {
             if (project == null || project.isBlank()) {
                 throw new IllegalArgumentException("project must be non-blank");
             }
             Objects.requireNonNull(gateway, "gateway must not be null");
             services = List.copyOf(services);
+            Objects.requireNonNull(gitHooks, "gitHooks must not be null");
         }
     }
 

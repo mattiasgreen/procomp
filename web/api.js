@@ -146,6 +146,13 @@ export function reconcileGateway() {
   });
 }
 
+export function installGitHooks(repositories = []) {
+  return requestJson('/api/git/hooks/install', {
+    method: 'POST',
+    body: JSON.stringify({ repositories }),
+  });
+}
+
 export function fetchServiceLogs(serviceName, { lines = 100, err = false, build = false } = {}) {
   const params = new URLSearchParams({
     lines: String(lines),

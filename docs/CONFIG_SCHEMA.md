@@ -88,6 +88,7 @@
 | `catalog` | `object` | No | External `Catalog` JSON importer with explicit field mapping. |
 | `services` | `map<string, Service>` | No | Inline `Service` definitions (or overrides for `Service`s imported via `catalog`). Map key is the unique `Service` name. |
 | `profiles` | `map<string, Profile>` | No | Named routing `Profile`s. Each declares `{ "local": ["<service>", ...] }`; all other `Service`s route `REMOTE`. Fails fast on unknown `Service` names. |
+| `git` | `object` | No | Optional Project Git settings: mandatory `hooks` (`sourceDir`, `required`, `files`, `mode`) and `extraRepositories` checked alongside Service `Repository` roots. |
 
 ---
 
@@ -184,3 +185,21 @@ Custom `vars` values may be either a `string` or a `string[]` (e.g., `"jvmArgs":
 | `vars` | `map<string, string \| string[]>` | No | Custom template variables (merged over `defaults.vars`). |
 | `env` | `map<string, string>` | No | Service-level environment variables (merged over `runtime.env`). |
 | `envFiles` | `(string \| { path, optional? })[]` | No | Additional service-specific `.env` files. |
+
+### `git`
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `hooks` | `object` | No | Mandatory Git hooks configuration applied across all cloned `Repository` checkouts in the `Project`. |
+| `extraRepositories` | `string[]` | No | Additional local `Repository` paths (relative to `configDir`, absolute, or using `{{configDir}}` / `{{repositoriesRoot}}` / `${env:VAR}`) checked alongside Service `Repository` roots. |
+
+#### `git.hooks`
+
+At least one of `sourceDir` or `files` must be configured.
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `sourceDir` | `string` | No* | Directory containing mandatory Git hook files (supports `{{configDir}}`, `{{repositoriesRoot}}`, `{{user}}`, `defaults.vars`, and `${env:VAR}`). When `required` is omitted, all regular non-hidden files in `sourceDir` are treated as mandatory hooks. |
+| `required` | `string[]` | No | Explicit list of mandatory hook names (e.g., `["pre-commit", "commit-msg"]`) resolved from `sourceDir`. Requires `sourceDir`. |
+| `files` | `map<string, string>` | No* | Explicit mapping of `<hook-name>` to source file path (overrides `sourceDir` for the same hook name when both are set). |
+| `mode` | `"copy" \| "symlink"` | No | Installation strategy for `procomp git hooks install` / `upgrade` (default `"copy"`). |
