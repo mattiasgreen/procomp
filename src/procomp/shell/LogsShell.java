@@ -6,6 +6,7 @@ import procomp.core.process.LogTailer;
 import procomp.core.project.Project;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.LogChunk;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProgressObserver;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
@@ -15,14 +16,19 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
- * Use-case orchestrator for minimal raw Service log path resolution, tailing, and following.
+ * Use-case orchestrator for minimal raw Service log path resolution, tailing, backward paging, and following.
  */
 public final class LogsShell {
 
     public static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(200);
+    public static final int DEFAULT_PAGE_MAX_BYTES = 1024 * 1024;
+
+    private static void noopPageListener(LogPage ignored) {}
 
     private final StateStore stateStore;
     private final Clock clock;
@@ -44,12 +50,24 @@ public final class LogsShell {
         Duration pollInterval,
         BooleanSupplier keepFollowing
     ) {
+        return run(project, request, pollInterval, keepFollowing, LogsShell::noopPageListener);
+    }
+
+    public Result<LogsResult, DomainError> run(
+        Project project,
+        LogsRequest request,
+        Duration pollInterval,
+        BooleanSupplier keepFollowing,
+        Consumer<LogPage> onInitialPage
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(pollInterval, "pollInterval must not be null");
         Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
+        Objects.requireNonNull(onInitialPage, "onInitialPage must not be null");
 
-        if (project.service(request.serviceName()).isEmpty()) {
+        var svcOpt = project.service(request.serviceName());
+        if (svcOpt.isEmpty()) {
             return Result.err(DomainError.of(
                 "UNKNOWN_SERVICE",
                 "Unknown service '" + request.serviceName() + "' in project '" + project.name() + "'",
@@ -57,9 +75,24 @@ public final class LogsShell {
             ));
         }
 
-        ProcessKey key = request.build()
-            ? ProcessKey.build(request.serviceName())
-            : ProcessKey.service(request.serviceName());
+        ProcessKey key;
+        String logTargetName = request.serviceName();
+        if (request.git()) {
+            var repoOpt = svcOpt.get().repository();
+            if (repoOpt.isEmpty()) {
+                return Result.err(DomainError.of(
+                    "GIT_NO_REPOSITORY",
+                    "Service '" + request.serviceName() + "' has no Repository configured",
+                    Map.of("service", request.serviceName())
+                ));
+            }
+            key = ProcessKey.git(repoOpt.get().name());
+            logTargetName = repoOpt.get().name();
+        } else if (request.build()) {
+            key = ProcessKey.build(request.serviceName());
+        } else {
+            key = ProcessKey.service(request.serviceName());
+        }
         Path logPath = stateStore.logPath(project.name(), key, request.stderr());
         if (request.pathOnly()) {
             return Result.ok(new LogsResult.ResolvedPath(logPath));
@@ -70,7 +103,87 @@ public final class LogsShell {
                 .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
         }
 
-        return follow(logPath, request.serviceName(), request.stderr(), request.lines(), pollInterval, keepFollowing);
+        return follow(
+            logPath,
+            logTargetName,
+            request.stderr(),
+            request.lines(),
+            pollInterval,
+            keepFollowing,
+            onInitialPage
+        );
+    }
+
+    public Result<LogPageResult, DomainError> readPage(Project project, LogsPageRequest request) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+        var svcOpt = project.service(request.serviceName());
+        if (svcOpt.isEmpty()) {
+            return Result.err(DomainError.of(
+                "UNKNOWN_SERVICE",
+                "Unknown service '" + request.serviceName() + "' in project '" + project.name() + "'",
+                Map.of("service", request.serviceName(), "project", project.name())
+            ));
+        }
+        ProcessKey key;
+        if (request.git()) {
+            var repoOpt = svcOpt.get().repository();
+            if (repoOpt.isEmpty()) {
+                return Result.err(DomainError.of(
+                    "GIT_NO_REPOSITORY",
+                    "Service '" + request.serviceName() + "' has no Repository configured",
+                    Map.of("service", request.serviceName())
+                ));
+            }
+            key = ProcessKey.git(repoOpt.get().name());
+        } else if (request.build()) {
+            key = ProcessKey.build(request.serviceName());
+        } else {
+            key = ProcessKey.service(request.serviceName());
+        }
+        Path logPath = stateStore.logPath(project.name(), key, request.stderr());
+        return stateStore.readLogPageBackward(logPath, request.beforeOffset(), request.lines(), request.maxBytes())
+            .map(page -> new LogPageResult(logPath, page));
+    }
+
+    public Result<LogsResult, DomainError> runGit(Project project, GitLogsRequest request) {
+        return runGit(project, request, DEFAULT_POLL_INTERVAL, () -> !Thread.currentThread().isInterrupted());
+    }
+
+    public Result<LogsResult, DomainError> runGit(
+        Project project,
+        GitLogsRequest request,
+        Duration pollInterval,
+        BooleanSupplier keepFollowing
+    ) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(pollInterval, "pollInterval must not be null");
+        Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
+
+        Result<procomp.core.project.RepositoryRef, DomainError> repoRes = GitShell.resolveTarget(project, request.target());
+        if (repoRes.isErr()) {
+            return repoRes.castError();
+        }
+        String repoName = ((Result.Ok<procomp.core.project.RepositoryRef, DomainError>) repoRes).value().name();
+
+        Path logPath = stateStore.logPath(project.name(), ProcessKey.git(repoName), request.stderr());
+        if (request.pathOnly()) {
+            return Result.ok(new LogsResult.ResolvedPath(logPath));
+        }
+        if (!request.follow()) {
+            return stateStore.readLogText(logPath)
+                .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
+        }
+        return follow(
+            logPath,
+            repoName,
+            request.stderr(),
+            request.lines(),
+            pollInterval,
+            keepFollowing,
+            LogsShell::noopPageListener
+        );
     }
 
     public Result<LogsResult, DomainError> runGateway(Project project, GatewayLogsRequest request) {
@@ -83,10 +196,21 @@ public final class LogsShell {
         Duration pollInterval,
         BooleanSupplier keepFollowing
     ) {
+        return runGateway(project, request, pollInterval, keepFollowing, LogsShell::noopPageListener);
+    }
+
+    public Result<LogsResult, DomainError> runGateway(
+        Project project,
+        GatewayLogsRequest request,
+        Duration pollInterval,
+        BooleanSupplier keepFollowing,
+        Consumer<LogPage> onInitialPage
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(pollInterval, "pollInterval must not be null");
         Objects.requireNonNull(keepFollowing, "keepFollowing must not be null");
+        Objects.requireNonNull(onInitialPage, "onInitialPage must not be null");
 
         if (project.gateway().isEmpty()) {
             return Result.err(DomainError.of(
@@ -106,7 +230,22 @@ public final class LogsShell {
                 .map(text -> new LogsResult.RawTail(logPath, LogTailer.tailLines(text, request.lines())));
         }
 
-        return follow(logPath, "gateway", request.stderr(), request.lines(), pollInterval, keepFollowing);
+        return follow(logPath, "gateway", request.stderr(), request.lines(), pollInterval, keepFollowing, onInitialPage);
+    }
+
+    public Result<LogPageResult, DomainError> readGatewayPage(Project project, GatewayLogsPageRequest request) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+        if (project.gateway().isEmpty()) {
+            return Result.err(DomainError.of(
+                "GATEWAY_NOT_CONFIGURED",
+                "No Gateway is configured in project '" + project.name() + "'",
+                Map.of("project", project.name())
+            ));
+        }
+        Path logPath = stateStore.logPath(project.name(), ProcessKey.gateway(), request.stderr());
+        return stateStore.readLogPageBackward(logPath, request.beforeOffset(), request.lines(), request.maxBytes())
+            .map(page -> new LogPageResult(logPath, page));
     }
 
     private Result<LogsResult, DomainError> follow(
@@ -115,17 +254,23 @@ public final class LogsShell {
         boolean stderr,
         int lines,
         Duration pollInterval,
-        BooleanSupplier keepFollowing
+        BooleanSupplier keepFollowing,
+        Consumer<LogPage> onInitialPage
     ) {
-        Result<LogChunk, DomainError> initialRes = stateStore.readLogChunk(logPath, 0L);
-        if (initialRes instanceof Result.Err<LogChunk, DomainError>(DomainError err)) {
+        Result<LogPage, DomainError> initialRes = stateStore.readLogPageBackward(
+            logPath,
+            OptionalLong.empty(),
+            lines,
+            DEFAULT_PAGE_MAX_BYTES
+        );
+        if (initialRes instanceof Result.Err<LogPage, DomainError>(DomainError err)) {
             return Result.err(err);
         }
-        LogChunk initial = ((Result.Ok<LogChunk, DomainError>) initialRes).value();
-        String initialTail = LogTailer.tailLines(initial.text(), lines);
-        emitLines(targetName, stderr, initialTail);
+        LogPage initial = ((Result.Ok<LogPage, DomainError>) initialRes).value();
+        onInitialPage.accept(initial);
+        emitLines(targetName, stderr, initial.text());
 
-        long offset = initial.nextOffset();
+        long offset = initial.endOffset();
         while (keepFollowing.getAsBoolean() && clock.sleep(pollInterval)) {
             Result<LogChunk, DomainError> chunkRes = stateStore.readLogChunk(logPath, offset);
             if (chunkRes instanceof Result.Err<LogChunk, DomainError>(DomainError err)) {
@@ -152,7 +297,8 @@ public final class LogsShell {
         boolean pathOnly,
         int lines,
         boolean follow,
-        boolean build
+        boolean build,
+        boolean git
     ) {
         public static final int DEFAULT_LINES = 100;
 
@@ -163,12 +309,43 @@ public final class LogsShell {
             int lines,
             boolean follow
         ) {
-            this(serviceName, stderr, pathOnly, lines, follow, false);
+            this(serviceName, stderr, pathOnly, lines, follow, false, false);
+        }
+
+        public LogsRequest(
+            String serviceName,
+            boolean stderr,
+            boolean pathOnly,
+            int lines,
+            boolean follow,
+            boolean build
+        ) {
+            this(serviceName, stderr, pathOnly, lines, follow, build, false);
         }
 
         public LogsRequest {
             if (serviceName == null || serviceName.isBlank()) {
                 throw new IllegalArgumentException("serviceName must be non-blank");
+            }
+            if (lines < 0) {
+                throw new IllegalArgumentException("lines must be non-negative: " + lines);
+            }
+            if (build && git) {
+                throw new IllegalArgumentException("Cannot combine --build and --git log sources");
+            }
+        }
+    }
+
+    public record GitLogsRequest(
+        String target,
+        boolean stderr,
+        boolean pathOnly,
+        int lines,
+        boolean follow
+    ) {
+        public GitLogsRequest {
+            if (target == null || target.isBlank()) {
+                throw new IllegalArgumentException("target must be non-blank");
             }
             if (lines < 0) {
                 throw new IllegalArgumentException("lines must be non-negative: " + lines);
@@ -186,6 +363,87 @@ public final class LogsShell {
             if (lines < 0) {
                 throw new IllegalArgumentException("lines must be non-negative: " + lines);
             }
+        }
+    }
+
+    public record LogsPageRequest(
+        String serviceName,
+        boolean stderr,
+        boolean build,
+        boolean git,
+        OptionalLong beforeOffset,
+        int lines,
+        int maxBytes
+    ) {
+        public LogsPageRequest(
+            String serviceName,
+            boolean stderr,
+            boolean build,
+            OptionalLong beforeOffset,
+            int lines
+        ) {
+            this(serviceName, stderr, build, false, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
+        }
+
+        public LogsPageRequest(
+            String serviceName,
+            boolean stderr,
+            boolean build,
+            boolean git,
+            OptionalLong beforeOffset,
+            int lines
+        ) {
+            this(serviceName, stderr, build, git, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
+        }
+
+        public LogsPageRequest {
+            if (serviceName == null || serviceName.isBlank()) {
+                throw new IllegalArgumentException("serviceName must be non-blank");
+            }
+            if (build && git) {
+                throw new IllegalArgumentException("Cannot combine build and git log flags");
+            }
+            Objects.requireNonNull(beforeOffset, "beforeOffset must not be null");
+            if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+                throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+            }
+            if (lines < 0) {
+                throw new IllegalArgumentException("lines must be non-negative: " + lines);
+            }
+            if (maxBytes <= 0) {
+                throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+            }
+        }
+    }
+
+    public record GatewayLogsPageRequest(
+        boolean stderr,
+        OptionalLong beforeOffset,
+        int lines,
+        int maxBytes
+    ) {
+        public GatewayLogsPageRequest(boolean stderr, OptionalLong beforeOffset, int lines) {
+            this(stderr, beforeOffset, lines, DEFAULT_PAGE_MAX_BYTES);
+        }
+
+        public GatewayLogsPageRequest {
+            Objects.requireNonNull(beforeOffset, "beforeOffset must not be null");
+            if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+                throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+            }
+            if (lines < 0) {
+                throw new IllegalArgumentException("lines must be non-negative: " + lines);
+            }
+            if (maxBytes <= 0) {
+                throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+            }
+        }
+    }
+
+    public record LogPageResult(Path path, LogPage page) {
+        public LogPageResult {
+            Objects.requireNonNull(path, "path must not be null");
+            Objects.requireNonNull(page, "page must not be null");
         }
     }
 

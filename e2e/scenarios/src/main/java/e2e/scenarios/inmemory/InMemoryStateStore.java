@@ -4,17 +4,22 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitRunRecord;
+import procomp.core.process.LogTailer;
 import procomp.core.process.ManagedProcessRecord;
 import procomp.shell.ports.LogChunk;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.StateStore;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * In-memory implementation of {@link StateStore} storing project routing tables,
@@ -26,6 +31,7 @@ public final class InMemoryStateStore implements StateStore {
     private final Map<String, Map<String, String>> routingByProject = new LinkedHashMap<>();
     private final Map<String, Map<ProcessKey, ManagedProcessRecord>> managedByProject = new LinkedHashMap<>();
     private final Map<String, Map<String, BuildRunRecord>> buildRunsByProject = new LinkedHashMap<>();
+    private final Map<String, Map<String, GitRunRecord>> gitRunsByProject = new LinkedHashMap<>();
     private final Map<Path, StringBuilder> logs = new LinkedHashMap<>();
 
     public InMemoryStateStore() {
@@ -41,6 +47,7 @@ public final class InMemoryStateStore implements StateStore {
         routingByProject.clear();
         managedByProject.clear();
         buildRunsByProject.clear();
+        gitRunsByProject.clear();
         logs.clear();
     }
 
@@ -117,11 +124,27 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
+    public synchronized Result<Optional<GitRunRecord>, DomainError> readGitRun(String project, String repositoryName) {
+        Map<String, GitRunRecord> map = gitRunsByProject.get(project);
+        if (map == null) {
+            return Result.ok(Optional.empty());
+        }
+        return Result.ok(Optional.ofNullable(map.get(repositoryName)));
+    }
+
+    @Override
+    public synchronized Result<Unit, DomainError> writeGitRun(String project, String repositoryName, GitRunRecord record) {
+        gitRunsByProject.computeIfAbsent(project, _ -> new LinkedHashMap<>()).put(repositoryName, record);
+        return Result.ok(Unit.VALUE);
+    }
+
+    @Override
     public Path logPath(String project, ProcessKey key, boolean stderr) {
         String baseName = switch (key) {
             case ProcessKey.Service(String svc) -> svc;
             case ProcessKey.Gateway _ -> "gateway";
             case ProcessKey.Build(String svc) -> svc + ".build";
+            case ProcessKey.Git(String repo) -> repo + ".git";
         };
         String suffix = stderr ? ".err.log" : ".out.log";
         return projectStateDir(project).resolve("logs").resolve(baseName + suffix).normalize();
@@ -158,6 +181,51 @@ public final class InMemoryStateStore implements StateStore {
         }
         String slice = new String(allBytes, start, size - start, StandardCharsets.UTF_8);
         return Result.ok(new LogChunk(slice, size));
+    }
+
+    @Override
+    public synchronized Result<LogPage, DomainError> readLogPageBackward(
+        Path logPath,
+        OptionalLong beforeOffset,
+        int maxLines,
+        int maxBytes
+    ) {
+        if (maxLines < 0) {
+            throw new IllegalArgumentException("maxLines must be non-negative: " + maxLines);
+        }
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxBytes must be positive: " + maxBytes);
+        }
+        if (beforeOffset.isPresent() && beforeOffset.getAsLong() < 0) {
+            throw new IllegalArgumentException("beforeOffset must be non-negative: " + beforeOffset.getAsLong());
+        }
+        StringBuilder sb = logs.get(normalize(logPath));
+        if (sb == null) {
+            return Result.err(DomainError.of(
+                "LOG_NOT_FOUND",
+                "Log file not found: " + logPath,
+                Map.of("path", logPath.toString())
+            ));
+        }
+        byte[] allBytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+        long size = allBytes.length;
+        long endOffset;
+        if (beforeOffset.isPresent()) {
+            long requested = beforeOffset.getAsLong();
+            if (requested > size) {
+                return Result.ok(new LogPage("", 0L, 0L, false, true));
+            }
+            endOffset = requested;
+        } else {
+            endOffset = size;
+        }
+        if (endOffset == 0L || maxLines == 0) {
+            return Result.ok(new LogPage("", endOffset, endOffset, endOffset > 0L, false));
+        }
+        long windowStart = Math.max(0L, endOffset - maxBytes);
+        byte[] sliceBytes = Arrays.copyOfRange(allBytes, (int) windowStart, (int) endOffset);
+        LogTailer.BackwardSlice slice = LogTailer.sliceBackward(sliceBytes, windowStart, maxLines);
+        return Result.ok(new LogPage(slice.text(), slice.startOffset(), slice.endOffset(), slice.hasOlder(), false));
     }
 
     private static Path normalize(Path path) {

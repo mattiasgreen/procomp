@@ -253,8 +253,17 @@ public final class GatewayShell {
      * {@link StatusShell} and {@link ProcessShell#inspect} read the Routing Table only once.
      */
     Result<GatewayStatusReport, DomainError> status(Project project, RoutingTable routing) {
+        return status(project, routing, lifecycle.snapshotRssBytes());
+    }
+
+    Result<GatewayStatusReport, DomainError> status(
+        Project project,
+        RoutingTable routing,
+        Map<Long, Long> rssSnapshot
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(routing, "routing must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
 
         Result<GatewayDefinition, DomainError> gwRes = requireGateway(project);
         if (gwRes instanceof Result.Err<GatewayDefinition, DomainError>(DomainError err)) {
@@ -283,12 +292,14 @@ public final class GatewayShell {
             return Result.err(err);
         }
         GatewayDriftReport drift = ((Result.Ok<GatewayDriftReport, DomainError>) driftRes).value();
+        Optional<Long> rssBytes = lifecycle.resolveRssBytes(discovery, rssSnapshot);
         return Result.ok(new GatewayStatusReport(
             project.name(),
             gateway,
             discovery,
             discovery.uptime(clock.now()),
-            drift
+            drift,
+            rssBytes
         ));
     }
 
@@ -670,8 +681,19 @@ public final class GatewayShell {
         GatewayDefinition gateway,
         DiscoveryResult discovery,
         Optional<Duration> uptime,
-        GatewayDriftReport drift
+        GatewayDriftReport drift,
+        Optional<Long> rssBytes
     ) {
+        public GatewayStatusReport(
+            String projectName,
+            GatewayDefinition gateway,
+            DiscoveryResult discovery,
+            Optional<Duration> uptime,
+            GatewayDriftReport drift
+        ) {
+            this(projectName, gateway, discovery, uptime, drift, Optional.empty());
+        }
+
         public GatewayStatusReport {
             if (projectName == null || projectName.isBlank()) {
                 throw new IllegalArgumentException("projectName must be non-blank");
@@ -680,6 +702,7 @@ public final class GatewayShell {
             Objects.requireNonNull(discovery, "discovery must not be null");
             Objects.requireNonNull(uptime, "uptime must not be null");
             Objects.requireNonNull(drift, "drift must not be null");
+            Objects.requireNonNull(rssBytes, "rssBytes must not be null");
         }
     }
 

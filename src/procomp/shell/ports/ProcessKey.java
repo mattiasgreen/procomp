@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * Identifies the target owning a ManagedProcessRecord or raw log file within a Project.
  */
-public sealed interface ProcessKey permits ProcessKey.Service, ProcessKey.Gateway, ProcessKey.Build {
+public sealed interface ProcessKey permits ProcessKey.Service, ProcessKey.Gateway, ProcessKey.Build, ProcessKey.Git {
 
     record Service(String serviceName) implements ProcessKey {
         public Service {
@@ -27,6 +27,14 @@ public sealed interface ProcessKey permits ProcessKey.Service, ProcessKey.Gatewa
         }
     }
 
+    record Git(String repositoryName) implements ProcessKey {
+        public Git {
+            if (repositoryName == null || repositoryName.isBlank()) {
+                throw new IllegalArgumentException("repositoryName must be non-blank");
+            }
+        }
+    }
+
     static ProcessKey service(String serviceName) {
         return new Service(Objects.requireNonNull(serviceName));
     }
@@ -37,5 +45,9 @@ public sealed interface ProcessKey permits ProcessKey.Service, ProcessKey.Gatewa
 
     static ProcessKey build(String serviceName) {
         return new Build(Objects.requireNonNull(serviceName));
+    }
+
+    static ProcessKey git(String repositoryName) {
+        return new Git(Objects.requireNonNull(repositoryName));
     }
 }

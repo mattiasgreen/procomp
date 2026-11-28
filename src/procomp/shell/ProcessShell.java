@@ -133,6 +133,14 @@ public final class ProcessShell {
         return lifecycle.snapshotPorts(ports);
     }
 
+    Map<Long, Long> snapshotRssBytes() {
+        return lifecycle.snapshotRssBytes();
+    }
+
+    Optional<Long> resolveRssBytes(DiscoveryResult discovery, Map<Long, Long> rssSnapshot) {
+        return lifecycle.resolveRssBytes(discovery, rssSnapshot);
+    }
+
     /**
      * Performs read-only Discovery for a named Service without modifying any state or killing processes.
      */
@@ -180,7 +188,8 @@ public final class ProcessShell {
 
         Optional<String> liveGatewayRoute = Optional.empty();
         if (project.gateway().isPresent()) {
-            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes = gatewayShell.status(project, routing);
+            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes =
+                gatewayShell.status(project, routing, Map.of());
             if (gwStatusRes instanceof Result.Err<GatewayShell.GatewayStatusReport, DomainError>(DomainError err)) {
                 return Result.err(err);
             }

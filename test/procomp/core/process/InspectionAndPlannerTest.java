@@ -201,4 +201,90 @@ public final class InspectionAndPlannerTest {
         );
         Assert.assertEquals("ARTIFACT_NOT_FOUND", missingErr.code(), "missing artifact error code");
     }
+
+    public static void testInspectionGeneratesContextAwareJvmDiagnosticCommands() {
+        ProcessTarget target = new ProcessTarget(
+            "orders",
+            Optional.of(9001),
+            Optional.of("/actuator/health"),
+            Path.of("/state/acme/logs/orders.out.log"),
+            Path.of("/state/acme/logs/orders.err.log")
+        );
+        ManagedProcessRecord rec = new ManagedProcessRecord.Running(
+            4201L, T0, List.of("java", "-Xmx256m", "-jar", "orders.jar"), Optional.of(T0), target.stdoutLog(), target.stderrLog()
+        );
+
+        // 1. Live JVM without NMT flag
+        ObservedProcess jvmWithoutNmt = new ObservedProcess(
+            4201L, true, Optional.of(T0), Optional.of("C:\\Program Files\\Java\\jdk-25\\bin\\java.exe -Xmx256m -jar orders.jar"),
+            List.of("-Xmx256m", "-jar", "orders.jar"), List.of(), Optional.of(200L * 1024 * 1024),
+            Optional.of("C:\\Program Files\\Java\\jdk-25\\bin\\java.exe")
+        );
+        DiscoveryResult discWithoutNmt = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.of(rec), Optional.empty(), Optional.of(jvmWithoutNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
+        ));
+        InspectionReport reportWithoutNmt = DiscoveryEngine.inspect(
+            target, discWithoutNmt, Optional.of(rec), Optional.of("LOCAL"), Optional.empty(), T1
+        );
+        Assert.assertEquals(3, reportWithoutNmt.diagnosticCommands().size(), "3 JVM diagnostic commands");
+        Assert.assertEquals("jcmd 4201 GC.heap_info", reportWithoutNmt.diagnosticCommands().get(0).command(), "heap info cmd");
+        Assert.assertEquals(Optional.empty(), reportWithoutNmt.diagnosticCommands().get(0).note(), "heap info has no note");
+        Assert.assertEquals("jcmd 4201 VM.flags", reportWithoutNmt.diagnosticCommands().get(1).command(), "vm flags cmd");
+        Assert.assertEquals("jcmd 4201 VM.native_memory summary", reportWithoutNmt.diagnosticCommands().get(2).command(), "nmt cmd");
+        Assert.assertTrue(reportWithoutNmt.diagnosticCommands().get(2).note().isPresent(), "nmt note present when flag missing");
+        Assert.assertContains(reportWithoutNmt.diagnosticCommands().get(2).note().get(), "-XX:NativeMemoryTracking=summary", "nmt note mentions flag");
+
+        // 2. Live JVM with -XX:NativeMemoryTracking=summary
+        ObservedProcess jvmWithNmt = new ObservedProcess(
+            4202L, true, Optional.of(T0), Optional.of("java -XX:NativeMemoryTracking=summary -jar orders.jar"),
+            List.of("-XX:NativeMemoryTracking=summary", "-jar", "orders.jar"), List.of(), Optional.empty(), Optional.of("java")
+        );
+        DiscoveryResult discWithNmt = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(4202L), "127.0.0.1:9001")),
+            Optional.of(jvmWithNmt), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
+        ));
+        InspectionReport reportWithNmt = DiscoveryEngine.inspect(
+            target, discWithNmt, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
+        );
+        Assert.assertEquals(3, reportWithNmt.diagnosticCommands().size(), "3 JVM diagnostic commands with NMT");
+        Assert.assertEquals("jcmd 4202 VM.native_memory summary", reportWithNmt.diagnosticCommands().get(2).command(), "nmt cmd with pid");
+        Assert.assertEquals(Optional.empty(), reportWithNmt.diagnosticCommands().get(2).note(), "no note when NMT enabled");
+
+        // 3. Live JVM with -XX:NativeMemoryTracking=off still gets the note
+        ObservedProcess jvmNmtOff = new ObservedProcess(
+            4203L, true, Optional.of(T0), Optional.of("java -XX:NativeMemoryTracking=off -jar orders.jar"),
+            List.of("-XX:NativeMemoryTracking=off", "-jar", "orders.jar"), List.of(), Optional.empty(), Optional.of("java")
+        );
+        DiscoveryResult discNmtOff = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(4203L), "127.0.0.1:9001")),
+            Optional.of(jvmNmtOff), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
+        ));
+        InspectionReport reportNmtOff = DiscoveryEngine.inspect(
+            target, discNmtOff, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
+        );
+        Assert.assertTrue(reportNmtOff.diagnosticCommands().get(2).note().isPresent(), "nmt=off still shows note");
+
+        // 4. Non-JVM live process gets empty list
+        ObservedProcess nodeProc = new ObservedProcess(
+            5500L, true, Optional.of(T0), Optional.of("node server.js"),
+            List.of("server.js"), List.of(), Optional.empty(), Optional.of("node")
+        );
+        DiscoveryResult discNode = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.empty(), Optional.of(new PortBinding(9001, Optional.of(5500L), "127.0.0.1:9001")),
+            Optional.of(nodeProc), new HealthCheck.HttpResult(200, "OK"), Optional.empty(), T1
+        ));
+        InspectionReport reportNode = DiscoveryEngine.inspect(
+            target, discNode, Optional.empty(), Optional.of("LOCAL"), Optional.empty(), T1
+        );
+        Assert.assertTrue(reportNode.diagnosticCommands().isEmpty(), "non-JVM process has no diagnostic commands");
+
+        // 5. Stopped or crashed process gets empty list
+        DiscoveryResult discCrashed = DiscoveryEngine.discover(new DiscoveryInput(
+            target, Optional.of(rec), Optional.empty(), Optional.empty(), HealthCheck.None.INSTANCE, Optional.empty(), T1
+        ));
+        InspectionReport reportCrashed = DiscoveryEngine.inspect(
+            target, discCrashed, Optional.of(rec), Optional.of("LOCAL"), Optional.empty(), T1
+        );
+        Assert.assertTrue(reportCrashed.diagnosticCommands().isEmpty(), "crashed process has no diagnostic commands");
+    }
 }

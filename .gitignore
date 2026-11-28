@@ -4,6 +4,7 @@
 e2e/*/build/
 *.class
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 .env
 .env.local
 .idea/

@@ -8,5 +8,9 @@ public enum HealthState {
     STARTING,
     HEALTHY,
     STOPPING,
-    CRASHED
+    CRASHED;
+
+    public boolean isLive() {
+        return this == STARTING || this == HEALTHY || this == STOPPING;
+    }
 }

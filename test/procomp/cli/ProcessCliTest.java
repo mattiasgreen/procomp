@@ -69,6 +69,11 @@ public final class ProcessCliTest {
         Assert.assertContains(textRes.stdout(), "MANAGED", "inspect text prints owner");
         Assert.assertContains(textRes.stdout(), "HEALTHY", "inspect text prints health");
         Assert.assertContains(textRes.stdout(), "3001", "inspect text prints pid");
+        Assert.assertContains(textRes.stdout(), "RSS:             128 MB", "inspect text prints RSS label");
+        Assert.assertNotContains(textRes.stdout(), "RAM:", "inspect text uses RSS instead of RAM");
+        Assert.assertContains(textRes.stdout(), "Diagnostic Commands:", "inspect text prints Diagnostic Commands section");
+        Assert.assertContains(textRes.stdout(), "jcmd 3001 GC.heap_info", "inspect text prints heap_info command");
+        Assert.assertContains(textRes.stdout(), "jcmd 3001 VM.native_memory summary", "inspect text prints nmt command");
         Assert.assertNotContains(textRes.stdout(), "secret-token-xyz", "inspect text never leaks secrets");
 
         CliResult jsonRes = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "inspect", "orders", "--json");
@@ -79,6 +84,8 @@ public final class ProcessCliTest {
         Assert.assertEquals("HEALTHY", ((JsonValue.JsonString) obj.get("health").orElseThrow()).value(), "json health");
         Assert.assertEquals("REMOTE", ((JsonValue.JsonString) obj.get("desiredRoute").orElseThrow()).value(), "json desiredRoute");
         Assert.assertEquals("OFFLINE", ((JsonValue.JsonString) obj.get("liveGatewayRoute").orElseThrow()).value(), "json liveGatewayRoute OFFLINE");
+        JsonValue.JsonArray diagCmds = (JsonValue.JsonArray) obj.get("diagnosticCommands").orElseThrow();
+        Assert.assertEquals(3, diagCmds.elements().size(), "inspect --json diagnosticCommands has 3 items");
         Assert.assertNotContains(jsonRes.stdout(), "secret-token-xyz", "inspect --json never leaks secrets");
 
         // Verify no-gateway rendering shows 'none (no Gateway configured)' and null liveGatewayRoute in JSON

@@ -10,6 +10,7 @@ import procomp.shell.LogsShell;
 import procomp.shell.LogsShell.LogsRequest;
 import procomp.shell.LogsShell.LogsResult;
 import procomp.shell.ProjectLoader;
+import procomp.shell.ports.LogPage;
 import procomp.shell.ports.ProcessKey;
 import procomp.shell.ports.ProgressObserver.ProgressEvent;
 
@@ -22,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
@@ -87,6 +89,74 @@ public final class FsLogsFollowTest {
                 observer.events(),
                 "real filesystem follow captures initial tail, appends, and truncation in order"
             );
+        } finally {
+            deleteRecursively(tempRoot);
+        }
+    }
+
+    public static void testBackwardPaginationHandlesUtf8OverOneMegabyteAndFileShrink() throws Exception {
+        Path tempRoot = Files.createTempDirectory("procomp-logs-backward-test");
+        try {
+            FsStateStore store = new FsStateStore(
+                System.getProperty("os.name"),
+                Map.of("PROCOMP_STATE_DIR", tempRoot.toString()),
+                tempRoot
+            );
+            Path logFile = store.logPath("acme", ProcessKey.service("orders"), false);
+            Files.createDirectories(logFile.getParent());
+
+            // 1. Multi-byte UTF-8 lines paged backward with a small maxBytes window
+            String content = "α-one\nβ-two\n🚀-three\nγ-four\n";
+            Files.writeString(logFile, content, StandardCharsets.UTF_8);
+
+            StringBuilder reconstructed = new StringBuilder();
+            OptionalLong cursor = OptionalLong.empty();
+            int pages = 0;
+            while (true) {
+                LogPage page = Assert.assertOk(
+                    store.readLogPageBackward(logFile, cursor, 10, 12),
+                    "backward page " + pages + " succeeds"
+                );
+                Assert.assertFalse(page.truncated(), "not truncated during normal paging");
+                reconstructed.insert(0, page.text());
+                pages++;
+                if (!page.hasOlder()) {
+                    Assert.assertEquals(0L, page.startOffset(), "final page reaches byte 0");
+                    break;
+                }
+                Assert.assertTrue(page.startOffset() < page.endOffset(), "cursor always makes backward progress");
+                cursor = OptionalLong.of(page.startOffset());
+                Assert.assertTrue(pages < 20, "pagination terminates without looping");
+            }
+            Assert.assertEquals(content, reconstructed.toString(), "reconstructed UTF-8 content matches verbatim");
+
+            // 2. File > 1 MB tails from the true end
+            StringBuilder large = new StringBuilder(1_200_000);
+            String filler = "padding-line-0123456789abcdef\n";
+            for (int i = 0; i < 40_000; i++) {
+                large.append(filler);
+            }
+            large.append("end-line-A\nend-line-B\n");
+            Files.writeString(logFile, large.toString(), StandardCharsets.UTF_8);
+
+            LogPage tail = Assert.assertOk(
+                store.readLogPageBackward(logFile, OptionalLong.empty(), 2, 1024 * 1024),
+                ">1MB tail succeeds"
+            );
+            Assert.assertEquals("end-line-A\nend-line-B\n", tail.text(), "returns true end of >1MB file");
+            Assert.assertTrue(tail.hasOlder(), ">1MB file has older bytes");
+            Assert.assertTrue(tail.startOffset() > 1_000_000L, "startOffset is past 1MB");
+
+            // 3. File shrinks below cursor -> truncated: true, hasOlder: false
+            Files.writeString(logFile, "fresh-after-rotation\n", StandardCharsets.UTF_8);
+            LogPage shrunk = Assert.assertOk(
+                store.readLogPageBackward(logFile, OptionalLong.of(tail.startOffset()), 200, 1024 * 1024),
+                "shrunk file returns clean truncated page"
+            );
+            Assert.assertEquals("", shrunk.text(), "shrunk text is empty");
+            Assert.assertEquals(0L, shrunk.startOffset(), "shrunk startOffset is 0");
+            Assert.assertFalse(shrunk.hasOlder(), "shrunk hasOlder is false");
+            Assert.assertTrue(shrunk.truncated(), "shrunk truncated is true");
         } finally {
             deleteRecursively(tempRoot);
         }
