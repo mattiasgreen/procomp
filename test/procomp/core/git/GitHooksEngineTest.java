@@ -158,7 +158,8 @@ public final class GitHooksEngineTest {
     }
 
     public static void testProjectResolverParsesAndValidatesGitConfig() {
-        Path configPath = Path.of("C:/work/acme/procomp.json").normalize();
+        Path root = Path.of("work/acme").toAbsolutePath().normalize();
+        Path configPath = root.resolve("procomp.json");
         String validJson = """
             {
               "project": "acme",
@@ -188,9 +189,9 @@ public final class GitHooksEngineTest {
         GitConfig git = project.git().get();
         Assert.assertTrue(git.hooks().isPresent(), "git.hooks present");
         GitHooksConfig hooks = git.hooks().get();
-        Assert.assertEquals(Optional.of(Path.of("C:/work/acme/githooks").normalize()), hooks.sourceDir(), "sourceDir resolved");
+        Assert.assertEquals(Optional.of(root.resolve("githooks").normalize()), hooks.sourceDir(), "sourceDir resolved");
         Assert.assertEquals(List.of("pre-commit", "commit-msg"), hooks.requiredHooks(), "required hooks");
-        Assert.assertEquals(Path.of("C:/work/acme/custom/pre-push").normalize(), hooks.explicitFiles().get("pre-push"), "explicit file resolved");
+        Assert.assertEquals(root.resolve("custom/pre-push").normalize(), hooks.explicitFiles().get("pre-push"), "explicit file resolved");
         Assert.assertEquals(GitHookInstallMode.SYMLINK, hooks.mode(), "symlink mode");
         Assert.assertEquals(2, git.extraRepositories().size(), "extra repositories count");
 
