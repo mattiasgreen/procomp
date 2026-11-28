@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="app-shell">
+  <div id="app-shell" class="app-shell">
     <!-- Top Header -->
     <header class="app-header">
       <div class="header-left">
@@ -21,6 +21,15 @@
           <span id="config-path" class="config-path" title=""></span>
         </div>
       </div>
+      <nav class="header-nav" role="tablist" aria-label="Primary views">
+        <button id="nav-tab-services" type="button" role="tab" aria-selected="true" aria-controls="view-services" class="nav-tab active">
+          Services
+        </button>
+        <button id="nav-tab-logs" type="button" role="tab" aria-selected="false" aria-controls="view-logs" class="nav-tab">
+          <span>Logs</span>
+          <span id="nav-tab-logs-target" class="nav-tab-target mono" hidden></span>
+        </button>
+      </nav>
       <div class="header-right">
         <div id="poll-indicator" class="poll-indicator" data-state="connecting" role="status" aria-live="polite">
           <span class="poll-dot" aria-hidden="true"></span>
@@ -47,141 +56,201 @@
         <dl id="error-details" class="error-details" hidden></dl>
       </section>
 
-      <!-- Active Start Progress Strip (SSE) -->
+      <!-- Active Progress Strip -->
       <section id="progress-strip" class="progress-strip" role="status" aria-live="polite" hidden>
         <div class="progress-strip-header">
           <span class="spinner" aria-hidden="true"></span>
-          <span class="progress-strip-title">Starting Processes</span>
+          <span id="progress-strip-title" class="progress-strip-title">Running Actions</span>
         </div>
         <ul id="progress-list" class="progress-list"></ul>
       </section>
 
-      <!-- Gateway Summary Bar -->
-      <section id="gateway-section" class="card gateway-card" aria-labelledby="gateway-heading">
-        <div class="gateway-row">
-          <div class="gateway-identity">
-            <h2 id="gateway-heading" class="section-title">Gateway</h2>
-            <span id="gateway-type" class="mono muted"></span>
-            <span id="gateway-endpoint" class="mono muted"></span>
+      <!-- Mandatory Git Hooks Warning Banner -->
+      <section id="git-hooks-banner" class="git-hooks-banner" role="status" aria-live="polite" hidden>
+        <div class="git-hooks-banner-header">
+          <div class="git-hooks-banner-title">
+            <span class="badge badge-stale">GIT HOOKS</span>
+            <span id="git-hooks-summary" class="git-hooks-summary"></span>
           </div>
-          <div id="gateway-telemetry" class="gateway-telemetry">
-            <span id="gateway-owner" class="badge badge-neutral">—</span>
-            <span id="gateway-health" class="badge badge-neutral">—</span>
-            <span id="gateway-sync" class="badge badge-neutral">—</span>
-            <span id="gateway-pid" class="mono muted"></span>
-            <span id="gateway-uptime" class="mono muted"></span>
-          </div>
-          <div id="gateway-actions" class="gateway-actions">
-            <label class="checkbox-label gateway-auto-reconcile" title="Automatically reconcile Gateway after Route or Profile changes when Gateway is healthy">
-              <input id="chk-gateway-auto-reconcile" type="checkbox" checked>
-              <span>Auto-reconcile</span>
-            </label>
-            <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
-            <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
-            <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>
-            <button id="btn-gateway-logs" type="button" class="btn btn-secondary">Logs</button>
+          <div class="git-hooks-banner-actions">
+            <button
+              id="btn-git-hooks-toggle"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              aria-expanded="true"
+              aria-controls="git-hooks-list"
+            >
+              Hide Details
+            </button>
+            <button id="btn-git-hooks-install-all" type="button" class="btn btn-primary btn-sm">
+              Install / Upgrade All
+            </button>
           </div>
         </div>
-        <div id="gateway-unconfigured" class="gateway-unconfigured" hidden>
-          Gateway is not configured for this Project.
-        </div>
+        <ul id="git-hooks-list" class="git-hooks-list"></ul>
+      </section>
 
-        <!-- Explicit Gateway Drift Alert -->
-        <div id="gateway-drift-alert" class="drift-alert" role="status" hidden>
-          <div class="drift-alert-header">
-            <div class="drift-alert-title">
-              <span class="badge badge-danger">DRIFTED</span>
-              <span>Live Gateway mappings differ from the Project Routing Table.</span>
+      <!-- Services View -->
+      <div id="view-services" class="view-services" role="tabpanel" aria-labelledby="nav-tab-services">
+        <!-- Gateway Summary Bar -->
+        <section id="gateway-section" class="card gateway-card" aria-labelledby="gateway-heading">
+          <div class="gateway-row">
+            <div class="gateway-identity">
+              <h2 id="gateway-heading" class="section-title">Gateway</h2>
+              <span id="gateway-type" class="mono muted"></span>
+              <span id="gateway-endpoint" class="mono muted"></span>
             </div>
-            <button id="btn-drift-reconcile" type="button" class="btn btn-primary btn-sm">Reconcile Gateway</button>
+            <div id="gateway-telemetry" class="gateway-telemetry">
+              <span id="gateway-owner" class="badge badge-neutral">—</span>
+              <span id="gateway-health" class="badge badge-neutral">—</span>
+              <span id="gateway-sync" class="badge badge-neutral">—</span>
+              <span id="gateway-pid" class="mono muted"></span>
+              <span id="gateway-uptime" class="mono muted"></span>
+              <span id="gateway-rss" class="mono muted"></span>
+            </div>
+            <div id="gateway-actions" class="gateway-actions">
+              <label class="checkbox-label gateway-auto-reconcile" title="Automatically reconcile Gateway after Route or Profile changes when Gateway is healthy">
+                <input id="chk-gateway-auto-reconcile" type="checkbox" checked>
+                <span>Auto-reconcile</span>
+              </label>
+              <button id="btn-gateway-reconcile" type="button" class="btn btn-secondary">Reconcile</button>
+              <button id="btn-gateway-start" type="button" class="btn btn-secondary">Start Gateway</button>
+              <button id="btn-gateway-restart" type="button" class="btn btn-secondary">Restart Gateway</button>
+              <button id="btn-gateway-stop" type="button" class="btn btn-secondary">Stop Gateway</button>
+              <button id="btn-gateway-logs" type="button" class="btn btn-secondary">Logs</button>
+            </div>
           </div>
-          <ul id="gateway-drift-list" class="drift-list"></ul>
-        </div>
-      </section>
-
-      <!-- Profiles & Bulk Lifecycle Toolbar -->
-      <section class="toolbar" aria-label="Profiles and bulk Process controls">
-        <div class="profile-bar">
-          <span class="toolbar-label">Profiles</span>
-          <div id="profile-list" class="profile-list" role="group" aria-label="Project Profiles"></div>
-        </div>
-        <div class="bulk-actions">
-          <button id="btn-start-local" type="button" class="btn btn-primary" title="Start all LOCAL-routed Services">
-            Start LOCAL
-          </button>
-          <button id="btn-stop-managed" type="button" class="btn btn-secondary" title="Stop all Managed Services (leaves Gateway running)">
-            Stop Managed
-          </button>
-        </div>
-      </section>
-
-      <!-- Services Estate Table -->
-      <section class="card table-card" aria-labelledby="services-heading">
-        <div class="table-card-header">
-          <h2 id="services-heading" class="section-title">Services</h2>
-          <span id="services-summary" class="mono muted"></span>
-        </div>
-        <div class="table-wrap">
-          <table class="services-table">
-            <thead>
-              <tr>
-                <th scope="col">SERVICE</th>
-                <th scope="col">ROUTE</th>
-                <th scope="col">OWNER</th>
-                <th scope="col">HEALTH</th>
-                <th scope="col">BUILD</th>
-                <th scope="col">PORT</th>
-                <th scope="col">PID</th>
-                <th scope="col">UPTIME</th>
-                <th scope="col">STALE</th>
-                <th scope="col" class="col-actions">ACTIONS</th>
-              </tr>
-            </thead>
-            <tbody id="services-tbody">
-              <tr>
-                <td colspan="10" class="empty-cell">Running Discovery…</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- Tabbed Bottom Drawer: Inspect & Live SSE Logs -->
-      <section id="detail-drawer" class="card drawer" aria-label="Service Inspection and Logs" hidden>
-        <div class="drawer-header">
-          <div class="drawer-title-group">
-            <span id="drawer-target-label" class="drawer-service-label">Service</span>
-            <h2 id="drawer-service-name" class="drawer-service-name mono"></h2>
+          <div id="gateway-unconfigured" class="gateway-unconfigured" hidden>
+            Gateway is not configured for this Project.
           </div>
-          <div class="drawer-tabs" role="tablist" aria-label="Detail views">
-            <button id="tab-inspect" type="button" role="tab" aria-selected="true" aria-controls="panel-inspect" class="drawer-tab active">
-              Inspect
-            </button>
-            <button id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" class="drawer-tab">
-              Logs
+
+          <!-- Explicit Gateway Drift Alert -->
+          <div id="gateway-drift-alert" class="drift-alert" role="status" hidden>
+            <div class="drift-alert-header">
+              <div class="drift-alert-title">
+                <span class="badge badge-danger">DRIFTED</span>
+                <span>Live Gateway mappings differ from the Project Routing Table.</span>
+              </div>
+              <button id="btn-drift-reconcile" type="button" class="btn btn-primary btn-sm">Reconcile Gateway</button>
+            </div>
+            <ul id="gateway-drift-list" class="drift-list"></ul>
+          </div>
+        </section>
+
+        <!-- Profiles & Bulk Lifecycle Toolbar -->
+        <section class="toolbar" aria-label="Profiles and bulk Process controls">
+          <div class="profile-bar">
+            <span class="toolbar-label">Profiles</span>
+            <div id="profile-list" class="profile-list" role="group" aria-label="Project Profiles"></div>
+            <button
+              id="btn-save-profile"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              title="Save current Routing Table as a Profile in procomp.json"
+            >
+              + Save Profile
             </button>
           </div>
-          <div class="drawer-controls">
-            <button id="btn-drawer-close" type="button" class="btn-icon" aria-label="Close panel" title="Close panel">&times;</button>
+          <div class="bulk-actions">
+            <button id="btn-git-fetch-local" type="button" class="btn btn-secondary" title="Fetch all LOCAL-routed Repositories (procomp git fetch)">
+              Fetch LOCAL
+            </button>
+            <button id="btn-git-pull-local" type="button" class="btn btn-secondary" title="Fast-forward pull all LOCAL-routed Repositories (procomp git pull)">
+              Pull LOCAL
+            </button>
+            <button id="btn-start-local" type="button" class="btn btn-primary" title="Start all LOCAL-routed Services">
+              Start LOCAL
+            </button>
+            <button id="btn-restart-managed" type="button" class="btn btn-secondary" title="Restart all currently running Managed Services">
+              Restart Managed
+            </button>
+            <button id="btn-stop-managed" type="button" class="btn btn-secondary" title="Stop all Managed Services (leaves Gateway running)">
+              Stop Managed
+            </button>
           </div>
-        </div>
+        </section>
 
-        <!-- Inspect Tab Panel -->
-        <div id="panel-inspect" class="drawer-panel" role="tabpanel" aria-labelledby="tab-inspect">
-          <div class="panel-toolbar">
-            <span id="inspect-status-note" class="muted"></span>
-            <button id="btn-inspect-refresh" type="button" class="btn btn-secondary btn-sm">Refresh Inspection</button>
+        <!-- Services Estate Table -->
+        <section class="card table-card" aria-labelledby="services-heading">
+          <div class="table-card-header">
+            <div class="table-card-title-group">
+              <h2 id="services-heading" class="section-title">Services</h2>
+              <span id="services-summary" class="mono muted"></span>
+            </div>
+            <div class="table-card-controls">
+              <input id="services-filter-input" type="search" class="filter-input" placeholder="Filter services (order|billing)" aria-label="Filter services">
+              <button id="btn-services-local-only" type="button" class="filter-chip" aria-pressed="false" title="Show only LOCAL-routed Services">
+                LOCAL only
+              </button>
+            </div>
           </div>
-          <div id="inspect-content" class="inspect-content"></div>
-        </div>
+          <div class="table-wrap">
+            <table class="services-table">
+              <thead>
+                <tr>
+                  <th scope="col">SERVICE</th>
+                  <th scope="col">ROUTE</th>
+                  <th scope="col">OWNER</th>
+                  <th scope="col">HEALTH</th>
+                  <th scope="col">BUILD</th>
+                  <th scope="col">GIT</th>
+                  <th scope="col">PORT</th>
+                  <th scope="col">PID</th>
+                  <th scope="col">UPTIME</th>
+                  <th scope="col">RSS</th>
+                </tr>
+              </thead>
+              <tbody id="services-tbody">
+                <tr>
+                  <td colspan="10" class="empty-cell">Running Discovery…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-        <!-- Logs Tab Panel -->
-        <div id="panel-logs" class="drawer-panel" role="tabpanel" aria-labelledby="tab-logs" hidden>
-          <div class="panel-toolbar logs-toolbar">
+        <!-- Bottom Inspect Drawer -->
+        <section id="detail-drawer" class="card drawer" aria-label="Service Inspection" hidden>
+          <div class="drawer-header">
+            <div class="drawer-title-group">
+              <span id="drawer-target-label" class="drawer-service-label">Inspect</span>
+              <h2 id="drawer-service-name" class="drawer-service-name mono"></h2>
+            </div>
+            <div class="drawer-controls">
+              <button id="btn-drawer-close" type="button" class="btn-icon" aria-label="Close panel" title="Close panel">&times;</button>
+            </div>
+          </div>
+
+          <div id="panel-inspect" class="drawer-panel">
+            <div class="panel-toolbar">
+              <span id="inspect-status-note" class="muted"></span>
+              <button id="btn-inspect-refresh" type="button" class="btn btn-secondary btn-sm">Refresh Inspection</button>
+            </div>
+            <div id="inspect-content" class="inspect-content"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Fullscreen Logs View -->
+      <section id="view-logs" class="card view-logs" role="tabpanel" aria-labelledby="nav-tab-logs" hidden>
+        <aside id="logs-sidebar" class="logs-sidebar" aria-label="Log targets">
+          <div class="logs-sidebar-header">
+            <input id="logs-sidebar-filter" type="search" class="filter-input filter-input-full" placeholder="Filter targets (a|b)" aria-label="Filter log targets">
+          </div>
+          <div id="logs-target-list" class="logs-target-list" aria-label="Log targets"></div>
+        </aside>
+
+        <div class="logs-main">
+          <div class="logs-view-header">
             <div class="logs-toolbar-left">
+              <div class="logs-target-title">
+                <span id="logs-target-kind" class="drawer-service-label">Service</span>
+                <h2 id="logs-target-name" class="drawer-service-name mono">—</h2>
+              </div>
               <div id="logs-source-group" class="segmented-control" role="group" aria-label="Log source">
                 <button id="btn-logs-source-service" type="button" class="seg-btn active" data-source="service">Service</button>
                 <button id="btn-logs-source-build" type="button" class="seg-btn" data-source="build">Build</button>
+                <button id="btn-logs-source-git" type="button" class="seg-btn" data-source="git">Git</button>
               </div>
               <div class="segmented-control" role="group" aria-label="Log stream">
                 <button id="btn-logs-stdout" type="button" class="seg-btn active" data-stream="stdout">stdout</button>
@@ -191,6 +260,11 @@
               <span id="logs-line-count" class="mono muted">0 lines</span>
             </div>
             <div class="logs-toolbar-right">
+              <input id="logs-filter-input" type="search" class="filter-input logs-line-filter" placeholder="Filter lines (ERROR|WARN)" aria-label="Filter log lines">
+              <label class="checkbox-label">
+                <input id="chk-logs-wrap" type="checkbox">
+                <span>Wrap</span>
+              </label>
               <label class="checkbox-label">
                 <input id="chk-logs-autoscroll" type="checkbox" checked>
                 <span>Auto-scroll</span>
@@ -199,7 +273,7 @@
               <button id="btn-logs-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
             </div>
           </div>
-          <div id="logs-output" class="logs-output mono" aria-live="off"></div>
+          <div id="logs-output" class="logs-output mono no-wrap" tabindex="0" aria-live="off"></div>
         </div>
       </section>
     </main>
@@ -288,6 +362,104 @@
     </form>
   </dialog>
 
+  <!-- Native <dialog> for Creating, Editing, and Deleting Profiles -->
+  <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title">
+    <form method="dialog" class="profile-dialog-form">
+      <div class="dialog-header">
+        <span class="badge badge-info">PROFILE</span>
+        <h3 id="profile-dialog-title" class="dialog-title">Save Profile</h3>
+      </div>
+      <div class="dialog-body">
+        <div class="profile-form-field">
+          <label for="profile-name-input" class="profile-form-label">Profile Name</label>
+          <input
+            id="profile-name-input"
+            type="text"
+            class="profile-name-input mono"
+            placeholder="e.g. orders-local"
+            autocomplete="off"
+            spellcheck="false"
+          >
+        </div>
+        <div id="profile-overwrite-warning" class="dialog-notice" hidden></div>
+        <div id="profile-dialog-error" class="dialog-error" hidden></div>
+        <div class="profile-services-section">
+          <div class="profile-services-header">
+            <span class="profile-form-label">LOCAL Services <span id="profile-selected-count" class="mono muted"></span></span>
+            <div class="profile-services-bulk">
+              <button id="btn-profile-select-all" type="button" class="btn btn-secondary btn-sm">Select all</button>
+              <button id="btn-profile-clear-all" type="button" class="btn btn-secondary btn-sm">Clear all</button>
+            </div>
+          </div>
+          <div id="profile-services-list" class="profile-services-list" role="group" aria-label="LOCAL Services"></div>
+        </div>
+        <div class="dialog-cli-preview">
+          <span class="dialog-cli-label">Verbatim CLI Command</span>
+          <code id="profile-cli-preview" class="mono"></code>
+        </div>
+        <div id="profile-delete-confirm" class="profile-delete-confirm" hidden>
+          <span id="profile-delete-confirm-text"></span>
+          <div class="profile-delete-confirm-actions">
+            <button id="btn-profile-delete-cancel" type="button" class="btn btn-secondary btn-sm">Keep</button>
+            <button id="btn-profile-delete-confirm" type="button" class="btn btn-danger btn-sm">Confirm Delete</button>
+          </div>
+        </div>
+      </div>
+      <div class="dialog-footer profile-dialog-footer">
+        <div class="profile-dialog-footer-left">
+          <button id="btn-profile-delete" type="button" class="btn btn-danger" hidden>Delete Profile</button>
+        </div>
+        <div class="profile-dialog-footer-right">
+          <button id="btn-profile-cancel" type="button" class="btn btn-secondary">Cancel</button>
+          <button id="btn-profile-save" type="button" class="btn btn-primary">Save Profile</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Native <dialog> Modal for Non-Destructive Git Branch Switch -->
+  <dialog id="git-switch-dialog" class="git-switch-dialog" aria-labelledby="git-switch-dialog-title">
+    <form method="dialog" class="git-switch-dialog-form">
+      <div class="dialog-header">
+        <span class="badge badge-neutral">GIT SWITCH</span>
+        <h3 id="git-switch-dialog-title" class="dialog-title">Switch Branch</h3>
+      </div>
+      <div class="dialog-body">
+        <div class="git-switch-meta">
+          <div>
+            Repository: <strong id="git-switch-repo-name" class="mono"></strong>
+            <span id="git-switch-services" class="muted"></span>
+          </div>
+          <div class="git-switch-toolbar">
+            <span id="git-switch-fetched" class="mono muted"></span>
+            <button id="btn-git-switch-fetch" type="button" class="btn btn-secondary btn-sm">Fetch</button>
+            <button id="btn-git-switch-default" type="button" class="btn btn-secondary btn-sm">Switch to default</button>
+          </div>
+        </div>
+
+        <div id="git-switch-dirty-banner" class="git-dirty-banner" hidden>
+          <div class="git-dirty-banner-text">
+            <span class="badge badge-danger">DIRTY</span>
+            <span id="git-switch-dirty-summary">Working tree has uncommitted or untracked changes. Stash before switching.</span>
+          </div>
+          <button id="btn-git-switch-stash" type="button" class="btn btn-primary btn-sm">Stash (incl. untracked)</button>
+        </div>
+
+        <div id="git-switch-error" class="dialog-error" hidden></div>
+
+        <input id="git-switch-filter" type="search" class="filter-input filter-input-full" placeholder="Filter branches…" aria-label="Filter branches">
+        <div id="git-switch-loading" class="muted">Loading branches…</div>
+        <div id="git-switch-branch-list" class="git-branch-list" role="listbox" aria-label="Branches"></div>
+      </div>
+      <div class="dialog-footer">
+        <button id="btn-git-switch-cancel" type="button" class="btn btn-secondary">Cancel</button>
+        <button id="btn-git-switch-confirm" type="button" class="btn btn-primary" disabled>Switch Branch</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Anchored Pill Action Popover -->
+  <div id="pill-action-menu" class="pill-action-menu" role="menu" hidden></div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

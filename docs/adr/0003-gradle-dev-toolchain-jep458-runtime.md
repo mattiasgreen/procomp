@@ -19,5 +19,6 @@ This ADR amends [ADR 0001](0001-pure-java-25-jep458.md) to separate **end-user r
 
 - `build.gradle.kts` must declare **zero** `implementation` or `compileOnly` dependencies for `src/`.
 - The `:verifyJep458` Gradle task runs `java src/procomp/cli/Procomp.java --help` with an empty classpath as part of `gradle check`, mechanically guaranteeing zero third-party imports ever leak into `src/`.
-- JEP 458 zero-dependency source launch is strictly a **runtime** requirement (running `procomp` without compilation or JAR packaging). All testing, static analysis, and verification run through Gradle (`gradle fastCheck`, `gradle check`, `gradle outerLoop`); the legacy standalone `TestRunner` has been retired.
-- No `gradle-wrapper.jar` binary is committed unless explicitly decided later; local dev and CI use installed Gradle 9+.
+- JEP 458 zero-dependency source launch is strictly a **runtime** requirement (running `procomp` without compilation or JAR packaging). All testing, static analysis, and verification run through Gradle (`./gradlew fastCheck`, `./gradlew check`, `./gradlew outerLoop`); the legacy standalone `TestRunner` has been retired.
+- The Gradle Wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/`) is committed so developers and CI can run `./gradlew assemble` (producing the standalone executable `build/libs/procomp.jar` with bundled `web/` assets) and `./gradlew check` with only JDK 25 installed.
+- `build/libs/procomp.jar` is an optional single-JAR distribution artifact alongside JEP 458 direct source launch; `src/` remains 100% pure zero-dependency Java 25.

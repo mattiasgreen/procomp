@@ -4,11 +4,15 @@ import procomp.core.build.BuildRunRecord;
 import procomp.core.build.ObservedBuildRun;
 import procomp.core.common.Json;
 import procomp.core.common.Result;
+import procomp.core.process.DiagnosticCommand;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.Project;
 import procomp.core.routing.Route;
 import procomp.shell.DomainJson;
+import procomp.shell.ProcessShell.RestartRequest;
+import procomp.shell.ProcessShell.RestartResult;
+import procomp.shell.ProcessShell.RestartServiceOutcome;
 import procomp.shell.ProcessShell.StartDisposition;
 import procomp.shell.ProcessShell.StartRequest;
 import procomp.shell.ProcessShell.StartResult;
@@ -27,10 +31,11 @@ import java.util.List;
  */
 public final class ProcessCli {
 
-    public sealed interface Action permits Action.Inspect, Action.Start, Action.Stop {
+    public sealed interface Action permits Action.Inspect, Action.Start, Action.Stop, Action.Restart {
         record Inspect(String serviceName, boolean json) implements Action {}
         record Start(List<String> services, boolean detach, Duration timeout) implements Action {}
         record Stop(List<String> services, boolean all, boolean killConflict) implements Action {}
+        record Restart(List<String> services, boolean detach, Duration timeout) implements Action {}
     }
 
     private ProcessCli() {}
@@ -40,6 +45,7 @@ public final class ProcessCli {
             case "inspect" -> parseInspect(args);
             case "start" -> parseStart(args);
             case "stop" -> parseStop(args);
+            case "restart" -> parseRestart(args);
             default -> Result.err("Unknown process command '" + command + "'.");
         };
     }
@@ -103,6 +109,37 @@ public final class ProcessCli {
         return Result.ok(new Action.Start(services, detach, timeout));
     }
 
+    private static Result<Action, String> parseRestart(List<String> args) {
+        boolean detach = false;
+        Duration timeout = RestartRequest.DEFAULT_TIMEOUT;
+        List<String> services = new ArrayList<>();
+
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if ("-d".equals(arg) || "--detach".equals(arg)) {
+                detach = true;
+            } else if (CliFormat.isTimeoutOption(arg)) {
+                Result<CliFormat.ParsedOption<Duration>, String> tRes = CliFormat.parseTimeoutOption(args, i);
+                if (tRes instanceof Result.Err<CliFormat.ParsedOption<Duration>, String>(String msg)) {
+                    return Result.err(msg);
+                }
+                var opt = ((Result.Ok<CliFormat.ParsedOption<Duration>, String>) tRes).value();
+                timeout = opt.value();
+                i = opt.nextIndex();
+            } else if (arg.startsWith("-")) {
+                return Result.err(
+                    "Unknown option '" + arg + "' for 'restart'. Usage: procomp restart [service...] [-d|--detach] [--timeout <seconds>]"
+                );
+            } else {
+                if (arg.isBlank()) {
+                    return Result.err("Service name must not be blank.");
+                }
+                services.add(arg);
+            }
+        }
+        return Result.ok(new Action.Restart(services, detach, timeout));
+    }
+
     private static Result<Action, String> parseInspect(List<String> args) {
         String serviceName = null;
         boolean json = false;
@@ -139,6 +176,10 @@ public final class ProcessCli {
                 )),
                 result -> renderStopResult(result, runtime.out())
             );
+            case Action.Restart(List<String> services, boolean detach, Duration timeout) -> runtime.handleResult(
+                runtime.processShell().flatMap(shell -> shell.restart(project, new RestartRequest(services, detach, timeout))),
+                result -> renderRestartResult(result, runtime.out())
+            );
             case Action.Inspect(String serviceName, boolean json) -> runtime.handleResult(
                 runtime.processShell().flatMap(shell -> shell.inspect(project, serviceName)),
                 report -> {
@@ -148,10 +189,18 @@ public final class ProcessCli {
                         buildRes instanceof Result.Ok<ObservedBuildRun, procomp.core.common.DomainError>(ObservedBuildRun obs)
                             ? java.util.Optional.of(obs)
                             : java.util.Optional.empty();
+                    java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow = java.util.Optional.empty();
+                    var repoOpt = project.service(serviceName).flatMap(procomp.core.project.ServiceDefinition::repository);
+                    if (repoOpt.isPresent()) {
+                        var gitRes = runtime.gitShell().flatMap(g -> g.observeRepository(project, repoOpt.get()));
+                        if (gitRes instanceof Result.Ok<procomp.shell.GitShell.RepositoryStatusRow, procomp.core.common.DomainError>(var gr)) {
+                            gitRow = java.util.Optional.of(gr);
+                        }
+                    }
                     if (json) {
-                        renderInspectJson(project, report, buildRun, runtime.out());
+                        renderInspectJson(project, report, buildRun, gitRow, runtime.out());
                     } else {
-                        renderInspectText(report, buildRun, runtime.out());
+                        renderInspectText(report, buildRun, gitRow, runtime.out());
                     }
                 }
             );
@@ -182,6 +231,45 @@ public final class ProcessCli {
             }
         }
         out.println("Summary: " + spawned + " started, " + reused + " reused" + (result.detached() ? " (detached)." : "."));
+    }
+
+    private static void renderRestartResult(RestartResult result, PrintWriter out) {
+        if (result.outcomes().isEmpty()) {
+            out.println("No running Managed Services — nothing to restart.");
+            return;
+        }
+        int restarted = 0;
+        int spawned = 0;
+        int sparedUnmanaged = 0;
+        for (RestartServiceOutcome item : result.outcomes()) {
+            String pidText = item.discovery().pid().map(p -> "PID " + p).orElse("PID -");
+            String ownerText = item.discovery().ownership().name()
+                + item.discovery().provenance().map(p -> " (" + p + ")").orElse("");
+            switch (item.disposition()) {
+                case RESTARTED -> {
+                    restarted++;
+                    out.println(item.service() + ": restarted " + ownerText + " [" + pidText + ", " + item.discovery().health().name() + "]");
+                }
+                case SPAWNED -> {
+                    spawned++;
+                    out.println(item.service() + ": spawned " + ownerText + " [" + pidText + ", " + item.discovery().health().name() + "]");
+                }
+                case SPARED_UNMANAGED -> {
+                    sparedUnmanaged++;
+                    out.println(item.service() + ": spared Unmanaged Process [" + pidText + "] (never killed by procomp)");
+                }
+            }
+        }
+        StringBuilder summary = new StringBuilder();
+        summary.append("Summary: ").append(restarted).append(" restarted");
+        if (spawned > 0) {
+            summary.append(", ").append(spawned).append(" started");
+        }
+        if (sparedUnmanaged > 0) {
+            summary.append(", ").append(sparedUnmanaged).append(" Unmanaged spared");
+        }
+        summary.append(result.detached() ? " (detached)." : ".");
+        out.println(summary);
     }
 
     private static void renderStopResult(StopResult result, PrintWriter out) {
@@ -226,12 +314,21 @@ public final class ProcessCli {
     }
 
     static void renderInspectText(InspectionReport report, PrintWriter out) {
-        renderInspectText(report, java.util.Optional.empty(), out);
+        renderInspectText(report, java.util.Optional.empty(), java.util.Optional.empty(), out);
     }
 
     static void renderInspectText(
         InspectionReport report,
         java.util.Optional<ObservedBuildRun> buildRun,
+        PrintWriter out
+    ) {
+        renderInspectText(report, buildRun, java.util.Optional.empty(), out);
+    }
+
+    static void renderInspectText(
+        InspectionReport report,
+        java.util.Optional<ObservedBuildRun> buildRun,
+        java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow,
         PrintWriter out
     ) {
         out.println("Service:         " + report.service());
@@ -244,7 +341,7 @@ public final class ProcessCli {
         out.println("PID:             " + report.pid().map(Object::toString).orElse("-"));
         out.println("Uptime:          " + report.uptime().map(CliFormat::formatDuration).orElse("-"));
         out.println("Stale:           " + (report.stale() ? "YES" : "no"));
-        out.println("RAM:             " + report.rssBytes().map(ProcessCli::formatBytes).orElse("-"));
+        out.println("RSS:             " + report.rssBytes().map(CliFormat::formatBytes).orElse("-"));
         out.println("Command Line:    " + report.commandLine().orElse("-"));
         if (!report.arguments().isEmpty()) {
             out.println("Arguments:       " + String.join(" ", report.arguments()));
@@ -264,6 +361,13 @@ public final class ProcessCli {
         out.println("Health Response: " + report.healthResponse());
         out.println("Stdout Log:      " + report.outLogPath());
         out.println("Stderr Log:      " + report.errLogPath());
+        if (!report.diagnosticCommands().isEmpty()) {
+            out.println("Diagnostic Commands:");
+            for (DiagnosticCommand cmd : report.diagnosticCommands()) {
+                String suffix = cmd.note().map(n -> "  (" + n + ")").orElse("");
+                out.println("  - " + cmd.label() + ": " + cmd.command() + suffix);
+            }
+        }
         if (buildRun.isPresent()) {
             ObservedBuildRun build = buildRun.get();
             out.println("Build Run:       " + build.displayState().name());
@@ -289,26 +393,27 @@ public final class ProcessCli {
                 out.println("Build Stderr:    " + rec.stderrLog());
             }
         }
+        if (gitRow.isPresent()) {
+            var git = gitRow.get();
+            out.println("Repository:      " + git.repository().name() + " (" + git.repository().root() + ")");
+            out.println("Git Status:      " + git.compactDisplay());
+            if (git.latestRun().isPresent()) {
+                var run = git.latestRun().get();
+                var rec = run.record();
+                out.println("Git Run:         " + run.effectiveStatus().name() + " (" + rec.operation().cliName() + ")");
+                out.println("Git Stdout:      " + rec.stdoutLog());
+                out.println("Git Stderr:      " + rec.stderrLog());
+            }
+        }
     }
 
     private static void renderInspectJson(
         Project project,
         InspectionReport report,
         java.util.Optional<ObservedBuildRun> buildRun,
+        java.util.Optional<procomp.shell.GitShell.RepositoryStatusRow> gitRow,
         PrintWriter out
     ) {
-        out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun)));
-    }
-
-    private static String formatBytes(long bytes) {
-        long mb = bytes / (1024L * 1024L);
-        if (mb > 0) {
-            return mb + " MB";
-        }
-        long kb = bytes / 1024L;
-        if (kb > 0) {
-            return kb + " KB";
-        }
-        return bytes + " B";
+        out.println(Json.stringify(DomainJson.inspectionReport(project, report, buildRun, gitRow)));
     }
 }

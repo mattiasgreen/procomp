@@ -22,7 +22,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedProcessRecord record = new ManagedProcessRecord(
+        ManagedProcessRecord record = new ManagedProcessRecord.Running(
             4201L,
             T1,
             List.of("java", "-jar", "orders.jar"),
@@ -48,7 +48,8 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(aliveProc),
             new HealthCheck.HttpResult(200, "OK"),
-            Optional.of(T0)
+            Optional.of(T0),
+            T2
         ));
         Assert.assertEquals("orders", healthyFresh.target(), "target name");
         Assert.assertEquals(Ownership.MANAGED, healthyFresh.ownership(), "MANAGED ownership");
@@ -65,7 +66,8 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.of(aliveProc),
             new HealthCheck.HttpResult(503, "Service Unavailable"),
-            Optional.of(T2)
+            Optional.of(T2),
+            T2
         ));
         Assert.assertEquals(Ownership.MANAGED, startingStale.ownership(), "still MANAGED");
         Assert.assertEquals(HealthState.STARTING, startingStale.health(), "HTTP 503 yields STARTING");
@@ -80,7 +82,7 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/orders.out.log"),
             Path.of("/state/acme/logs/orders.err.log")
         );
-        ManagedProcessRecord record = new ManagedProcessRecord(
+        ManagedProcessRecord record = new ManagedProcessRecord.Running(
             4201L,
             T1,
             List.of("java", "-jar", "orders.jar"),
@@ -96,7 +98,8 @@ public final class DiscoveryEngineTest {
             Optional.of(new PortBinding(9001, Optional.of(9999L), "127.0.0.1:9001")),
             Optional.empty(),
             new HealthCheck.HttpResult(200, "OK"),
-            Optional.of(T2)
+            Optional.of(T2),
+            T2
         ));
         Assert.assertEquals(Ownership.MANAGED, crashed.ownership(), "recorded managed process keeps MANAGED ownership");
         Assert.assertEquals(Optional.of("procomp"), crashed.provenance(), "procomp provenance");
@@ -104,6 +107,83 @@ public final class DiscoveryEngineTest {
         Assert.assertEquals(Optional.of(4201L), crashed.pid(), "retains crashed pid");
         Assert.assertFalse(crashed.stale(), "crashed process is never marked stale");
         Assert.assertEquals(Optional.empty(), crashed.uptime(T2), "crashed process has no uptime");
+    }
+
+    public static void testManagedStoppingWithinWindowPastWindowAndWhenDead() {
+        ProcessTarget target = new ProcessTarget(
+            "orders",
+            Optional.of(9001),
+            Optional.of("/actuator/health"),
+            Path.of("/state/acme/logs/orders.out.log"),
+            Path.of("/state/acme/logs/orders.err.log")
+        );
+        ManagedProcessRecord.Running running = new ManagedProcessRecord.Running(
+            4201L,
+            T0,
+            List.of("java", "-jar", "orders.jar"),
+            Optional.of(T0),
+            target.stdoutLog(),
+            target.stderrLog()
+        );
+        ManagedProcessRecord.Stopping stopping = running.requestStop(T1);
+        Assert.assertEquals(running, stopping.abortStop(), "abortStop restores Running record");
+
+        ObservedProcess aliveProc = new ObservedProcess(
+            4201L,
+            true,
+            Optional.of(T0),
+            Optional.of("java -jar orders.jar"),
+            List.of("-jar", "orders.jar"),
+            List.of(),
+            Optional.empty(),
+            Optional.of("java")
+        );
+
+        // 1. Alive within 15s termination window -> MANAGED / STOPPING (even when health check fails)
+        DiscoveryResult midStop = DiscoveryEngine.discover(new DiscoveryInput(
+            target,
+            Optional.of(stopping),
+            Optional.empty(),
+            Optional.of(aliveProc),
+            new HealthCheck.HttpFailure("Connection refused"),
+            Optional.of(T2),
+            T1.plusSeconds(5)
+        ));
+        Assert.assertEquals(Ownership.MANAGED, midStop.ownership(), "stopping process is MANAGED");
+        Assert.assertEquals(HealthState.STOPPING, midStop.health(), "within window is STOPPING");
+        Assert.assertTrue(midStop.state() instanceof ProcessState.Managed.Stopping, "sealed state is Managed.Stopping");
+        Assert.assertEquals(Optional.of(4201L), midStop.pid(), "stopping keeps PID");
+        Assert.assertFalse(midStop.stale(), "stopping process is not marked stale");
+        Assert.assertEquals(Optional.of(Duration.ofSeconds(305)), midStop.uptime(T1.plusSeconds(5)), "stopping retains uptime");
+
+        // 2. Alive past termination window -> self-heals back to normal HEALTHY/STARTING
+        DiscoveryResult expiredHealthy = DiscoveryEngine.discover(new DiscoveryInput(
+            target,
+            Optional.of(stopping),
+            Optional.empty(),
+            Optional.of(aliveProc),
+            new HealthCheck.HttpResult(200, "OK"),
+            Optional.of(T0),
+            T1.plus(DiscoveryEngine.DEFAULT_TERMINATION_WINDOW)
+        ));
+        Assert.assertEquals(Ownership.MANAGED, expiredHealthy.ownership(), "expired stopping remains MANAGED");
+        Assert.assertEquals(HealthState.HEALTHY, expiredHealthy.health(), "expired stopping falls back to HEALTHY");
+        Assert.assertTrue(expiredHealthy.state() instanceof ProcessState.Managed.Healthy, "sealed state is Managed.Healthy");
+
+        // 3. Dead with Stopping record -> NONE / STOPPED (not CRASHED!)
+        DiscoveryResult exitedCleanly = DiscoveryEngine.discover(new DiscoveryInput(
+            target,
+            Optional.of(stopping),
+            Optional.empty(),
+            Optional.empty(),
+            HealthCheck.None.INSTANCE,
+            Optional.of(T2),
+            T1.plusSeconds(2)
+        ));
+        Assert.assertEquals(Ownership.NONE, exitedCleanly.ownership(), "dead stopping process is NONE");
+        Assert.assertEquals(HealthState.STOPPED, exitedCleanly.health(), "dead stopping process is STOPPED, not CRASHED");
+        Assert.assertTrue(exitedCleanly.state() instanceof ProcessState.Stopped, "sealed state is Stopped");
+        Assert.assertEquals(Optional.empty(), exitedCleanly.pid(), "stopped has no pid");
     }
 
     public static void testPortListenerClassifiesUnmanagedIdeShellAndConflict() {
@@ -137,7 +217,8 @@ public final class DiscoveryEngineTest {
             Optional.of(listener),
             Optional.of(ideProcess),
             new HealthCheck.HttpFailure("Connection refused"),
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.UNMANAGED, ideBooting.ownership(), "booting IDE child is UNMANAGED");
         Assert.assertEquals(Optional.of("IDE"), ideBooting.provenance(), "IDE provenance");
@@ -152,7 +233,8 @@ public final class DiscoveryEngineTest {
             Optional.of(listener),
             Optional.of(ideProcess),
             new HealthCheck.HttpResult(200, "OK"),
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.UNMANAGED, ideHealthy.ownership(), "healthy IDE child is UNMANAGED");
         Assert.assertEquals(Optional.of("IDE"), ideHealthy.provenance(), "IDE provenance");
@@ -175,7 +257,8 @@ public final class DiscoveryEngineTest {
             Optional.of(new PortBinding(9002, Optional.of(5511L), "127.0.0.1:9002")),
             Optional.of(vscodeInsiders),
             new HealthCheck.HttpResult(503, "Unavailable"),
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.UNMANAGED, vsCodeBooting.ownership(), "VS Code Insiders ancestor is UNMANAGED");
         Assert.assertEquals(Optional.of("IDE"), vsCodeBooting.provenance(), "VS Code Insiders provenance");
@@ -197,7 +280,8 @@ public final class DiscoveryEngineTest {
             Optional.of(new PortBinding(9002, Optional.of(5512L), "127.0.0.1:9002")),
             Optional.of(shellProcess),
             new HealthCheck.HttpResult(204, "No Content"),
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.UNMANAGED, shellHealthy.ownership(), "healthy shell listener is UNMANAGED");
         Assert.assertEquals(Optional.of("shell"), shellHealthy.provenance(), "folder named 'code' must not match IDE");
@@ -210,7 +294,8 @@ public final class DiscoveryEngineTest {
             Optional.of(new PortBinding(9002, Optional.of(5512L), "127.0.0.1:9002")),
             Optional.of(shellProcess),
             new HealthCheck.HttpResult(404, "Not Found"),
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.CONFLICT, conflict.ownership(), "non-IDE listener failing health is CONFLICT");
         Assert.assertEquals(HealthState.STARTING, conflict.health(), "CONFLICT health is STARTING");
@@ -223,7 +308,8 @@ public final class DiscoveryEngineTest {
             Optional.empty(),
             Optional.empty(),
             HealthCheck.None.INSTANCE,
-            Optional.empty()
+            Optional.empty(),
+            T2
         ));
         Assert.assertEquals(Ownership.NONE, stopped.ownership(), "no process -> NONE");
         Assert.assertEquals(Optional.empty(), stopped.provenance(), "NONE has empty provenance");
@@ -240,16 +326,16 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/redis.out.log"),
             Path.of("/state/acme/logs/redis.err.log")
         );
-        ManagedProcessRecord tcpRec = new ManagedProcessRecord(6001L, T0, List.of("redis-server"), Optional.empty(), tcpOnly.stdoutLog(), tcpOnly.stderrLog());
+        ManagedProcessRecord tcpRec = new ManagedProcessRecord.Running(6001L, T0, List.of("redis-server"), Optional.empty(), tcpOnly.stdoutLog(), tcpOnly.stderrLog());
         ObservedProcess tcpProc = new ObservedProcess(6001L, true, Optional.of(T0), Optional.of("redis-server"), List.of(), List.of(), Optional.empty(), Optional.of("redis-server"));
 
         DiscoveryResult tcpListening = DiscoveryEngine.discover(new DiscoveryInput(
-            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(true), Optional.empty()
+            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(true), Optional.empty(), T1
         ));
         Assert.assertEquals(HealthState.HEALTHY, tcpListening.health(), "port-only target is HEALTHY when TCP listening");
 
         DiscoveryResult tcpNotYet = DiscoveryEngine.discover(new DiscoveryInput(
-            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(false), Optional.empty()
+            tcpOnly, Optional.of(tcpRec), Optional.empty(), Optional.of(tcpProc), new HealthCheck.TcpResult(false), Optional.empty(), T1
         ));
         Assert.assertEquals(HealthState.STARTING, tcpNotYet.health(), "port-only target is STARTING when TCP not listening");
 
@@ -261,11 +347,11 @@ public final class DiscoveryEngineTest {
             Path.of("/state/acme/logs/worker.out.log"),
             Path.of("/state/acme/logs/worker.err.log")
         );
-        ManagedProcessRecord workerRec = new ManagedProcessRecord(7001L, T0, List.of("node", "worker.js"), Optional.empty(), workerOnly.stdoutLog(), workerOnly.stderrLog());
+        ManagedProcessRecord workerRec = new ManagedProcessRecord.Running(7001L, T0, List.of("node", "worker.js"), Optional.empty(), workerOnly.stdoutLog(), workerOnly.stderrLog());
         ObservedProcess workerProc = new ObservedProcess(7001L, true, Optional.of(T0), Optional.of("node worker.js"), List.of("worker.js"), List.of(), Optional.empty(), Optional.of("node"));
 
         DiscoveryResult workerHealthy = DiscoveryEngine.discover(new DiscoveryInput(
-            workerOnly, Optional.of(workerRec), Optional.empty(), Optional.of(workerProc), HealthCheck.None.INSTANCE, Optional.empty()
+            workerOnly, Optional.of(workerRec), Optional.empty(), Optional.of(workerProc), HealthCheck.None.INSTANCE, Optional.empty(), T1
         ));
         Assert.assertEquals(HealthState.HEALTHY, workerHealthy.health(), "no port/healthPath is HEALTHY whenever process is alive");
     }

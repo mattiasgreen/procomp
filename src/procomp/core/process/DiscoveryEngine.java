@@ -9,9 +9,16 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Pure, stateless Discovery classifier implementing the exact v1 ownership, health, and stale rules.
+ * Pure, stateless Discovery classifier implementing ownership, health, stopping, and stale rules.
  */
 public final class DiscoveryEngine {
+
+    /**
+     * Default graceful termination timeout (10s) plus force-kill wait (5s).
+     */
+    public static final Duration DEFAULT_GRACEFUL_TIMEOUT = Duration.ofSeconds(10);
+    public static final Duration DEFAULT_FORCE_KILL_WAIT = Duration.ofSeconds(5);
+    public static final Duration DEFAULT_TERMINATION_WINDOW = DEFAULT_GRACEFUL_TIMEOUT.plus(DEFAULT_FORCE_KILL_WAIT);
 
     private static final Set<String> KNOWN_IDE_EXECUTABLES = Set.of(
         "idea", "idea64",
@@ -34,8 +41,32 @@ public final class DiscoveryEngine {
 
     private DiscoveryEngine() {}
 
+    public static boolean isActivelyStopping(ManagedProcessRecord record, Instant now) {
+        return isActivelyStopping(record, now, DEFAULT_TERMINATION_WINDOW);
+    }
+
+    public static boolean isActivelyStopping(
+        ManagedProcessRecord record,
+        Instant now,
+        Duration terminationWindow
+    ) {
+        Objects.requireNonNull(record, "record must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        Objects.requireNonNull(terminationWindow, "terminationWindow must not be null");
+        return record instanceof ManagedProcessRecord.Stopping stopping
+            && now.isBefore(stopping.stopRequestedAt().plus(terminationWindow));
+    }
+
     public static DiscoveryResult discover(DiscoveryInput input) {
+        return discover(input, DEFAULT_TERMINATION_WINDOW);
+    }
+
+    public static DiscoveryResult discover(DiscoveryInput input, Duration terminationWindow) {
         Objects.requireNonNull(input, "input must not be null");
+        Objects.requireNonNull(terminationWindow, "terminationWindow must not be null");
+        if (terminationWindow.isNegative()) {
+            throw new IllegalArgumentException("terminationWindow must not be negative");
+        }
         ProcessTarget target = input.target();
         Optional<String> healthEndpoint = target.healthEndpoint();
 
@@ -45,36 +76,55 @@ public final class DiscoveryEngine {
                 .filter(ObservedProcess::alive)
                 .filter(p -> p.pid() == rec.pid())
                 .filter(p -> p.startTime().map(st -> !st.isAfter(rec.startedAt().plusSeconds(60))).orElse(true));
+
             if (proc.isPresent()) {
                 ObservedProcess aliveProc = proc.get();
-                boolean healthy = isHealthy(target, true, input.healthCheck());
-                HealthState health = healthy ? HealthState.HEALTHY : HealthState.STARTING;
                 Instant startedAt = aliveProc.startTime().orElse(rec.startedAt());
+
+                if (rec instanceof ManagedProcessRecord.Stopping stopping
+                    && isActivelyStopping(rec, input.now(), terminationWindow)) {
+                    ProcessState state = new ProcessState.Managed.Stopping(
+                        rec.pid(),
+                        startedAt,
+                        stopping.stopRequestedAt(),
+                        aliveProc
+                    );
+                    return new DiscoveryResult(
+                        target.name(),
+                        state,
+                        healthEndpoint,
+                        describeHealth(target, HealthState.STOPPING, Optional.of(rec.pid()), input.healthCheck())
+                    );
+                }
+
+                boolean healthy = isHealthy(target, true, input.healthCheck());
                 boolean stale = isStale(rec, input.latestArtifactTimestamp());
+                ProcessState state = healthy
+                    ? new ProcessState.Managed.Healthy(rec.pid(), startedAt, stale, aliveProc)
+                    : new ProcessState.Managed.Starting(rec.pid(), startedAt, stale, aliveProc);
                 return new DiscoveryResult(
                     target.name(),
-                    Ownership.MANAGED,
-                    Optional.of("procomp"),
-                    health,
-                    Optional.of(rec.pid()),
-                    Optional.of(startedAt),
-                    stale,
+                    state,
                     healthEndpoint,
-                    describeHealth(target, health, Optional.of(rec.pid()), input.healthCheck()),
-                    Optional.of(aliveProc)
+                    describeHealth(target, state.health(), Optional.of(rec.pid()), input.healthCheck())
                 );
             }
+
+            if (rec instanceof ManagedProcessRecord.Stopping) {
+                return new DiscoveryResult(
+                    target.name(),
+                    ProcessState.Stopped.INSTANCE,
+                    healthEndpoint,
+                    describeHealth(target, HealthState.STOPPED, Optional.empty(), input.healthCheck())
+                );
+            }
+
+            ProcessState crashed = new ProcessState.Managed.Crashed(rec.pid(), rec.startedAt());
             return new DiscoveryResult(
                 target.name(),
-                Ownership.MANAGED,
-                Optional.of("procomp"),
-                HealthState.CRASHED,
-                Optional.of(rec.pid()),
-                Optional.of(rec.startedAt()),
-                false,
+                crashed,
                 healthEndpoint,
-                describeHealth(target, HealthState.CRASHED, Optional.of(rec.pid()), input.healthCheck()),
-                Optional.empty()
+                describeHealth(target, HealthState.CRASHED, Optional.of(rec.pid()), input.healthCheck())
             );
         }
 
@@ -88,59 +138,51 @@ public final class DiscoveryEngine {
 
             if (healthy) {
                 String provenance = ideAncestor ? "IDE" : "shell";
+                ProcessState state = new ProcessState.Unmanaged.Healthy(provenance, pid, startedAt, listenerProc);
                 return new DiscoveryResult(
                     target.name(),
-                    Ownership.UNMANAGED,
-                    Optional.of(provenance),
-                    HealthState.HEALTHY,
-                    pid,
-                    startedAt,
-                    false,
+                    state,
                     healthEndpoint,
-                    describeHealth(target, HealthState.HEALTHY, pid, input.healthCheck()),
-                    listenerProc
+                    describeHealth(target, HealthState.HEALTHY, pid, input.healthCheck())
                 );
             }
-            if (ideAncestor) {
+            if (ideAncestor && listenerProc.isPresent()) {
+                ProcessState state = new ProcessState.Unmanaged.Starting(listenerProc.get());
                 return new DiscoveryResult(
                     target.name(),
-                    Ownership.UNMANAGED,
-                    Optional.of("IDE"),
-                    HealthState.STARTING,
-                    pid,
-                    startedAt,
-                    false,
+                    state,
                     healthEndpoint,
-                    describeHealth(target, HealthState.STARTING, pid, input.healthCheck()),
-                    listenerProc
+                    describeHealth(target, HealthState.STARTING, pid, input.healthCheck())
                 );
             }
+            ProcessState conflict = new ProcessState.Conflict(pid, startedAt, listenerProc);
             return new DiscoveryResult(
                 target.name(),
-                Ownership.CONFLICT,
-                Optional.of("unknown"),
-                HealthState.STARTING,
-                pid,
-                startedAt,
-                false,
+                conflict,
                 healthEndpoint,
-                describeHealth(target, HealthState.STARTING, pid, input.healthCheck()),
-                listenerProc
+                describeHealth(target, HealthState.STARTING, pid, input.healthCheck())
             );
         }
 
         return new DiscoveryResult(
             target.name(),
-            Ownership.NONE,
-            Optional.empty(),
-            HealthState.STOPPED,
-            Optional.empty(),
-            Optional.empty(),
-            false,
+            ProcessState.Stopped.INSTANCE,
             healthEndpoint,
-            describeHealth(target, HealthState.STOPPED, Optional.empty(), input.healthCheck()),
-            Optional.empty()
+            describeHealth(target, HealthState.STOPPED, Optional.empty(), input.healthCheck())
         );
+    }
+
+    public static Optional<Long> resolveRssBytes(DiscoveryResult discovery, java.util.Map<Long, Long> rssSnapshot) {
+        Objects.requireNonNull(discovery, "discovery must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
+        if (!discovery.health().isLive()) {
+            return Optional.empty();
+        }
+        Optional<Long> direct = discovery.process().flatMap(ObservedProcess::rssBytes);
+        if (direct.isPresent()) {
+            return direct;
+        }
+        return discovery.pid().map(rssSnapshot::get);
     }
 
     public static InspectionReport inspect(
@@ -151,14 +193,26 @@ public final class DiscoveryEngine {
         Optional<String> liveGatewayRoute,
         Instant now
     ) {
+        return inspect(target, discovery, managedRecord, desiredRoute, liveGatewayRoute, now, java.util.Map.of());
+    }
+
+    public static InspectionReport inspect(
+        ProcessTarget target,
+        DiscoveryResult discovery,
+        Optional<ManagedProcessRecord> managedRecord,
+        Optional<String> desiredRoute,
+        Optional<String> liveGatewayRoute,
+        Instant now,
+        java.util.Map<Long, Long> rssSnapshot
+    ) {
         Objects.requireNonNull(target, "target must not be null");
         Objects.requireNonNull(discovery, "discovery must not be null");
         Objects.requireNonNull(managedRecord, "managedRecord must not be null");
         Objects.requireNonNull(desiredRoute, "desiredRoute must not be null");
         Objects.requireNonNull(liveGatewayRoute, "liveGatewayRoute must not be null");
         Objects.requireNonNull(now, "now must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
 
-        boolean inactive = discovery.health() == HealthState.STOPPED || discovery.health() == HealthState.CRASHED;
         Optional<Duration> uptime = discovery.uptime(now);
         Optional<String> commandLine = discovery.process()
             .flatMap(ObservedProcess::commandLine)
@@ -171,9 +225,7 @@ public final class DiscoveryEngine {
         List<ParentProcess> parentChain = discovery.process()
             .map(ObservedProcess::parentChain)
             .orElse(List.of());
-        Optional<Long> rssBytes = inactive
-            ? Optional.empty()
-            : discovery.process().flatMap(ObservedProcess::rssBytes);
+        Optional<Long> rssBytes = resolveRssBytes(discovery, rssSnapshot);
 
         return new InspectionReport(
             target.name(),
@@ -193,7 +245,8 @@ public final class DiscoveryEngine {
             discovery.healthResponse(),
             target.stdoutLog(),
             target.stderrLog(),
-            discovery.stale()
+            discovery.stale(),
+            DiagnosticCommandAdvisor.suggest(discovery)
         );
     }
 
@@ -287,6 +340,9 @@ public final class DiscoveryEngine {
             return target.port()
                 .map(p -> "No active listener on 127.0.0.1:" + p)
                 .orElse("No active process");
+        }
+        if (health == HealthState.STOPPING) {
+            return "Process stopping" + pid.map(id -> " (PID " + id + ")").orElse("");
         }
         if (health == HealthState.CRASHED) {
             return "Process exited unexpectedly" + pid.map(id -> " (PID " + id + ")").orElse("");

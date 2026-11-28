@@ -14,6 +14,7 @@ import java.util.Optional;
 record RawProjectConfig(
     String project,
     Optional<String> repositoriesRoot,
+    RepositorySettings repositories,
     List<EnvFileSpec> envFiles,
     RawDefaultsConfig defaults,
     Map<String, RawBuilderConfig> builders,
@@ -21,7 +22,8 @@ record RawProjectConfig(
     Optional<RawGatewayConfig> gateway,
     Optional<CatalogMapping> catalog,
     Map<String, RawServiceConfig> services,
-    Map<String, ProfileDefinition> profiles
+    Map<String, ProfileDefinition> profiles,
+    Optional<RawGitConfig> git
 ) {
     RawProjectConfig {
         envFiles = List.copyOf(envFiles);
@@ -31,21 +33,44 @@ record RawProjectConfig(
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
     }
 
+    record RawGitHooksConfig(
+        Optional<String> sourceDir,
+        List<String> required,
+        Map<String, String> files,
+        GitHookInstallMode mode
+    ) {
+        RawGitHooksConfig {
+            required = List.copyOf(required);
+            files = Collections.unmodifiableMap(new LinkedHashMap<>(files));
+        }
+    }
+
+    record RawGitConfig(
+        Optional<RawGitHooksConfig> hooks,
+        List<String> extraRepositories
+    ) {
+        RawGitConfig {
+            extraRepositories = List.copyOf(extraRepositories);
+        }
+    }
+
     record RawDefaultsConfig(
         Optional<String> builder,
         Optional<String> proxyPathTemplate,
         Optional<String> remoteUrlTemplate,
         Optional<String> workingDir,
         Map<String, VarValue> vars,
-        Map<String, String> env
+        Map<String, String> env,
+        List<EnvFileSpec> envFiles
     ) {
         static final RawDefaultsConfig EMPTY = new RawDefaultsConfig(
-            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Map.of(), Map.of()
+            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Map.of(), Map.of(), List.of()
         );
 
         RawDefaultsConfig {
             vars = Collections.unmodifiableMap(new LinkedHashMap<>(vars));
             env = Collections.unmodifiableMap(new LinkedHashMap<>(env));
+            envFiles = List.copyOf(envFiles);
         }
     }
 

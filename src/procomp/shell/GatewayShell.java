@@ -15,6 +15,7 @@ import procomp.core.routing.RoutingTable;
 import procomp.shell.ProcessLifecycle.DiscoveryContext;
 import procomp.shell.ProcessLifecycle.LaunchPlan;
 import procomp.shell.ProcessLifecycle.StartTargetSpec;
+import procomp.shell.ProcessLifecycle.TargetRestartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStopOutcome;
 import procomp.shell.ports.Clock;
@@ -133,6 +134,51 @@ public final class GatewayShell {
     }
 
     /**
+     * Restarts a Managed Gateway Process (or starts it when Stopped/CRASHED), spares an Unmanaged Gateway,
+     * and fails fast on Conflict or STOPPING. Validates launch plan before stopping. Never mutates the Routing Table.
+     */
+    public Result<GatewayRestartResult, DomainError> restart(Project project, GatewayRestartRequest request) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+
+        Result<GatewayDefinition, DomainError> gwRes = requireGateway(project);
+        if (gwRes instanceof Result.Err<GatewayDefinition, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        GatewayDefinition gateway = ((Result.Ok<GatewayDefinition, DomainError>) gwRes).value();
+
+        StartTargetSpec spec = new StartTargetSpec(
+            "gateway",
+            ProcessKey.gateway(),
+            "target",
+            "Gateway",
+            "Gateway",
+            "Gateway is HEALTHY",
+            Optional.empty(),
+            () -> lifecycle.discoverGateway(project.name(), gateway),
+            () -> prepareGatewayLaunchPlan(project, gateway)
+        );
+
+        Result<List<TargetRestartOutcome>, DomainError> restartRes = lifecycle.restartTargets(
+            project.name(),
+            List.of(spec),
+            request.detach(),
+            request.timeout(),
+            request.gracefulTimeout()
+        );
+        if (restartRes instanceof Result.Err<List<TargetRestartOutcome>, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        TargetRestartOutcome outcome = ((Result.Ok<List<TargetRestartOutcome>, DomainError>) restartRes).value().get(0);
+        GatewayRestartDisposition disposition = switch (outcome.disposition()) {
+            case RESTARTED -> GatewayRestartDisposition.RESTARTED;
+            case SPAWNED -> GatewayRestartDisposition.SPAWNED;
+            case SPARED_UNMANAGED -> GatewayRestartDisposition.SPARED_UNMANAGED;
+        };
+        return Result.ok(new GatewayRestartResult(disposition, outcome.discovery(), gateway, request.detach()));
+    }
+
+    /**
      * Stops a Managed Gateway Process (or cleans a CRASHED Managed record), and refuses with an explicit
      * error without killing when an Unmanaged or Conflict process occupies the Gateway port.
      */
@@ -207,8 +253,17 @@ public final class GatewayShell {
      * {@link StatusShell} and {@link ProcessShell#inspect} read the Routing Table only once.
      */
     Result<GatewayStatusReport, DomainError> status(Project project, RoutingTable routing) {
+        return status(project, routing, lifecycle.snapshotRssBytes());
+    }
+
+    Result<GatewayStatusReport, DomainError> status(
+        Project project,
+        RoutingTable routing,
+        Map<Long, Long> rssSnapshot
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(routing, "routing must not be null");
+        Objects.requireNonNull(rssSnapshot, "rssSnapshot must not be null");
 
         Result<GatewayDefinition, DomainError> gwRes = requireGateway(project);
         if (gwRes instanceof Result.Err<GatewayDefinition, DomainError>(DomainError err)) {
@@ -237,12 +292,14 @@ public final class GatewayShell {
             return Result.err(err);
         }
         GatewayDriftReport drift = ((Result.Ok<GatewayDriftReport, DomainError>) driftRes).value();
+        Optional<Long> rssBytes = lifecycle.resolveRssBytes(discovery, rssSnapshot);
         return Result.ok(new GatewayStatusReport(
             project.name(),
             gateway,
             discovery,
             discovery.uptime(clock.now()),
-            drift
+            drift,
+            rssBytes
         ));
     }
 
@@ -580,13 +637,63 @@ public final class GatewayShell {
         }
     }
 
+    public record GatewayRestartRequest(boolean detach, Duration timeout, Duration gracefulTimeout) {
+        public static final Duration DEFAULT_TIMEOUT = GatewayStartRequest.DEFAULT_TIMEOUT;
+        public static final Duration DEFAULT_GRACEFUL_TIMEOUT = GatewayStopRequest.DEFAULT_GRACEFUL_TIMEOUT;
+
+        public GatewayRestartRequest(boolean detach, Duration timeout) {
+            this(detach, timeout, DEFAULT_GRACEFUL_TIMEOUT);
+        }
+
+        public GatewayRestartRequest {
+            Objects.requireNonNull(timeout, "timeout must not be null");
+            Objects.requireNonNull(gracefulTimeout, "gracefulTimeout must not be null");
+            if (timeout.isNegative()) {
+                throw new IllegalArgumentException("timeout must not be negative");
+            }
+            if (gracefulTimeout.isNegative()) {
+                throw new IllegalArgumentException("gracefulTimeout must not be negative");
+            }
+        }
+    }
+
+    public enum GatewayRestartDisposition {
+        RESTARTED,
+        SPAWNED,
+        SPARED_UNMANAGED
+    }
+
+    public record GatewayRestartResult(
+        GatewayRestartDisposition disposition,
+        DiscoveryResult discovery,
+        GatewayDefinition gateway,
+        boolean detached
+    ) {
+        public GatewayRestartResult {
+            Objects.requireNonNull(disposition, "disposition must not be null");
+            Objects.requireNonNull(discovery, "discovery must not be null");
+            Objects.requireNonNull(gateway, "gateway must not be null");
+        }
+    }
+
     public record GatewayStatusReport(
         String projectName,
         GatewayDefinition gateway,
         DiscoveryResult discovery,
         Optional<Duration> uptime,
-        GatewayDriftReport drift
+        GatewayDriftReport drift,
+        Optional<Long> rssBytes
     ) {
+        public GatewayStatusReport(
+            String projectName,
+            GatewayDefinition gateway,
+            DiscoveryResult discovery,
+            Optional<Duration> uptime,
+            GatewayDriftReport drift
+        ) {
+            this(projectName, gateway, discovery, uptime, drift, Optional.empty());
+        }
+
         public GatewayStatusReport {
             if (projectName == null || projectName.isBlank()) {
                 throw new IllegalArgumentException("projectName must be non-blank");
@@ -595,6 +702,7 @@ public final class GatewayShell {
             Objects.requireNonNull(discovery, "discovery must not be null");
             Objects.requireNonNull(uptime, "uptime must not be null");
             Objects.requireNonNull(drift, "drift must not be null");
+            Objects.requireNonNull(rssBytes, "rssBytes must not be null");
         }
     }
 

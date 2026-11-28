@@ -183,15 +183,10 @@ public final class ProjectResolver {
         currentUser.filter(s -> !s.isBlank()).ifPresent(u -> baseVars.put("user", new VarValue.Scalar(u)));
 
         List<EnvFileTarget> topEnvTargets = new ArrayList<>();
-        for (int i = 0; i < rawConfig.envFiles().size(); i++) {
-            EnvFileSpec spec = rawConfig.envFiles().get(i);
-            String ctx = "envFiles[" + i + "]";
-            Result<String, DomainError> pRes = TemplateExpander.expandScalar(spec.path(), baseVars, Set.of(), ctx);
-            if (pRes.isErr()) return pRes.castError();
-            Result<Path, DomainError> resolvedRes = resolvePath(configDir, okVal(pRes), ctx);
-            if (resolvedRes.isErr()) return resolvedRes.castError();
-            topEnvTargets.add(new EnvFileTarget(okVal(resolvedRes), spec.optional(), ctx));
-        }
+        Result<procomp.core.common.Unit, DomainError> topEnvRes = appendEnvFileTargets(
+            rawConfig.envFiles(), "envFiles", configDir, baseVars, topEnvTargets
+        );
+        if (topEnvRes.isErr()) return topEnvRes.castError();
 
         Map<String, RawProjectConfig.RawServiceConfig> mergedServices = mergeServices(catalogServices, rawConfig.services());
         List<ServiceDraft> drafts = new ArrayList<>();
@@ -241,15 +236,14 @@ public final class ProjectResolver {
             Path workingDir = okVal(wdRes);
 
             List<EnvFileTarget> svcEnvTargets = new ArrayList<>();
-            for (int i = 0; i < svc.envFiles().size(); i++) {
-                EnvFileSpec spec = svc.envFiles().get(i);
-                String ctx = "services." + svcName + ".envFiles[" + i + "]";
-                Result<String, DomainError> pRes = TemplateExpander.expandScalar(spec.path(), effectiveVars, Set.of(), ctx);
-                if (pRes.isErr()) return pRes.castError();
-                Result<Path, DomainError> resolvedRes = resolvePath(workingDir, okVal(pRes), ctx);
-                if (resolvedRes.isErr()) return resolvedRes.castError();
-                svcEnvTargets.add(new EnvFileTarget(okVal(resolvedRes), spec.optional(), ctx));
-            }
+            Result<procomp.core.common.Unit, DomainError> defEnvRes = appendEnvFileTargets(
+                rawConfig.defaults().envFiles(), "defaults.envFiles", workingDir, effectiveVars, svcEnvTargets
+            );
+            if (defEnvRes.isErr()) return defEnvRes.castError();
+            Result<procomp.core.common.Unit, DomainError> svcEnvRes = appendEnvFileTargets(
+                svc.envFiles(), "services." + svcName + ".envFiles", workingDir, effectiveVars, svcEnvTargets
+            );
+            if (svcEnvRes.isErr()) return svcEnvRes.castError();
 
             drafts.add(new ServiceDraft(svcName, svc, repoRef, workingDir, effectiveVars, svcEnvTargets));
         }
@@ -257,6 +251,25 @@ public final class ProjectResolver {
         return Result.ok(new ResolutionPlan(
             normalizedConfigPath, configDir, reposRoot, currentUser, rawConfig, expandedDefaultsVars, topEnvTargets, drafts
         ));
+    }
+
+    private static Result<procomp.core.common.Unit, DomainError> appendEnvFileTargets(
+        List<EnvFileSpec> specs,
+        String ctxPrefix,
+        Path baseDir,
+        Map<String, VarValue> vars,
+        List<EnvFileTarget> out
+    ) {
+        for (int i = 0; i < specs.size(); i++) {
+            EnvFileSpec spec = specs.get(i);
+            String ctx = ctxPrefix + "[" + i + "]";
+            Result<String, DomainError> pRes = TemplateExpander.expandScalar(spec.path(), vars, Set.of(), ctx);
+            if (pRes.isErr()) return pRes.castError();
+            Result<Path, DomainError> resolvedRes = resolvePath(baseDir, okVal(pRes), ctx);
+            if (resolvedRes.isErr()) return resolvedRes.castError();
+            out.add(new EnvFileTarget(okVal(resolvedRes), spec.optional(), ctx));
+        }
+        return Result.ok(procomp.core.common.Unit.VALUE);
     }
 
     private static Result<Project, DomainError> finalizeProject(
@@ -353,6 +366,45 @@ public final class ProjectResolver {
             }
         }
 
+        // Validate canonical Repository names (derived from root basename) for ambiguity:
+        // 1. No two distinct Repository roots may share the same basename.
+        // 2. No Repository name may collide with a different Service's name (1:1 Service/Repo equality is allowed).
+        Map<String, RepositoryRef> repoByName = new LinkedHashMap<>();
+        for (RepositoryRef ref : repoByRoot.values()) {
+            if (!ProjectConfigParser.isPathSafeIdentifier(ref.name())) {
+                return Result.err(DomainError.of(
+                    "CONFIG_INVALID_VALUE",
+                    "Repository root '" + ref.root() + "' has invalid basename '" + ref.name() + "'",
+                    Map.of("root", ref.root().toString(), "repository", ref.name())
+                ));
+            }
+            RepositoryRef previous = repoByName.putIfAbsent(ref.name(), ref);
+            if (previous != null) {
+                return Result.err(DomainError.of(
+                    "CONFIG_REPOSITORY_NAME_COLLISION",
+                    "Distinct Repositories '" + previous.root() + "' and '" + ref.root()
+                        + "' share the same basename '" + ref.name() + "'",
+                    Map.of("repository", ref.name(), "root1", previous.root().toString(), "root2", ref.root().toString())
+                ));
+            }
+        }
+        for (RepositoryRef ref : repoByRoot.values()) {
+            ServiceDefinition sameNameService = services.get(ref.name());
+            if (sameNameService != null) {
+                boolean pointsToSameRepo = sameNameService.repository()
+                    .map(r -> r.root().equals(ref.root()))
+                    .orElse(false);
+                if (!pointsToSameRepo) {
+                    return Result.err(DomainError.of(
+                        "CONFIG_REPOSITORY_NAME_COLLISION",
+                        "Repository name '" + ref.name() + "' (root '" + ref.root()
+                            + "') collides with Service '" + sameNameService.name() + "' pointing to a different Repository",
+                        Map.of("repository", ref.name(), "service", sameNameService.name())
+                    ));
+                }
+            }
+        }
+
         for (ProfileDefinition profile : rawConfig.profiles().values()) {
             for (String svcName : profile.localServices()) {
                 if (!services.containsKey(svcName)) {
@@ -365,18 +417,85 @@ public final class ProjectResolver {
             }
         }
 
+        Result<Optional<GitConfig>, DomainError> gitRes = resolveGit(plan, hostEnv);
+        if (gitRes.isErr()) return gitRes.castError();
+        Optional<GitConfig> gitConfig = okVal(gitRes);
+
         return Result.ok(new Project(
             rawConfig.project(),
             plan.configPath(),
             plan.configDir(),
             plan.repositoriesRoot(),
+            rawConfig.repositories(),
             resolvedBuilders,
             resolvedRuntimes,
             gateway,
             services,
             rawConfig.profiles(),
-            List.copyOf(repoByRoot.values())
+            List.copyOf(repoByRoot.values()),
+            gitConfig
         ));
+    }
+
+    private static Result<Optional<GitConfig>, DomainError> resolveGit(
+        ResolutionPlan plan,
+        Map<String, String> hostEnv
+    ) {
+        if (plan.rawConfig().git().isEmpty()) {
+            return Result.ok(Optional.empty());
+        }
+        RawProjectConfig.RawGitConfig rawGit = plan.rawConfig().git().get();
+        Map<String, VarValue> gitVars = new LinkedHashMap<>(plan.expandedDefaultsVars());
+        gitVars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
+        plan.repositoriesRoot().ifPresent(p -> gitVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> gitVars.put("user", new VarValue.Scalar(u)));
+
+        Optional<GitHooksConfig> resolvedHooks = Optional.empty();
+        if (rawGit.hooks().isPresent()) {
+            RawProjectConfig.RawGitHooksConfig rawHooks = rawGit.hooks().get();
+            Optional<Path> sourceDir = Optional.empty();
+            if (rawHooks.sourceDir().isPresent()) {
+                Result<String, DomainError> expRes = expandScalarAndHostEnv(
+                    rawHooks.sourceDir().get(), gitVars, hostEnv, "git.hooks.sourceDir"
+                );
+                if (expRes.isErr()) return expRes.castError();
+                Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), "git.hooks.sourceDir");
+                if (pathRes.isErr()) return pathRes.castError();
+                sourceDir = Optional.of(okVal(pathRes));
+            }
+
+            Map<String, Path> explicitFiles = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : rawHooks.files().entrySet()) {
+                String hookName = entry.getKey();
+                String ctx = "git.hooks.files." + hookName;
+                Result<String, DomainError> expRes = expandScalarAndHostEnv(entry.getValue(), gitVars, hostEnv, ctx);
+                if (expRes.isErr()) return expRes.castError();
+                Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), ctx);
+                if (pathRes.isErr()) return pathRes.castError();
+                explicitFiles.put(hookName, okVal(pathRes));
+            }
+
+            resolvedHooks = Optional.of(new GitHooksConfig(
+                sourceDir,
+                rawHooks.required(),
+                explicitFiles,
+                rawHooks.mode()
+            ));
+        }
+
+        List<Path> extraRepos = new ArrayList<>(rawGit.extraRepositories().size());
+        for (int i = 0; i < rawGit.extraRepositories().size(); i++) {
+            String ctx = "git.extraRepositories[" + i + "]";
+            Result<String, DomainError> expRes = expandScalarAndHostEnv(
+                rawGit.extraRepositories().get(i), gitVars, hostEnv, ctx
+            );
+            if (expRes.isErr()) return expRes.castError();
+            Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), ctx);
+            if (pathRes.isErr()) return pathRes.castError();
+            extraRepos.add(okVal(pathRes));
+        }
+
+        return Result.ok(Optional.of(new GitConfig(resolvedHooks, extraRepos)));
     }
 
     /**
@@ -510,6 +629,9 @@ public final class ProjectResolver {
         );
         if (buildConfigRes.isErr()) return buildConfigRes.castError();
 
+        List<EnvFileSpec> effectiveEnvFiles = new ArrayList<>(rawConfig.defaults().envFiles());
+        effectiveEnvFiles.addAll(svc.envFiles());
+
         return Result.ok(new ServiceDefinition(
             name,
             svc.port(),
@@ -524,7 +646,7 @@ public final class ProjectResolver {
             rt.artifactExclude(),
             okVal(cmdRes),
             SecretEnv.of(finalEnv),
-            svc.envFiles()
+            effectiveEnvFiles
         ));
     }
 
@@ -933,6 +1055,17 @@ public final class ProjectResolver {
             defaults.env(), validationVars, hostEnv, "defaults.env"
         );
         if (envCheck.isErr()) return envCheck.castError();
+        if (!defaults.envFiles().isEmpty()) {
+            Map<String, VarValue> envFileVars = new LinkedHashMap<>(validationVars);
+            envFileVars.remove("artifact");
+            for (int i = 0; i < defaults.envFiles().size(); i++) {
+                String ctx = "defaults.envFiles[" + i + "]";
+                Result<String, DomainError> pCheck = TemplateExpander.expandScalar(
+                    defaults.envFiles().get(i).path(), envFileVars, Set.of(), ctx
+                );
+                if (pCheck.isErr()) return pCheck.castError();
+            }
+        }
         return Result.ok(procomp.core.common.Unit.VALUE);
     }
 

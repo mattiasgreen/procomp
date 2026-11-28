@@ -100,5 +100,40 @@ public final class GatewayLogsApiAndCliTest {
         ApiResponse errRes = router.handle(ApiRequest.of("GET", "/api/gateway/logs", "err=true", headers, ""));
         Assert.assertEquals(200, errRes.statusCode(), "200 gateway stderr logs");
         Assert.assertContains(errRes.body(), "WARN proxy timeout", "gateway stderr content");
+
+        // 4. Backward pagination on GET /api/gateway/logs?lines=1&beforeOffset=...
+        ApiResponse gwPage1 = router.handle(ApiRequest.of("GET", "/api/gateway/logs", "lines=1", headers, ""));
+        Assert.assertEquals(200, gwPage1.statusCode(), "200 gateway page 1");
+        Assert.assertContains(gwPage1.body(), "\"hasOlder\":true", "gateway page 1 hasOlder");
+        int offsetBeforeSecondLine = "WireMock started on 8080\n".length();
+        ApiResponse gwPage2 = router.handle(
+            ApiRequest.of("GET", "/api/gateway/logs", "lines=1&beforeOffset=" + offsetBeforeSecondLine, headers, "")
+        );
+        Assert.assertEquals(200, gwPage2.statusCode(), "200 gateway page 2");
+        Assert.assertContains(gwPage2.body(), "WireMock started on 8080", "gateway page 2 returns first line");
+        Assert.assertContains(gwPage2.body(), "\"startOffset\":0", "gateway page 2 reaches offset 0");
+        Assert.assertContains(gwPage2.body(), "\"hasOlder\":false", "gateway page 2 hasOlder false");
+
+        // 5. Gateway SSE meta includes startOffset and hasOlder
+        java.io.ByteArrayOutputStream gwStreamOut = new java.io.ByteArrayOutputStream();
+        java.util.concurrent.atomic.AtomicInteger gwWrites = new java.util.concurrent.atomic.AtomicInteger(0);
+        SseStream gwSink = new SseStream(new java.io.OutputStream() {
+            @Override
+            public void write(int b) throws java.io.IOException {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) throws java.io.IOException {
+                gwStreamOut.write(b, off, len);
+                if (gwWrites.incrementAndGet() >= 2) {
+                    throw new java.io.IOException("client disconnected");
+                }
+            }
+        });
+        router.handleSse(ApiRequest.of("GET", "/api/gateway/logs/stream", "lines=1", headers, ""), gwSink);
+        String gwWire = gwStreamOut.toString(java.nio.charset.StandardCharsets.UTF_8);
+        Assert.assertContains(gwWire, "\"startOffset\":" + offsetBeforeSecondLine, "gateway SSE meta startOffset");
+        Assert.assertContains(gwWire, "\"hasOlder\":true", "gateway SSE meta hasOlder");
     }
 }

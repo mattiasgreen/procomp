@@ -1,5 +1,8 @@
 * text=auto
 procomp text eol=lf
+procomp-jar text eol=lf
 *.java text eol=lf
 *.sh text eol=lf
 *.cmd text eol=crlf
+gradlew text eol=lf
+gradlew.bat text eol=crlf

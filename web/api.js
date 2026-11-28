@@ -100,6 +100,20 @@ export function useProfile(profileName) {
   });
 }
 
+export function saveProfile(profileName, { local = null, fromCurrentRoutes = false } = {}) {
+  const payload = fromCurrentRoutes ? { fromCurrentRoutes: true } : { local: Array.isArray(local) ? local : [] };
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteProfile(profileName) {
+  return requestJson(`/api/profiles/${encodeURIComponent(profileName)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function startServices(services = [], { detach = false, timeoutSeconds = 30 } = {}) {
   return requestJson('/api/services/start', {
     method: 'POST',
@@ -127,6 +141,58 @@ export function cancelBuild(serviceName) {
   });
 }
 
+export function fetchGitBranches(target) {
+  return requestJson(`/api/git/branches/${encodeURIComponent(target)}`);
+}
+
+export function gitClone(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/clone', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitFetch(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/fetch', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitPull(targets = [], { all = false, force = false } = {}) {
+  return requestJson('/api/git/pull', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, force }),
+  });
+}
+
+export function gitSwitch({ branch = null, useDefault = false, targets = [], all = false, force = false } = {}) {
+  const payload = { targets, all, force };
+  if (useDefault) {
+    payload.default = true;
+  } else if (branch) {
+    payload.branch = branch;
+  }
+  return requestJson('/api/git/switch', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function gitStash({ targets = [], all = false, message = '', includeUntracked = true, force = false } = {}) {
+  return requestJson('/api/git/stash', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all, message, includeUntracked, force }),
+  });
+}
+
+export function gitCancel(targets = [], { all = false } = {}) {
+  return requestJson('/api/git/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ targets, all }),
+  });
+}
+
 export function startGateway({ detach = false, timeoutSeconds = 30 } = {}) {
   return requestJson('/api/gateway/start', {
     method: 'POST',
@@ -140,26 +206,50 @@ export function stopGateway() {
   });
 }
 
+export function restartGateway({ detach = false, timeoutSeconds = 30 } = {}) {
+  return requestJson('/api/gateway/restart', {
+    method: 'POST',
+    body: JSON.stringify({ detach, timeoutSeconds }),
+  });
+}
+
 export function reconcileGateway() {
   return requestJson('/api/gateway/reconcile', {
     method: 'POST',
   });
 }
 
-export function fetchServiceLogs(serviceName, { lines = 100, err = false, build = false } = {}) {
+export function installGitHooks(repositories = []) {
+  return requestJson('/api/git/hooks/install', {
+    method: 'POST',
+    body: JSON.stringify({ repositories }),
+  });
+}
+
+export function fetchServiceLogs(
+  serviceName,
+  { lines = 200, err = false, build = false, git = false, beforeOffset = null } = {},
+) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
     build: build ? 'true' : 'false',
+    git: git ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/services/${encodeURIComponent(serviceName)}/logs?${params.toString()}`);
 }
 
-export function fetchGatewayLogs({ lines = 100, err = false } = {}) {
+export function fetchGatewayLogs({ lines = 200, err = false, beforeOffset = null } = {}) {
   const params = new URLSearchParams({
     lines: String(lines),
     err: err ? 'true' : 'false',
   });
+  if (beforeOffset !== null && beforeOffset !== undefined) {
+    params.set('beforeOffset', String(beforeOffset));
+  }
   return requestJson(`/api/gateway/logs?${params.toString()}`);
 }
 
@@ -176,6 +266,14 @@ export function fetchGatewayLogs({ lines = 100, err = false } = {}) {
  * }} handlers
  */
 export function streamStartServices(services = [], handlers = {}) {
+  return streamLifecycleEndpoint('/api/services/start/stream', 'Start', services, handlers);
+}
+
+export function streamRestartServices(services = [], handlers = {}) {
+  return streamLifecycleEndpoint('/api/services/restart/stream', 'Restart', services, handlers);
+}
+
+function streamLifecycleEndpoint(endpoint, label, services = [], handlers = {}) {
   const timeoutSeconds = handlers.timeoutSeconds ?? 30;
   const controller = new AbortController();
   let closed = false;
@@ -219,7 +317,7 @@ export function streamStartServices(services = [], handlers = {}) {
               0,
               {
                 code: 'STREAM_DISCONNECTED',
-                message: 'Start progress stream disconnected unexpectedly.',
+                message: `${label} progress stream disconnected unexpectedly.`,
                 details: {},
               },
               null,
@@ -233,7 +331,7 @@ export function streamStartServices(services = [], handlers = {}) {
   (async () => {
     let response;
     try {
-      response = await fetch('/api/services/start/stream', {
+      response = await fetch(endpoint, {
         method: 'POST',
         cache: 'no-store',
         signal: controller.signal,
@@ -387,6 +485,7 @@ export function streamServiceLogs(serviceName, handlers = {}) {
     lines: String(handlers.lines ?? 100),
     err: handlers.err ? 'true' : 'false',
     build: handlers.build ? 'true' : 'false',
+    git: handlers.git ? 'true' : 'false',
   });
   return openLogEventSource(
     `/api/services/${encodeURIComponent(serviceName)}/logs/stream?${params.toString()}`,

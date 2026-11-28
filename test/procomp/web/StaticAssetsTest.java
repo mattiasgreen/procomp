@@ -3,13 +3,19 @@ package procomp.web;
 import procomp.Assert;
 import procomp.core.common.DomainError;
 import procomp.web.StaticAssets.AssetResult;
+import procomp.web.StaticAssets.Source;
 
 import java.io.IOException;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 import java.util.stream.Stream;
 
 public final class StaticAssetsTest {
@@ -68,8 +74,18 @@ public final class StaticAssetsTest {
 
     public static void testDiscoverDefaultLocatesRepoWebRootAndPrefersCodeSourceOverCwd() throws IOException {
         StaticAssets discovered = Assert.assertOk(StaticAssets.discoverDefault(), "discoverDefault locates repo web/");
-        Assert.assertTrue(Files.isRegularFile(discovered.webRoot().resolve("index.html")), "discovered web/ has index.html");
-        Assert.assertTrue(Files.isRegularFile(discovered.webRoot().resolve("app.js")), "discovered web/ has app.js");
+        Path discoveredRoot = discovered.webRoot().orElseThrow();
+        Assert.assertTrue(Files.isRegularFile(discoveredRoot.resolve("index.html")), "discovered web/ has index.html");
+        Assert.assertTrue(Files.isRegularFile(discoveredRoot.resolve("app.js")), "discovered web/ has app.js");
+        String indexHtml = Files.readString(discoveredRoot.resolve("index.html"), StandardCharsets.UTF_8);
+        String appJs = Files.readString(discoveredRoot.resolve("app.js"), StandardCharsets.UTF_8);
+        String apiJs = Files.readString(discoveredRoot.resolve("api.js"), StandardCharsets.UTF_8);
+        String stylesCss = Files.readString(discoveredRoot.resolve("styles.css"), StandardCharsets.UTF_8);
+        Assert.assertContains(indexHtml, "btn-gateway-restart", "index.html includes gateway restart button");
+        Assert.assertContains(appJs, "badge-stopping", "app.js maps STOPPING health badge");
+        Assert.assertContains(appJs, "handleRestartServices", "app.js wires service restart handler");
+        Assert.assertContains(apiJs, "/api/services/restart/stream", "api.js targets restart SSE stream");
+        Assert.assertContains(stylesCss, ".badge-stopping", "styles.css styles STOPPING badge");
 
         Path tempRoot = Files.createTempDirectory("procomp-static-discover-test");
         try {
@@ -91,7 +107,7 @@ public final class StaticAssetsTest {
                 StaticAssets.discoverFrom(List.of(repoClasses, userProject)),
                 "CodeSource root takes precedence over CWD"
             );
-            Assert.assertEquals(repoWeb.toAbsolutePath().normalize(), preferred.webRoot(), "resolves repo web/ first");
+            Assert.assertEquals(Optional.of(repoWeb.toAbsolutePath().normalize()), preferred.webRoot(), "resolves repo web/ first");
 
             // When CodeSource does not locate web/index.html, falls back to CWD
             Path unrelatedCodeSource = tempRoot.resolve("tmp-classes");
@@ -100,7 +116,7 @@ public final class StaticAssetsTest {
                 StaticAssets.discoverFrom(List.of(unrelatedCodeSource, userProject)),
                 "falls back to CWD when CodeSource has no web/index.html"
             );
-            Assert.assertEquals(userWeb.toAbsolutePath().normalize(), fallback.webRoot(), "falls back to CWD web/");
+            Assert.assertEquals(Optional.of(userWeb.toAbsolutePath().normalize()), fallback.webRoot(), "falls back to CWD web/");
 
             // Directory with web/ but no index.html is ignored
             Path emptyWebProject = tempRoot.resolve("empty-web-project");
@@ -113,6 +129,70 @@ public final class StaticAssetsTest {
         } finally {
             deleteRecursively(tempRoot);
         }
+    }
+
+    public static void testServesStaticAssetsFromJarClasspathAndBlocksTraversal() throws IOException {
+        Path tempRoot = Files.createTempDirectory("procomp-static-jar-test");
+        try {
+            Path jarPath = tempRoot.resolve("procomp.jar");
+            try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath))) {
+                writeJarEntry(jos, "web/index.html", "<!doctype html><title>jar-ui</title>");
+                writeJarEntry(jos, "web/app.js", "export const fromJar = true;\n");
+                writeJarEntry(jos, "web/styles.css", "body { margin: 0; }\n");
+                jos.putNextEntry(new JarEntry("web/sub/"));
+                jos.closeEntry();
+                writeJarEntry(jos, "secret.txt", "top-secret");
+            }
+
+            Path userProject = tempRoot.resolve("user-app");
+            Path userWeb = userProject.resolve("web");
+            Files.createDirectories(userWeb);
+            Files.writeString(userWeb.resolve("index.html"), "user-app-web", StandardCharsets.UTF_8);
+
+            try (URLClassLoader jarLoader = new URLClassLoader(new URL[]{jarPath.toUri().toURL()}, null)) {
+                StaticAssets assets = StaticAssets.fromClasspath(jarLoader, "web");
+                Assert.assertTrue(assets.webRoot().isEmpty(), "classpath StaticAssets has no disk webRoot");
+                Assert.assertTrue(assets.source() instanceof Source.Classpath, "source is Classpath");
+
+                assertFound(assets.resolve("/"), "text/html; charset=utf-8", "no-cache", "<!doctype html><title>jar-ui</title>");
+                assertFound(assets.resolve("/index.html"), "text/html; charset=utf-8", "no-cache", "<!doctype html><title>jar-ui</title>");
+                assertFound(assets.resolve("/app.js"), "text/javascript; charset=utf-8", "no-cache", "export const fromJar = true;\n");
+                assertFound(assets.resolve("/styles.css"), "text/css; charset=utf-8", "no-cache", "body { margin: 0; }\n");
+
+                Assert.assertTrue(assets.resolve("/missing.js") instanceof AssetResult.NotFound, "missing JAR asset returns NotFound");
+                Assert.assertTrue(assets.resolve("/sub/") instanceof AssetResult.NotFound, "JAR directory trailing slash returns NotFound");
+                Assert.assertTrue(assets.resolve("/sub") instanceof AssetResult.NotFound, "JAR directory entry returns NotFound");
+
+                for (String malicious : new String[]{
+                    "/../secret.txt",
+                    "/%2e%2e/secret.txt",
+                    "/%2e%2e%2fsecret.txt",
+                    "/..\\secret.txt",
+                    "/sub/../../secret.txt",
+                    "/index.html\0.js"
+                }) {
+                    AssetResult res = assets.resolve(malicious);
+                    Assert.assertTrue(res instanceof AssetResult.Forbidden,
+                        "malicious JAR path '" + malicious + "' must return Forbidden, got " + res);
+                }
+
+                // When running from a packaged JAR with bundled web/, JAR assets win over user CWD web/
+                StaticAssets discovered = Assert.assertOk(
+                    StaticAssets.discoverDefault(Optional.of(jarPath), jarLoader, "web", userProject),
+                    "packaged JAR discovers bundled classpath web/"
+                );
+                Assert.assertTrue(discovered.source() instanceof Source.Classpath, "packaged JAR prefers bundled classpath over CWD");
+                assertFound(discovered.resolve("/"), "text/html; charset=utf-8", "no-cache", "<!doctype html><title>jar-ui</title>");
+            }
+        } finally {
+            deleteRecursively(tempRoot);
+        }
+    }
+
+    private static void writeJarEntry(JarOutputStream jos, String name, String content) throws IOException {
+        jos.putNextEntry(new JarEntry(name));
+        jos.write(content.getBytes(StandardCharsets.UTF_8));
+        jos.closeEntry();
     }
 
     private static void assertFound(AssetResult result, String expectedMime, String expectedCache, String expectedBody) {

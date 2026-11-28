@@ -1,8 +1,10 @@
 package procomp.shell;
 
 import procomp.core.routing.Route;
+import procomp.shell.GatewayShell.GatewayRestartRequest;
 import procomp.shell.GatewayShell.GatewayStartRequest;
 import procomp.shell.LogsShell.LogsRequest;
+import procomp.shell.ProcessShell.RestartRequest;
 import procomp.shell.ProcessShell.StartRequest;
 
 import java.nio.file.Path;
@@ -79,6 +81,38 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String saveProfileSnapshot(String profileName) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("save");
+        tokens.add(quoteArg(profileName));
+        return join(tokens);
+    }
+
+    public String saveProfile(String profileName, List<String> localServices) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        Objects.requireNonNull(localServices, "localServices must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("save");
+        tokens.add(quoteArg(profileName));
+        if (localServices.isEmpty()) {
+            tokens.add("--none");
+        } else {
+            for (String svc : localServices) {
+                tokens.add(quoteArg(svc));
+            }
+        }
+        return join(tokens);
+    }
+
+    public String deleteProfile(String profileName) {
+        Objects.requireNonNull(profileName, "profileName must not be null");
+        List<String> tokens = base("profile");
+        tokens.add("delete");
+        tokens.add(quoteArg(profileName));
+        return join(tokens);
+    }
+
     public String start(List<String> services, boolean detach, Duration timeout) {
         Objects.requireNonNull(services, "services must not be null");
         Objects.requireNonNull(timeout, "timeout must not be null");
@@ -107,6 +141,23 @@ public final class CliCommandFormatter {
         }
         if (killConflict) {
             tokens.add("--kill-conflict");
+        }
+        return join(tokens);
+    }
+
+    public String restart(List<String> services, boolean detach, Duration timeout) {
+        Objects.requireNonNull(services, "services must not be null");
+        Objects.requireNonNull(timeout, "timeout must not be null");
+        List<String> tokens = base("restart");
+        for (String svc : services) {
+            tokens.add(quoteArg(svc));
+        }
+        if (detach) {
+            tokens.add("-d");
+        }
+        if (!timeout.equals(RestartRequest.DEFAULT_TIMEOUT)) {
+            tokens.add("--timeout");
+            tokens.add(Long.toString(timeout.toSeconds()));
         }
         return join(tokens);
     }
@@ -201,6 +252,20 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String gatewayRestart(boolean detach, Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout must not be null");
+        List<String> tokens = base("gateway");
+        tokens.add("restart");
+        if (detach) {
+            tokens.add("-d");
+        }
+        if (!timeout.equals(GatewayRestartRequest.DEFAULT_TIMEOUT)) {
+            tokens.add("--timeout");
+            tokens.add(Long.toString(timeout.toSeconds()));
+        }
+        return join(tokens);
+    }
+
     public String gatewayStatus(boolean json) {
         List<String> tokens = base("gateway");
         tokens.add("status");
@@ -231,6 +296,152 @@ public final class CliCommandFormatter {
         }
         if (pathOnly) {
             tokens.add("--path");
+        }
+        return join(tokens);
+    }
+
+    public String gitHooksStatus(boolean json) {
+        List<String> tokens = base("git");
+        tokens.add("hooks");
+        tokens.add("status");
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitHooksInstall(List<String> repositories) {
+        Objects.requireNonNull(repositories, "repositories must not be null");
+        List<String> tokens = base("git");
+        tokens.add("hooks");
+        tokens.add("install");
+        for (String repo : repositories) {
+            tokens.add(quoteArg(repo));
+        }
+        return join(tokens);
+    }
+
+    public String gitStatus(boolean localOnly, boolean fetch, boolean all, boolean json) {
+        List<String> tokens = base("git");
+        tokens.add("status");
+        if (localOnly) {
+            tokens.add("--local");
+        }
+        if (fetch) {
+            tokens.add("--fetch");
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitBranches(String target, boolean json) {
+        Objects.requireNonNull(target, "target must not be null");
+        List<String> tokens = base("git");
+        tokens.add("branches");
+        tokens.add(quoteArg(target));
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitOp(String subcommand, List<String> targets, boolean all, boolean force) {
+        Objects.requireNonNull(subcommand, "subcommand must not be null");
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add(subcommand);
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitSwitch(String branch, boolean useDefault, List<String> targets, boolean all, boolean force) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("switch");
+        if (useDefault) {
+            tokens.add("--default");
+        } else {
+            tokens.add(quoteArg(Objects.requireNonNull(branch, "branch must not be null")));
+        }
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitStashPush(List<String> targets, boolean all, String message, boolean includeUntracked, boolean force) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("stash");
+        tokens.add("push");
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        if (includeUntracked) {
+            tokens.add("-u");
+        }
+        if (message != null && !message.isBlank()) {
+            tokens.add("-m");
+            tokens.add(quoteArg(message));
+        }
+        if (force) {
+            tokens.add("--force");
+        }
+        return join(tokens);
+    }
+
+    public String gitCancel(List<String> targets, boolean all) {
+        Objects.requireNonNull(targets, "targets must not be null");
+        List<String> tokens = base("git");
+        tokens.add("cancel");
+        for (String target : targets) {
+            tokens.add(quoteArg(target));
+        }
+        if (all) {
+            tokens.add("--all");
+        }
+        return join(tokens);
+    }
+
+    public String gitLogs(String target, boolean stderr, boolean pathOnly, int lines, boolean follow) {
+        Objects.requireNonNull(target, "target must not be null");
+        List<String> tokens = base("git");
+        tokens.add("logs");
+        tokens.add(quoteArg(target));
+        if (stderr) {
+            tokens.add("--err");
+        }
+        if (pathOnly) {
+            tokens.add("--path");
+        }
+        if (lines != LogsRequest.DEFAULT_LINES) {
+            tokens.add("-n");
+            tokens.add(Integer.toString(lines));
+        }
+        if (follow) {
+            tokens.add("-f");
         }
         return join(tokens);
     }

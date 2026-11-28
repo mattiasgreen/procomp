@@ -102,7 +102,11 @@ public final class GatewayCliTest {
         Assert.assertEquals("IN_SYNC", ((JsonValue.JsonString) syncedObj.get("syncStatus").orElseThrow()).value(), "syncStatus IN_SYNC");
         Assert.assertEquals(0, ((JsonValue.JsonArray) syncedObj.get("drifted").orElseThrow()).elements().size(), "no drifted routes");
 
-        // 4. gateway stop -> stops Managed Gateway cleanly
+        // 4. gateway restart -> restarts Managed Gateway cleanly, then gateway stop stops it
+        CliResult restartManaged = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "gateway", "restart");
+        Assert.assertEquals(0, restartManaged.exitCode(), "gateway restart Managed exits 0; stderr=" + restartManaged.stderr());
+        Assert.assertContains(restartManaged.stdout(), "restarted", "restart mentions restarted");
+
         CliResult stopManaged = runCli(configSource, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "gateway", "stop");
         Assert.assertEquals(0, stopManaged.exitCode(), "gateway stop Managed exits 0; stderr=" + stopManaged.stderr());
         Assert.assertContains(stopManaged.stdout(), "stopped", "stop mentions stopped");
@@ -130,6 +134,9 @@ public final class GatewayCliTest {
             new String[]{"gateway", "start", "--bogus"},
             new String[]{"gateway", "start", "--timeout", "0"},
             new String[]{"gateway", "start", "extra"},
+            new String[]{"gateway", "restart", "--bogus"},
+            new String[]{"gateway", "restart", "--timeout", "0"},
+            new String[]{"gateway", "restart", "extra"},
             new String[]{"gateway", "stop", "--force"},
             new String[]{"gateway", "status", "extra"},
             new String[]{"gateway", "status", "--bogus"},

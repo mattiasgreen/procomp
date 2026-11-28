@@ -56,14 +56,16 @@ public final class StatusCliTest {
         CliResult noGwRes = runCli(noGwConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, noGwRes.exitCode(), "status without gateway exits 0; stderr=" + noGwRes.stderr());
         Assert.assertContains(noGwRes.stdout(), "SERVICE", "prints SERVICE header");
+        Assert.assertContains(noGwRes.stdout(), "RSS", "prints RSS header");
         Assert.assertContains(noGwRes.stdout(), "Gateway: not configured", "prints unconfigured gateway summary");
+        Assert.assertNotContains(noGwRes.stdout(), "Total RSS:", "omits Total RSS when nothing is running");
 
         // 2. Rich multi-service estate with Gateway OFFLINE -> DRIFTED (N) -> IN SYNC
         var richConfig = richConfigSource(root, "top-secret-cli-status");
         Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
         // orders: LOCAL + MANAGED + HEALTHY + STALE
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders-1.0.jar"),
             Optional.of(Instant.parse("2026-11-20T11:40:00Z")),
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
@@ -73,6 +75,7 @@ public final class StatusCliTest {
             4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
             Optional.of("java -jar orders-1.0.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
+        processRunner.setRssBytes(4100L, 200L * 1024L * 1024L);
         httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
 
         // billing: REMOTE + UNMANAGED (IDE) + HEALTHY
@@ -83,6 +86,7 @@ public final class StatusCliTest {
             List.of(new ParentProcess(10L, Optional.of("idea64.exe"), Optional.of("idea64.exe"))),
             Optional.empty(), Optional.of("java")
         ));
+        processRunner.setRssBytes(5200L, 150L * 1024L * 1024L);
         httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
 
         // payments: REMOTE + CONFLICT
@@ -95,7 +99,7 @@ public final class StatusCliTest {
         ));
 
         // inventory: REMOTE + CRASHED
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord.Running(
             7400L, Instant.parse("2026-11-20T11:10:00Z"), List.of("java", "-jar", "inventory.jar"),
             Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("inventory"), false),
@@ -136,7 +140,7 @@ public final class StatusCliTest {
             }
             return Result.ok(new HttpResponseData(200, Map.of(), "{}"));
         });
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             8100L, Instant.parse("2026-11-20T11:50:00Z"), List.of("java", "-jar", "wiremock.jar"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
@@ -145,11 +149,29 @@ public final class StatusCliTest {
             8100L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
             Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
         ));
+        processRunner.setRssBytes(8100L, 90L * 1024L * 1024L);
         httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "{\"status\":\"healthy\"}");
 
         CliResult driftedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
         Assert.assertEquals(0, driftedRes.exitCode(), "status drifted exits 0");
         Assert.assertContains(driftedRes.stdout(), "DRIFTED (4)", "Gateway summary shows DRIFTED (4)");
+        Assert.assertContains(driftedRes.stdout(), "90 MB RSS", "Gateway summary includes RSS");
+        Assert.assertContains(driftedRes.stdout(), "Total RSS: 440 MB", "prints Total RSS summary");
+
+        CliResult jsonRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status", "--json");
+        Assert.assertEquals(0, jsonRes.exitCode(), "status --json exits 0");
+        JsonValue.JsonObject statusJson = (JsonValue.JsonObject) Assert.assertOk(Json.parse(jsonRes.stdout().trim()), "valid status json");
+        Assert.assertEquals(
+            440L * 1024L * 1024L,
+            ((JsonValue.JsonNumber) statusJson.get("totalRssBytes").orElseThrow()).asLong().orElseThrow(),
+            "status --json totalRssBytes"
+        );
+        JsonValue.JsonObject gwJson = (JsonValue.JsonObject) statusJson.get("gateway").orElseThrow();
+        Assert.assertEquals(
+            90L * 1024L * 1024L,
+            ((JsonValue.JsonNumber) gwJson.get("rssBytes").orElseThrow()).asLong().orElseThrow(),
+            "status --json gateway rssBytes"
+        );
 
         Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "gateway", "reconcile").exitCode(), "reconcile");
         CliResult syncedRes = runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "status");
@@ -206,7 +228,7 @@ public final class StatusCliTest {
         var richConfig = richConfigSource(root, "top-secret-json-status");
         Assert.assertEquals(0, runCli(richConfig, stateStore, processRunner, portScanner, httpClient, projectFiles, clock, "route", "orders", "local").exitCode(), "route orders local");
 
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders-1.0.jar"),
             Optional.of(Instant.parse("2026-11-20T11:40:00Z")),
             stateStore.logPath("acme", ProcessKey.service("orders"), false),
@@ -235,7 +257,7 @@ public final class StatusCliTest {
             Optional.empty(), Optional.of("python")
         ));
 
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord.Running(
             7400L, Instant.parse("2026-11-20T11:10:00Z"), List.of("java", "-jar", "inventory.jar"),
             Optional.empty(),
             stateStore.logPath("acme", ProcessKey.service("inventory"), false),
@@ -249,7 +271,7 @@ public final class StatusCliTest {
             List<JsonValue> arr = new ArrayList<>(liveMappings.values());
             return Result.ok(new HttpResponseData(200, Map.of(), Json.stringify(Json.obj(Map.of("mappings", Json.arr(arr))))));
         });
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             8100L, Instant.parse("2026-11-20T11:50:00Z"), List.of("java", "-jar", "wiremock.jar"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)

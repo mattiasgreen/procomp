@@ -55,6 +55,18 @@ val testSourceSet = sourceSets.test.get()
 
 val webAssetsDir = layout.projectDirectory.dir("web")
 
+tasks.jar {
+    archiveFileName.set("procomp.jar")
+    manifest {
+        attributes("Main-Class" to "procomp.cli.Procomp")
+    }
+    from(webAssetsDir) {
+        into("web")
+    }
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 val unitTest by tasks.registering(Test::class) {
     group = "verification"
     description = "Runs fast Level 1-2 unit and in-memory shell/CLI/web tests in parallel."
@@ -130,8 +142,29 @@ val verifyJep458 by tasks.registering(Exec::class) {
     environment("JAVA_HOME", launcher.map { it.metadata.installationPath.asFile.absolutePath }.get())
 }
 
+val verifyJar by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Verifies the assembled procomp.jar is executable standalone with an empty classpath."
+    dependsOn(tasks.jar)
+    val launcher = javaToolchains.launcherFor(java.toolchain)
+    val jarFile = tasks.jar.flatMap { it.archiveFile }
+    val workDir = layout.buildDirectory.dir("verify-jar-workdir")
+    inputs.file(jarFile).withPathSensitivity(PathSensitivity.NAME_ONLY)
+    outputs.upToDateWhen { true }
+    environment("CLASSPATH", "")
+    environment("JAVA_HOME", launcher.map { it.metadata.installationPath.asFile.absolutePath }.get())
+    executable(launcher.map { it.executablePath.asFile.absolutePath }.get())
+    workingDir(workDir)
+    doFirst {
+        workDir.get().asFile.mkdirs()
+    }
+    argumentProviders.add(CommandLineArgumentProvider {
+        listOf("-jar", jarFile.get().asFile.absolutePath, "--help")
+    })
+}
+
 tasks.named("check") {
-    dependsOn(lint, unitTest, integrationTest, verifyJep458)
+    dependsOn(lint, unitTest, integrationTest, verifyJep458, verifyJar)
 }
 
 val outerLoop by tasks.registering {

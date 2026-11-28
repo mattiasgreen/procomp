@@ -5,8 +5,11 @@ import procomp.core.common.Result;
 import procomp.core.process.DiscoveryResult;
 import procomp.core.process.HealthState;
 import procomp.core.process.InspectionReport;
+import procomp.core.process.ManagedProcessRecord;
 import procomp.core.process.Ownership;
 import procomp.core.process.PortBinding;
+import procomp.core.process.ProcessPlanner;
+import procomp.core.process.ProcessState;
 import procomp.core.project.Project;
 import procomp.core.project.ProjectResolver;
 import procomp.core.project.ServiceDefinition;
@@ -15,6 +18,7 @@ import procomp.core.routing.RoutingTable;
 import procomp.shell.ProcessLifecycle.DiscoveryContext;
 import procomp.shell.ProcessLifecycle.LaunchPlan;
 import procomp.shell.ProcessLifecycle.StartTargetSpec;
+import procomp.shell.ProcessLifecycle.TargetRestartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStartOutcome;
 import procomp.shell.ProcessLifecycle.TargetStopOutcome;
 import procomp.shell.ports.Clock;
@@ -99,13 +103,42 @@ public final class ProcessShell {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle must not be null");
     }
 
-    Result<Map<Integer, PortBinding>, DomainError> snapshotServicePorts(Project project) {
+    Result<Map<String, Optional<ManagedProcessRecord>>, DomainError> readManagedServiceRecords(Project project) {
         Objects.requireNonNull(project, "project must not be null");
-        Set<Integer> ports = new LinkedHashSet<>();
+        Map<String, Optional<ManagedProcessRecord>> records = new java.util.LinkedHashMap<>();
         for (ServiceDefinition service : project.services().values()) {
+            Result<Optional<ManagedProcessRecord>, DomainError> res =
+                lifecycle.readManagedServiceRecord(project.name(), service.name());
+            if (res.isErr()) {
+                return res.castError();
+            }
+            records.put(service.name(), ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) res).value());
+        }
+        return Result.ok(records);
+    }
+
+    Result<Map<Integer, PortBinding>, DomainError> snapshotServicePorts(
+        Project project,
+        List<ServiceDefinition> services
+    ) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(services, "services must not be null");
+        Set<Integer> ports = new LinkedHashSet<>();
+        for (ServiceDefinition service : services) {
             service.port().ifPresent(ports::add);
         }
+        if (ports.isEmpty()) {
+            return Result.ok(Map.of());
+        }
         return lifecycle.snapshotPorts(ports);
+    }
+
+    Map<Long, Long> snapshotRssBytes() {
+        return lifecycle.snapshotRssBytes();
+    }
+
+    Optional<Long> resolveRssBytes(DiscoveryResult discovery, Map<Long, Long> rssSnapshot) {
+        return lifecycle.resolveRssBytes(discovery, rssSnapshot);
     }
 
     /**
@@ -123,6 +156,7 @@ public final class ProcessShell {
     Result<DiscoveryResult, DomainError> discoverService(
         Project project,
         String serviceName,
+        Optional<ManagedProcessRecord> preReadManagedRecord,
         Map<Integer, PortBinding> portSnapshot
     ) {
         Objects.requireNonNull(project, "project must not be null");
@@ -130,7 +164,7 @@ public final class ProcessShell {
         if (svcOpt.isEmpty()) {
             return Result.err(unknownServiceError(project, serviceName));
         }
-        return lifecycle.discoverService(project.name(), svcOpt.get(), Optional.of(portSnapshot))
+        return lifecycle.discoverService(project.name(), svcOpt.get(), preReadManagedRecord, Optional.of(portSnapshot))
             .map(DiscoveryContext::discovery);
     }
 
@@ -154,7 +188,8 @@ public final class ProcessShell {
 
         Optional<String> liveGatewayRoute = Optional.empty();
         if (project.gateway().isPresent()) {
-            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes = gatewayShell.status(project, routing);
+            Result<GatewayShell.GatewayStatusReport, DomainError> gwStatusRes =
+                gatewayShell.status(project, routing, Map.of());
             if (gwStatusRes instanceof Result.Err<GatewayShell.GatewayStatusReport, DomainError>(DomainError err)) {
                 return Result.err(err);
             }
@@ -224,6 +259,106 @@ public final class ProcessShell {
             outcomes.add(new StartServiceOutcome(raw.id(), disp, raw.discovery(), route));
         }
         return Result.ok(new StartResult(explicitTargets, request.detach(), outcomes));
+    }
+
+    /**
+     * Restarts Managed Service Processes (with preflight conflict/stopping/launch-plan validation before stopping).
+     * Bare restart targets currently running Managed Services only; explicit restart starts Stopped/CRASHED services,
+     * spares Unmanaged services, and fails fast on Conflict or STOPPING services.
+     * Never mutates the Routing Table or Gateway.
+     */
+    public Result<RestartResult, DomainError> restart(Project project, RestartRequest request) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+
+        Result<RoutingTable, DomainError> routingRes = routingShell.showRoutes(project);
+        if (routingRes instanceof Result.Err<RoutingTable, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        RoutingTable routing = ((Result.Ok<RoutingTable, DomainError>) routingRes).value();
+
+        boolean explicitTargets = !request.serviceNames().isEmpty();
+        List<ServiceDefinition> targets;
+        if (explicitTargets) {
+            Result<List<ServiceDefinition>, DomainError> targetsRes = resolveStopTargets(project, request.serviceNames());
+            if (targetsRes instanceof Result.Err<List<ServiceDefinition>, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            targets = ((Result.Ok<List<ServiceDefinition>, DomainError>) targetsRes).value();
+        } else {
+            Result<List<ServiceDefinition>, DomainError> runningRes = resolveRunningManagedTargets(project);
+            if (runningRes instanceof Result.Err<List<ServiceDefinition>, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            targets = ((Result.Ok<List<ServiceDefinition>, DomainError>) runningRes).value();
+        }
+
+        if (targets.isEmpty()) {
+            return Result.ok(new RestartResult(explicitTargets, request.detach(), List.of()));
+        }
+
+        List<StartTargetSpec> specs = new ArrayList<>(targets.size());
+        for (ServiceDefinition svc : targets) {
+            specs.add(new StartTargetSpec(
+                svc.name(),
+                ProcessKey.service(svc.name()),
+                "service",
+                "Service '" + svc.name() + "'",
+                "Process",
+                "Service is HEALTHY",
+                routing.routeOf(svc.name()).map(Route::name),
+                () -> lifecycle.discoverService(project.name(), svc),
+                () -> prepareLaunchPlan(project.name(), svc)
+            ));
+        }
+
+        Result<List<TargetRestartOutcome>, DomainError> restartRes = lifecycle.restartTargets(
+            project.name(),
+            specs,
+            request.detach(),
+            request.timeout(),
+            request.gracefulTimeout()
+        );
+        if (restartRes instanceof Result.Err<List<TargetRestartOutcome>, DomainError>(DomainError err)) {
+            return Result.err(err);
+        }
+        List<TargetRestartOutcome> rawOutcomes = ((Result.Ok<List<TargetRestartOutcome>, DomainError>) restartRes).value();
+        List<RestartServiceOutcome> outcomes = new ArrayList<>(rawOutcomes.size());
+        for (TargetRestartOutcome raw : rawOutcomes) {
+            RestartDisposition disp = switch (raw.disposition()) {
+                case RESTARTED -> RestartDisposition.RESTARTED;
+                case SPAWNED -> RestartDisposition.SPAWNED;
+                case SPARED_UNMANAGED -> RestartDisposition.SPARED_UNMANAGED;
+            };
+            Route route = routing.routeOf(raw.id()).orElse(Route.REMOTE);
+            outcomes.add(new RestartServiceOutcome(raw.id(), disp, raw.discovery(), route));
+        }
+        return Result.ok(new RestartResult(explicitTargets, request.detach(), outcomes));
+    }
+
+    private Result<List<ServiceDefinition>, DomainError> resolveRunningManagedTargets(Project project) {
+        List<ServiceDefinition> running = new ArrayList<>();
+        for (ServiceDefinition svc : project.services().values()) {
+            Result<Optional<ManagedProcessRecord>, DomainError> recRes =
+                lifecycle.readManagedServiceRecord(project.name(), svc.name());
+            if (recRes instanceof Result.Err<Optional<ManagedProcessRecord>, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            Optional<ManagedProcessRecord> recOpt = ((Result.Ok<Optional<ManagedProcessRecord>, DomainError>) recRes).value();
+            if (recOpt.isEmpty()) {
+                continue;
+            }
+            Result<DiscoveryContext, DomainError> discRes =
+                lifecycle.discoverService(project.name(), svc, recOpt, Optional.empty());
+            if (discRes instanceof Result.Err<DiscoveryContext, DomainError>(DomainError err)) {
+                return Result.err(err);
+            }
+            ProcessState state = ((Result.Ok<DiscoveryContext, DomainError>) discRes).value().discovery().state();
+            if (ProcessPlanner.isBareRestartTarget(state)) {
+                running.add(svc);
+            }
+        }
+        return Result.ok(running);
     }
 
     /**
@@ -442,6 +577,64 @@ public final class ProcessShell {
         List<StartServiceOutcome> outcomes
     ) {
         public StartResult {
+            outcomes = List.copyOf(outcomes);
+        }
+    }
+
+    public record RestartRequest(
+        List<String> serviceNames,
+        boolean detach,
+        Duration timeout,
+        Duration gracefulTimeout
+    ) {
+        public static final Duration DEFAULT_TIMEOUT = StartRequest.DEFAULT_TIMEOUT;
+        public static final Duration DEFAULT_GRACEFUL_TIMEOUT = StopRequest.DEFAULT_GRACEFUL_TIMEOUT;
+
+        public RestartRequest(List<String> serviceNames, boolean detach, Duration timeout) {
+            this(serviceNames, detach, timeout, DEFAULT_GRACEFUL_TIMEOUT);
+        }
+
+        public RestartRequest {
+            serviceNames = serviceNames == null ? List.of() : List.copyOf(serviceNames);
+            Objects.requireNonNull(timeout, "timeout must not be null");
+            Objects.requireNonNull(gracefulTimeout, "gracefulTimeout must not be null");
+            if (timeout.isNegative()) {
+                throw new IllegalArgumentException("timeout must not be negative");
+            }
+            if (gracefulTimeout.isNegative()) {
+                throw new IllegalArgumentException("gracefulTimeout must not be negative");
+            }
+        }
+    }
+
+    public enum RestartDisposition {
+        RESTARTED,
+        SPAWNED,
+        SPARED_UNMANAGED
+    }
+
+    public record RestartServiceOutcome(
+        String service,
+        RestartDisposition disposition,
+        DiscoveryResult discovery,
+        Route desiredRoute
+    ) {
+        public RestartServiceOutcome {
+            if (service == null || service.isBlank()) {
+                throw new IllegalArgumentException("service must be non-blank");
+            }
+            Objects.requireNonNull(disposition, "disposition must not be null");
+            Objects.requireNonNull(discovery, "discovery must not be null");
+            Objects.requireNonNull(desiredRoute, "desiredRoute must not be null");
+        }
+    }
+
+    public record RestartResult(
+        boolean explicitTargets,
+        boolean detached,
+        List<RestartServiceOutcome> outcomes
+    ) {
+        public RestartResult {
             outcomes = List.copyOf(outcomes);
         }
     }

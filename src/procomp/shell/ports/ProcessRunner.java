@@ -31,6 +31,14 @@ public interface ProcessRunner {
     Result<Unit, DomainError> stopTree(long pid, Duration gracefulTimeout);
 
     /**
+     * Best-effort batch snapshot of Resident Set Size (RSS / Working Set) in bytes keyed by OS PID.
+     * Never fails; returns an empty map when RSS cannot be read on the host OS.
+     */
+    default Map<Long, Long> snapshotRssBytes() {
+        return Map.of();
+    }
+
+    /**
      * Handle to an attached OS process spawned by {@link #spawnAttached(SpawnRequest)}.
      */
     interface RunningProcess {

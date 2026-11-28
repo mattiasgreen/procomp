@@ -102,7 +102,7 @@ public final class StatusShellTest {
         Assert.assertOk(new RoutingShell(stateStore).updateRoutes(project, List.of("orders", "payments"), Route.LOCAL), "route local slice");
 
         // 1. orders: LOCAL + MANAGED + HEALTHY + STALE (started 11:45 with artifact 11:40; newer jar 11:55)
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
             4100L,
             Instant.parse("2026-11-20T11:45:00Z"),
             List.of("java", "-jar", "orders-1.0.jar"),
@@ -136,7 +136,7 @@ public final class StatusShellTest {
         ));
 
         // 4. inventory: REMOTE + CRASHED (Managed record whose PID is dead)
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("inventory"), new ManagedProcessRecord.Running(
             7400L,
             Instant.parse("2026-11-20T11:10:00Z"),
             List.of("java", "-jar", "inventory.jar"),
@@ -201,7 +201,7 @@ public final class StatusShellTest {
         Assert.assertEquals(HealthState.STOPPED, shippingRow.health(), "shipping STOPPED");
 
         // Phase B: Gateway MANAGED + HEALTHY + DRIFTED -> reconcile -> IN_SYNC
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             8100L, Instant.parse("2026-11-20T11:50:00Z"), List.of("java", "-jar", "wiremock.jar"),
             Optional.empty(), stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
@@ -267,6 +267,138 @@ public final class StatusShellTest {
         StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, new FakeProjectFiles(), clock);
         DomainError err = Assert.assertErr(statusShell.status(project), "status propagates gateway admin failure");
         Assert.assertEquals("GATEWAY_ADMIN_ERROR", err.code(), "GATEWAY_ADMIN_ERROR code");
+    }
+
+    public static void testStatusReadsManagedRecordsBeforePortScanAndReportsStopping() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        var configSource = new InMemoryConfigSource(root)
+            .withFile(root.resolve("procomp.json"), """
+                {
+                  "project": "acme",
+                  "runtimes": {
+                    "java": {
+                      "command": ["java", "-jar", "svc.jar"],
+                      "healthPath": "/actuator/health"
+                    }
+                  },
+                  "services": {
+                    "orders": { "runtime": "java", "port": 9001, "workingDir": "orders" }
+                  }
+                }
+                """);
+        Project project = Assert.assertOk(new ProjectLoader(configSource).load(Optional.empty()), "project loads");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        // Track whether portScanner is invoked for a managed service (it must not be!)
+        final int[] portScanCalls = {0};
+        procomp.shell.ports.PortScanner trackingScanner = new procomp.shell.ports.PortScanner() {
+            @Override
+            public boolean isTcpListening(int port, Duration timeout) {
+                return false;
+            }
+            @Override
+            public procomp.core.common.Result<Optional<procomp.core.process.PortBinding>, DomainError> findListener(int port) {
+                portScanCalls[0]++;
+                return procomp.core.common.Result.ok(Optional.of(new procomp.core.process.PortBinding(port, Optional.of(4100L), "127.0.0.1:" + port)));
+            }
+            @Override
+            public procomp.core.common.Result<java.util.Map<Integer, procomp.core.process.PortBinding>, DomainError> findListeners(java.util.Set<Integer> ports) {
+                portScanCalls[0]++;
+                return procomp.core.common.Result.ok(java.util.Map.of(9001, new procomp.core.process.PortBinding(9001, Optional.of(4100L), "127.0.0.1:9001")));
+            }
+        };
+        var httpClient = new FakeHttpClient(); // health check fails (no stub)
+
+        ManagedProcessRecord.Stopping stopping = new ManagedProcessRecord.Running(
+            4100L, clock.now().minusSeconds(60), List.of("java", "-jar", "svc.jar"), Optional.empty(),
+            stateStore.logPath("acme", ProcessKey.service("orders"), false),
+            stateStore.logPath("acme", ProcessKey.service("orders"), true)
+        ).requestStop(clock.now().minusSeconds(2));
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), stopping), "seed stopping");
+        processRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(clock.now().minusSeconds(60)), Optional.of("java -jar svc.jar"),
+            List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, trackingScanner, httpClient, new FakeProjectFiles(), clock);
+        StatusShell.EstateStatus estate = Assert.assertOk(statusShell.status(project), "status succeeds");
+        StatusShell.ServiceStatusRow row = estate.services().get(0);
+        Assert.assertEquals(Ownership.MANAGED, row.ownership(), "stopping service is MANAGED, never CONFLICT");
+        Assert.assertEquals(HealthState.STOPPING, row.health(), "stopping service health is STOPPING, not STARTING");
+        Assert.assertEquals(0, portScanCalls[0], "port scan skipped when all services have managed records");
+    }
+
+    public static void testStatusAggregatesRssAcrossManagedUnmanagedConflictAndGatewayInSingleBatch() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Project project = loadRichProject(root, "sec");
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient();
+        var projectFiles = new FakeProjectFiles();
+
+        // Stopped estate -> totalRssBytes is empty
+        StatusShell statusShell = new StatusShell(stateStore, processRunner, portScanner, httpClient, projectFiles, clock);
+        StatusShell.EstateStatus stopped = Assert.assertOk(statusShell.status(project), "stopped status succeeds");
+        Assert.assertEquals(Optional.empty(), stopped.totalRssBytes(), "stopped estate has empty totalRssBytes");
+
+        long mb = 1024L * 1024L;
+        // 1. orders: MANAGED (PID 4100, 200 MB via batch snapshot; ObservedProcess rssBytes empty)
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.service("orders"), new ManagedProcessRecord.Running(
+            4100L, Instant.parse("2026-11-20T11:45:00Z"), List.of("java", "-jar", "orders.jar"),
+            Optional.empty(), stateStore.logPath("acme", ProcessKey.service("orders"), false),
+            stateStore.logPath("acme", ProcessKey.service("orders"), true)
+        )), "seed orders");
+        processRunner.registerProcess(new ObservedProcess(
+            4100L, true, Optional.of(Instant.parse("2026-11-20T11:45:00Z")),
+            Optional.of("java -jar orders.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(4100L, 200L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:9001/actuator/health"), 200, "UP");
+
+        // 2. billing: UNMANAGED (PID 5200, 150 MB)
+        portScanner.bind(9002, 5200L);
+        processRunner.registerProcess(new ObservedProcess(
+            5200L, true, Optional.of(Instant.parse("2026-11-20T11:50:00Z")),
+            Optional.of("java -jar billing.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(5200L, 150L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:9002/actuator/health"), 200, "UP");
+
+        // 3. payments: CONFLICT (PID 6300, 40 MB)
+        portScanner.bind(9003, 6300L);
+        processRunner.registerProcess(new ObservedProcess(
+            6300L, true, Optional.of(Instant.parse("2026-11-20T11:30:00Z")),
+            Optional.of("python -m http.server 9003"), List.of(), List.of(), Optional.empty(), Optional.of("python")
+        ));
+        processRunner.setRssBytes(6300L, 40L * mb);
+
+        // 4. gateway: UNMANAGED (PID 8800, 90 MB)
+        portScanner.bind(8080, 8800L);
+        processRunner.registerProcess(new ObservedProcess(
+            8800L, true, Optional.of(Instant.parse("2026-11-20T11:00:00Z")),
+            Optional.of("java -jar wiremock.jar"), List.of(), List.of(), Optional.empty(), Optional.of("java")
+        ));
+        processRunner.setRssBytes(8800L, 90L * mb);
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "OK");
+        httpClient.stubGet(URI.create("http://127.0.0.1:8080/__admin/mappings"), 200, "{\"mappings\":[]}");
+
+        int callsBefore = processRunner.rssSnapshotCalls();
+        StatusShell.EstateStatus running = Assert.assertOk(statusShell.status(project), "running status succeeds");
+        Assert.assertEquals(callsBefore + 1, processRunner.rssSnapshotCalls(), "status performs exactly one batch RSS snapshot");
+
+        Map<String, StatusShell.ServiceStatusRow> byName = new LinkedHashMap<>();
+        for (StatusShell.ServiceStatusRow row : running.services()) {
+            byName.put(row.service(), row);
+        }
+        Assert.assertEquals(Optional.of(200L * mb), byName.get("orders").rssBytes(), "managed orders RSS");
+        Assert.assertEquals(Optional.of(150L * mb), byName.get("billing").rssBytes(), "unmanaged billing RSS");
+        Assert.assertEquals(Optional.of(40L * mb), byName.get("payments").rssBytes(), "conflict payments RSS");
+        Assert.assertEquals(Optional.empty(), byName.get("shipping").rssBytes(), "stopped shipping RSS empty");
+        Assert.assertEquals(Optional.of(90L * mb), running.gateway().report().orElseThrow().rssBytes(), "gateway RSS");
+        Assert.assertEquals(Optional.of(480L * mb), running.totalRssBytes(), "total RSS sums all running services + gateway");
     }
 
     private static Project loadRichProject(Path root, String secret) {

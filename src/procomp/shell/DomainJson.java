@@ -9,6 +9,18 @@ import procomp.core.common.JsonValue;
 import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.gateway.RouteDrift;
 import procomp.core.gateway.StaleManagedMapping;
+import procomp.core.git.BranchInfo;
+import procomp.core.git.GitHooksInstallResult;
+import procomp.core.git.GitHooksReport;
+import procomp.core.git.GitRunRecord;
+import procomp.core.git.HookCheckResult;
+import procomp.core.git.HookInstallOutcome;
+import procomp.core.git.ObservedGitRun;
+import procomp.core.git.RepositoryHookStatus;
+import procomp.core.git.RepositoryInstallOutcome;
+import procomp.core.git.RepositoryObservation;
+import procomp.core.git.StashEntry;
+import procomp.core.process.DiagnosticCommand;
 import procomp.core.process.InspectionReport;
 import procomp.core.process.ParentProcess;
 import procomp.core.project.ProfileDefinition;
@@ -20,9 +32,12 @@ import procomp.shell.BuildShell.BuildResult;
 import procomp.shell.BuildShell.BuildServiceOutcome;
 import procomp.shell.BuildShell.CancelResult;
 import procomp.shell.GatewayShell.GatewayReconcileResult;
+import procomp.shell.GatewayShell.GatewayRestartResult;
 import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStatusReport;
 import procomp.shell.GatewayShell.GatewayStopResult;
+import procomp.shell.ProcessShell.RestartResult;
+import procomp.shell.ProcessShell.RestartServiceOutcome;
 import procomp.shell.ProcessShell.StartResult;
 import procomp.shell.ProcessShell.StartServiceOutcome;
 import procomp.shell.ProcessShell.StopResult;
@@ -38,6 +53,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -68,13 +84,17 @@ public final class DomainJson {
             sObj.put("pid", numOrNull(row.pid()));
             sObj.put("startedAt", strOrNull(row.startedAt().map(Instant::toString)));
             sObj.put("uptimeSeconds", uptimeOrNull(row.uptime()));
+            sObj.put("rssBytes", numOrNull(row.rssBytes()));
             sObj.put("stale", Json.bool(row.stale()));
             sObj.put("healthEndpoint", strOrNull(row.healthEndpoint()));
             sObj.put("healthNote", strOrNull(row.healthNote()));
             sObj.put("buildRun", observedBuildRun(row.build()));
+            sObj.put("git", row.git().<JsonValue>map(DomainJson::repositoryStatusRow).orElse(Json.nil()));
             serviceNodes.add(Json.obj(sObj));
         }
         root.put("services", Json.arr(serviceNodes));
+        root.put("totalRssBytes", numOrNull(status.totalRssBytes()));
+        root.put("gitHooks", status.gitHooks().<JsonValue>map(DomainJson::gitHooksReport).orElse(Json.nil()));
         return Json.obj(root);
     }
 
@@ -91,6 +111,7 @@ public final class DomainJson {
             gw.put("health", Json.nil());
             gw.put("pid", Json.nil());
             gw.put("uptimeSeconds", Json.nil());
+            gw.put("rssBytes", Json.nil());
             gw.put("healthEndpoint", Json.nil());
             gw.put("healthResponse", Json.nil());
             gw.put("syncStatus", Json.nil());
@@ -245,7 +266,7 @@ public final class DomainJson {
     }
 
     public static JsonValue.JsonObject inspectionReport(Project project, InspectionReport report) {
-        return inspectionReport(project, report, Optional.empty());
+        return inspectionReport(project, report, Optional.empty(), Optional.empty());
     }
 
     public static JsonValue.JsonObject inspectionReport(
@@ -253,9 +274,19 @@ public final class DomainJson {
         InspectionReport report,
         Optional<ObservedBuildRun> buildRun
     ) {
+        return inspectionReport(project, report, buildRun, Optional.empty());
+    }
+
+    public static JsonValue.JsonObject inspectionReport(
+        Project project,
+        InspectionReport report,
+        Optional<ObservedBuildRun> buildRun,
+        Optional<GitShell.RepositoryStatusRow> gitRow
+    ) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(report, "report must not be null");
         Objects.requireNonNull(buildRun, "buildRun must not be null");
+        Objects.requireNonNull(gitRow, "gitRow must not be null");
         Map<String, JsonValue> root = new LinkedHashMap<>();
         root.put("project", Json.str(project.name()));
         root.put("service", Json.str(report.service()));
@@ -291,7 +322,19 @@ public final class DomainJson {
         root.put("outLogPath", Json.str(report.outLogPath().toString()));
         root.put("errLogPath", Json.str(report.errLogPath().toString()));
         root.put("stale", Json.bool(report.stale()));
+
+        List<JsonValue> diagNodes = new ArrayList<>(report.diagnosticCommands().size());
+        for (DiagnosticCommand cmd : report.diagnosticCommands()) {
+            Map<String, JsonValue> dObj = new LinkedHashMap<>();
+            dObj.put("label", Json.str(cmd.label()));
+            dObj.put("command", Json.str(cmd.command()));
+            dObj.put("note", strOrNull(cmd.note()));
+            diagNodes.add(Json.obj(dObj));
+        }
+        root.put("diagnosticCommands", Json.arr(diagNodes));
+
         buildRun.ifPresent(b -> root.put("buildRun", observedBuildRun(b)));
+        gitRow.ifPresent(g -> root.put("git", repositoryStatusRow(g)));
         return Json.obj(root);
     }
 
@@ -336,6 +379,29 @@ public final class DomainJson {
         return Json.obj(root);
     }
 
+    public static JsonValue.JsonObject restartResult(RestartResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("explicitTargets", Json.bool(result.explicitTargets()));
+        root.put("detached", Json.bool(result.detached()));
+        List<JsonValue> outcomes = new ArrayList<>(result.outcomes().size());
+        for (RestartServiceOutcome item : result.outcomes()) {
+            Map<String, JsonValue> oObj = new LinkedHashMap<>();
+            oObj.put("service", Json.str(item.service()));
+            oObj.put("disposition", Json.str(item.disposition().name()));
+            oObj.put("desiredRoute", Json.str(item.desiredRoute().name()));
+            oObj.put("owner", Json.str(item.discovery().ownership().name()));
+            oObj.put("provenance", strOrNull(item.discovery().provenance()));
+            oObj.put("health", Json.str(item.discovery().health().name()));
+            oObj.put("pid", numOrNull(item.discovery().pid()));
+            oObj.put("healthEndpoint", strOrNull(item.discovery().healthEndpoint()));
+            oObj.put("healthResponse", Json.str(item.discovery().healthResponse()));
+            outcomes.add(Json.obj(oObj));
+        }
+        root.put("outcomes", Json.arr(outcomes));
+        return Json.obj(root);
+    }
+
     public static JsonValue.JsonObject gatewayStartResult(GatewayStartResult result) {
         Objects.requireNonNull(result, "result must not be null");
         Map<String, JsonValue> root = new LinkedHashMap<>();
@@ -361,6 +427,23 @@ public final class DomainJson {
         return Json.obj(root);
     }
 
+    public static JsonValue.JsonObject gatewayRestartResult(GatewayRestartResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("disposition", Json.str(result.disposition().name()));
+        root.put("detached", Json.bool(result.detached()));
+        root.put("type", Json.str(result.gateway().type()));
+        root.put("port", Json.num(result.gateway().port()));
+        root.put("adminUrl", Json.str(result.gateway().adminUrl()));
+        root.put("owner", Json.str(result.discovery().ownership().name()));
+        root.put("provenance", strOrNull(result.discovery().provenance()));
+        root.put("health", Json.str(result.discovery().health().name()));
+        root.put("pid", numOrNull(result.discovery().pid()));
+        root.put("healthEndpoint", strOrNull(result.discovery().healthEndpoint()));
+        root.put("healthResponse", Json.str(result.discovery().healthResponse()));
+        return Json.obj(root);
+    }
+
     public static JsonValue.JsonObject gatewayReconcileResult(GatewayReconcileResult result) {
         Objects.requireNonNull(result, "result must not be null");
         Map<String, JsonValue> root = new LinkedHashMap<>();
@@ -372,6 +455,343 @@ public final class DomainJson {
         root.put("deletedPriorMappings", Json.num(result.deletedPriorMappings()));
         root.put("usedSingleMappingFallback", Json.bool(result.usedSingleMappingFallback()));
         appendDriftFields(root, result.drift());
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitHooksReport(GitHooksReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(report.project()));
+        switch (report) {
+            case GitHooksReport.NotConfigured _ -> {
+                root.put("configured", Json.bool(false));
+                root.put("sourceError", Json.nil());
+                root.put("mode", Json.nil());
+                root.put("requiredHooks", Json.arr(List.of()));
+                root.put("hasWarnings", Json.bool(false));
+                root.put("checkedRepositoryCount", Json.num(0));
+                root.put("repositoriesWithIssuesCount", Json.num(0));
+                root.put("missingHookCount", Json.num(0));
+                root.put("outdatedHookCount", Json.num(0));
+                root.put("repositories", Json.arr(List.of()));
+            }
+            case GitHooksReport.SourceUnavailable unavailable -> {
+                root.put("configured", Json.bool(true));
+                root.put("sourceError", Json.str(unavailable.reason()));
+                root.put("mode", Json.nil());
+                root.put("requiredHooks", Json.arr(List.of()));
+                root.put("hasWarnings", Json.bool(true));
+                root.put("checkedRepositoryCount", Json.num(0));
+                root.put("repositoriesWithIssuesCount", Json.num(0));
+                root.put("missingHookCount", Json.num(0));
+                root.put("outdatedHookCount", Json.num(0));
+                root.put("repositories", Json.arr(List.of()));
+            }
+            case GitHooksReport.Configured configured -> {
+                root.put("configured", Json.bool(true));
+                root.put("sourceError", Json.nil());
+                root.put("mode", Json.str(configured.mode().name().toLowerCase(Locale.ROOT)));
+                List<JsonValue> reqNodes = new ArrayList<>(configured.requiredHooks().size());
+                for (String h : configured.requiredHooks()) {
+                    reqNodes.add(Json.str(h));
+                }
+                root.put("requiredHooks", Json.arr(reqNodes));
+                root.put("hasWarnings", Json.bool(configured.hasWarnings()));
+                root.put("checkedRepositoryCount", Json.num(configured.checkedRepositoryCount()));
+                root.put("repositoriesWithIssuesCount", Json.num(configured.repositoriesWithIssuesCount()));
+                root.put("missingHookCount", Json.num(configured.missingHookCount()));
+                root.put("outdatedHookCount", Json.num(configured.outdatedHookCount()));
+
+                List<JsonValue> repoNodes = new ArrayList<>(configured.repositories().size());
+                for (RepositoryHookStatus repo : configured.repositories()) {
+                    Map<String, JsonValue> rObj = new LinkedHashMap<>();
+                    rObj.put("repository", Json.str(repo.displayName()));
+                    rObj.put("path", Json.str(repo.repositoryRoot().toString()));
+                    rObj.put("remoteUrl", strOrNull(repo.remoteUrl()));
+                    switch (repo) {
+                        case RepositoryHookStatus.NotCloned _ -> {
+                            rObj.put("status", Json.str("NOT_CLONED"));
+                            rObj.put("hooksDir", Json.nil());
+                            rObj.put("hooks", Json.arr(List.of()));
+                        }
+                        case RepositoryHookStatus.NotGitRepository _ -> {
+                            rObj.put("status", Json.str("NOT_GIT_REPOSITORY"));
+                            rObj.put("hooksDir", Json.nil());
+                            rObj.put("hooks", Json.arr(List.of()));
+                        }
+                        case RepositoryHookStatus.Checked checked -> {
+                            String statusLabel = checked.allInstalled()
+                                ? "OK"
+                                : (!checked.missingHooks().isEmpty() ? "MISSING_HOOKS" : "OUTDATED_HOOKS");
+                            rObj.put("status", Json.str(statusLabel));
+                            rObj.put("hooksDir", Json.str(checked.hooksDir().toString()));
+                            List<JsonValue> hookNodes = new ArrayList<>(checked.hooks().size());
+                            for (HookCheckResult h : checked.hooks()) {
+                                Map<String, JsonValue> hObj = new LinkedHashMap<>();
+                                hObj.put("name", Json.str(h.hookName()));
+                                hObj.put("state", Json.str(h.state().name()));
+                                hObj.put("sourcePath", Json.str(h.sourcePath().toString()));
+                                hObj.put("targetPath", Json.str(h.targetPath().toString()));
+                                hookNodes.add(Json.obj(hObj));
+                            }
+                            rObj.put("hooks", Json.arr(hookNodes));
+                        }
+                    }
+                    repoNodes.add(Json.obj(rObj));
+                }
+                root.put("repositories", Json.arr(repoNodes));
+            }
+        }
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitHooksInstallResult(GitHooksInstallResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(result.project()));
+        root.put("mode", Json.str(result.mode().name().toLowerCase(Locale.ROOT)));
+        root.put("totalInstalled", Json.num(result.totalInstalled()));
+        root.put("totalUpgraded", Json.num(result.totalUpgraded()));
+        root.put("totalUnchanged", Json.num(result.totalUnchanged()));
+
+        List<JsonValue> repoNodes = new ArrayList<>(result.repositories().size());
+        for (RepositoryInstallOutcome repo : result.repositories()) {
+            Map<String, JsonValue> rObj = new LinkedHashMap<>();
+            rObj.put("repository", Json.str(repo.displayName()));
+            rObj.put("path", Json.str(repo.repositoryRoot().toString()));
+            switch (repo) {
+                case RepositoryInstallOutcome.SkippedNotCloned _ -> {
+                    rObj.put("status", Json.str("SKIPPED_NOT_CLONED"));
+                    rObj.put("hooks", Json.arr(List.of()));
+                }
+                case RepositoryInstallOutcome.SkippedNotGitRepository _ -> {
+                    rObj.put("status", Json.str("SKIPPED_NOT_GIT_REPOSITORY"));
+                    rObj.put("hooks", Json.arr(List.of()));
+                }
+                case RepositoryInstallOutcome.Applied applied -> {
+                    rObj.put("status", Json.str("APPLIED"));
+                    List<JsonValue> hookNodes = new ArrayList<>(applied.hooks().size());
+                    for (HookInstallOutcome h : applied.hooks()) {
+                        Map<String, JsonValue> hObj = new LinkedHashMap<>();
+                        hObj.put("name", Json.str(h.hookName()));
+                        hObj.put("action", Json.str(h.action().name()));
+                        hObj.put("targetPath", Json.str(h.targetPath().toString()));
+                        hookNodes.add(Json.obj(hObj));
+                    }
+                    rObj.put("hooks", Json.arr(hookNodes));
+                }
+            }
+            repoNodes.add(Json.obj(rObj));
+        }
+        root.put("repositories", Json.arr(repoNodes));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject repositoryStatusRow(GitShell.RepositoryStatusRow row) {
+        Objects.requireNonNull(row, "row must not be null");
+        Map<String, JsonValue> obj = new LinkedHashMap<>();
+        obj.put("repository", Json.str(row.repository().name()));
+        obj.put("root", Json.str(row.repository().root().toString()));
+        obj.put("remoteUrl", strOrNull(row.repository().remoteUrl()));
+        List<JsonValue> svcNodes = new ArrayList<>(row.services().size());
+        for (String svc : row.services()) {
+            svcNodes.add(Json.str(svc));
+        }
+        obj.put("services", Json.arr(svcNodes));
+        obj.put("compact", Json.str(row.compactDisplay()));
+        obj.put("fetchAgeWarning", Json.bool(row.fetchAgeWarning()));
+        switch (row.observation()) {
+            case RepositoryObservation.NotCloned _ -> {
+                obj.put("state", Json.str("NOT_CLONED"));
+                obj.put("branch", Json.nil());
+                obj.put("detachedSha", Json.nil());
+                obj.put("upstream", Json.nil());
+                obj.put("ahead", Json.num(0));
+                obj.put("behind", Json.num(0));
+                obj.put("dirty", Json.bool(false));
+                obj.put("stagedCount", Json.num(0));
+                obj.put("unstagedCount", Json.num(0));
+                obj.put("untrackedCount", Json.num(0));
+                obj.put("stashCount", Json.num(0));
+                obj.put("lastFetchedAt", Json.nil());
+            }
+            case RepositoryObservation.NotAGitRepository nonGit -> {
+                obj.put("state", Json.str("NOT_GIT"));
+                obj.put("empty", Json.bool(nonGit.empty()));
+                obj.put("branch", Json.nil());
+                obj.put("detachedSha", Json.nil());
+                obj.put("upstream", Json.nil());
+                obj.put("ahead", Json.num(0));
+                obj.put("behind", Json.num(0));
+                obj.put("dirty", Json.bool(false));
+                obj.put("stagedCount", Json.num(0));
+                obj.put("unstagedCount", Json.num(0));
+                obj.put("untrackedCount", Json.num(0));
+                obj.put("stashCount", Json.num(0));
+                obj.put("lastFetchedAt", Json.nil());
+            }
+            case RepositoryObservation.Cloned cloned -> {
+                obj.put("state", Json.str("CLONED"));
+                switch (cloned.head()) {
+                    case RepositoryObservation.HeadState.Branch(String name) -> {
+                        obj.put("branch", Json.str(name));
+                        obj.put("detachedSha", Json.nil());
+                    }
+                    case RepositoryObservation.HeadState.Detached(String sha) -> {
+                        obj.put("branch", Json.nil());
+                        obj.put("detachedSha", Json.str(sha));
+                    }
+                }
+                obj.put("upstream", strOrNull(cloned.upstream()));
+                obj.put("ahead", Json.num(cloned.ahead()));
+                obj.put("behind", Json.num(cloned.behind()));
+                obj.put("dirty", Json.bool(cloned.isDirty()));
+                obj.put("stagedCount", Json.num(cloned.stagedCount()));
+                obj.put("unstagedCount", Json.num(cloned.unstagedCount()));
+                obj.put("untrackedCount", Json.num(cloned.untrackedCount()));
+                obj.put("stashCount", Json.num(cloned.stashCount()));
+                obj.put("lastFetchedAt", strOrNull(cloned.lastFetchedAt().map(Instant::toString)));
+            }
+        }
+        obj.put("latestRun", row.latestRun().<JsonValue>map(DomainJson::observedGitRun).orElse(Json.nil()));
+        return Json.obj(obj);
+    }
+
+    public static JsonValue.JsonObject observedGitRun(ObservedGitRun run) {
+        Objects.requireNonNull(run, "run must not be null");
+        GitRunRecord rec = run.record();
+        Map<String, JsonValue> obj = new LinkedHashMap<>();
+        obj.put("repository", Json.str(rec.repositoryName()));
+        obj.put("operation", Json.str(rec.operation().name()));
+        obj.put("status", Json.str(run.effectiveStatus().name()));
+        obj.put("pid", Json.num(rec.pid()));
+        obj.put("startedAt", Json.str(rec.startedAt().toString()));
+        obj.put("finishedAt", strOrNull(rec.finishedAt().map(Instant::toString)));
+        obj.put("exitCode", numOrNull(rec.exitCode()));
+        obj.put("reason", strOrNull(rec.reason()));
+        obj.put("commandLine", Json.str(rec.commandLine()));
+        obj.put("stdoutLog", Json.str(rec.stdoutLog().toString()));
+        obj.put("stderrLog", Json.str(rec.stderrLog().toString()));
+        return Json.obj(obj);
+    }
+
+    public static JsonValue.JsonObject gitStatusReport(GitShell.GitStatusReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(report.projectName()));
+        root.put("observedAt", Json.str(report.observedAt().toString()));
+        root.put("fetchWarnAfterHours", Json.num(report.fetchWarnAfterHours()));
+        List<JsonValue> repos = new ArrayList<>(report.repositories().size());
+        for (GitShell.RepositoryStatusRow row : report.repositories()) {
+            repos.add(repositoryStatusRow(row));
+        }
+        root.put("repositories", Json.arr(repos));
+        root.put("fetchReport", report.fetchReport().<JsonValue>map(DomainJson::gitBatchReport).orElse(Json.nil()));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitBranchesReport(GitShell.BranchesReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("repository", Json.str(report.repository().name()));
+        root.put("root", Json.str(report.repository().root().toString()));
+        List<JsonValue> svcs = new ArrayList<>(report.services().size());
+        for (String s : report.services()) {
+            svcs.add(Json.str(s));
+        }
+        root.put("services", Json.arr(svcs));
+        boolean dirty = report.observation() instanceof RepositoryObservation.Cloned c && c.isDirty();
+        root.put("dirty", Json.bool(dirty));
+        if (report.observation() instanceof RepositoryObservation.Cloned c) {
+            root.put("stagedCount", Json.num(c.stagedCount()));
+            root.put("unstagedCount", Json.num(c.unstagedCount()));
+            root.put("untrackedCount", Json.num(c.untrackedCount()));
+            root.put("lastFetchedAt", strOrNull(c.lastFetchedAt().map(Instant::toString)));
+        }
+        List<JsonValue> list = new ArrayList<>(report.branches().size());
+        for (BranchInfo b : report.branches()) {
+            Map<String, JsonValue> bo = new LinkedHashMap<>();
+            bo.put("name", Json.str(b.name()));
+            bo.put("origin", Json.str(b.origin().name()));
+            bo.put("lastCommitAt", Json.str(b.lastCommitAt().toString()));
+            bo.put("shortSubject", Json.str(b.shortSubject()));
+            bo.put("current", Json.bool(b.current()));
+            list.add(Json.obj(bo));
+        }
+        root.put("branches", Json.arr(list));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitStashList(List<GitShell.RepositoryStashes> items) {
+        List<JsonValue> repos = new ArrayList<>(items.size());
+        for (GitShell.RepositoryStashes item : items) {
+            Map<String, JsonValue> ro = new LinkedHashMap<>();
+            ro.put("repository", Json.str(item.repository().name()));
+            List<JsonValue> entries = new ArrayList<>(item.stashes().size());
+            for (StashEntry e : item.stashes()) {
+                Map<String, JsonValue> eo = new LinkedHashMap<>();
+                eo.put("ref", Json.str(e.ref()));
+                eo.put("message", Json.str(e.message()));
+                entries.add(Json.obj(eo));
+            }
+            ro.put("stashes", Json.arr(entries));
+            repos.add(Json.obj(ro));
+        }
+        return Json.obj(Map.of("repositories", Json.arr(repos)));
+    }
+
+    public static JsonValue.JsonObject gitBatchReport(GitShell.GitBatchReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("operation", Json.str(report.operation().name()));
+        root.put("hasFailures", Json.bool(report.hasFailures()));
+        List<JsonValue> outcomes = new ArrayList<>(report.outcomes().size());
+        for (GitShell.GitRepoOutcome outcome : report.outcomes()) {
+            Map<String, JsonValue> o = new LinkedHashMap<>();
+            o.put("repository", Json.str(outcome.repository().name()));
+            switch (outcome) {
+                case GitShell.GitRepoOutcome.Succeeded(_, GitRunRecord rec) -> {
+                    o.put("outcome", Json.str("SUCCEEDED"));
+                    o.put("run", observedGitRun(new ObservedGitRun(rec.status(), rec)));
+                }
+                case GitShell.GitRepoOutcome.Skipped(_, String reason) -> {
+                    o.put("outcome", Json.str("SKIPPED"));
+                    o.put("reason", Json.str(reason));
+                }
+                case GitShell.GitRepoOutcome.Failed(_, DomainError err, Optional<GitRunRecord> rec) -> {
+                    o.put("outcome", Json.str("FAILED"));
+                    o.put("error", domainError(err));
+                    o.put("run", rec.<JsonValue>map(r -> observedGitRun(new ObservedGitRun(r.status(), r))).orElse(Json.nil()));
+                }
+            }
+            outcomes.add(Json.obj(o));
+        }
+        root.put("outcomes", Json.arr(outcomes));
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitCancelReport(GitShell.GitCancelReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("hasFailures", Json.bool(report.hasFailures()));
+        List<JsonValue> outcomes = new ArrayList<>(report.outcomes().size());
+        for (GitShell.CancelOutcome outcome : report.outcomes()) {
+            Map<String, JsonValue> o = new LinkedHashMap<>();
+            o.put("repository", Json.str(outcome.repository().name()));
+            switch (outcome) {
+                case GitShell.CancelOutcome.Cancelled(_, GitRunRecord rec) -> {
+                    o.put("outcome", Json.str("CANCELLED"));
+                    o.put("run", observedGitRun(new ObservedGitRun(rec.status(), rec)));
+                }
+                case GitShell.CancelOutcome.NoActiveRun _ -> o.put("outcome", Json.str("NO_ACTIVE_RUN"));
+                case GitShell.CancelOutcome.Failed(_, DomainError err) -> {
+                    o.put("outcome", Json.str("FAILED"));
+                    o.put("error", domainError(err));
+                }
+            }
+            outcomes.add(Json.obj(o));
+        }
+        root.put("outcomes", Json.arr(outcomes));
         return Json.obj(root);
     }
 
@@ -421,6 +841,7 @@ public final class DomainJson {
         target.put("health", Json.str(report.discovery().health().name()));
         target.put("pid", numOrNull(report.discovery().pid()));
         target.put("uptimeSeconds", uptimeOrNull(report.uptime()));
+        target.put("rssBytes", numOrNull(report.rssBytes()));
         target.put("healthEndpoint", strOrNull(report.discovery().healthEndpoint()));
         target.put("healthResponse", Json.str(report.discovery().healthResponse()));
         appendDriftFields(target, report.drift());

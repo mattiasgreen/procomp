@@ -99,7 +99,7 @@ public final class GatewayShellTest {
         Assert.assertEquals(GatewayShell.GatewayStopDisposition.ALREADY_STOPPED, alreadyStopped.disposition(), "ALREADY_STOPPED");
 
         // 5. CRASHED managed record is cleaned by stop, or respawned by start -d
-        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord(
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), new ManagedProcessRecord.Running(
             9991L, clock.now(), List.of("java", "-jar", "wiremock.jar"), Optional.empty(),
             stateStore.logPath("acme", ProcessKey.gateway(), false),
             stateStore.logPath("acme", ProcessKey.gateway(), true)
@@ -278,6 +278,51 @@ public final class GatewayShellTest {
         Assert.assertTrue(fallbackReconcile.usedSingleMappingFallback(), "used single mapping fallback on /import 404");
         Assert.assertEquals(GatewaySyncStatus.IN_SYNC, fallbackReconcile.drift().syncStatus(), "IN_SYNC after fallback reconcile");
         Assert.assertEquals(GatewaySyncStatus.IN_SYNC, Assert.assertOk(shell.status(project), "status after fallback").drift().syncStatus(), "status confirms IN_SYNC");
+    }
+
+    public static void testGatewayRestartRestartsManagedSparesUnmanagedAndFailsOnStopping() {
+        Path root = Path.of("C:/work/acme").toAbsolutePath().normalize();
+        Project project = ProcessShellTest.loadSampleProject(root, "top-secret");
+
+        var stateStore = new InMemoryStateStore();
+        var clock = new FakeClock(Instant.parse("2026-11-20T12:00:00Z"));
+        var processRunner = new FakeProcessRunner(clock);
+        var portScanner = new FakePortScanner();
+        var httpClient = new FakeHttpClient()
+            .stubGet(URI.create("http://127.0.0.1:8080/__admin/health"), 200, "{\"status\":\"healthy\"}");
+        var projectFiles = new FakeProjectFiles().withDirectory(root);
+
+        GatewayShell shell = new GatewayShell(
+            stateStore, processRunner, portScanner, httpClient, projectFiles, clock, new RecordingObserver()
+        );
+
+        // 1. Restart when STOPPED -> SPAWNED
+        GatewayShell.GatewayRestartResult spawned = Assert.assertOk(
+            shell.restart(project, new GatewayShell.GatewayRestartRequest(false, Duration.ofSeconds(5))),
+            "restart stopped gateway spawns it"
+        );
+        Assert.assertEquals(GatewayShell.GatewayRestartDisposition.SPAWNED, spawned.disposition(), "SPAWNED");
+        long firstPid = spawned.discovery().pid().orElseThrow();
+
+        // 2. Restart when MANAGED HEALTHY -> stops old PID and spawns new PID (RESTARTED)
+        GatewayShell.GatewayRestartResult restarted = Assert.assertOk(
+            shell.restart(project, new GatewayShell.GatewayRestartRequest(false, Duration.ofSeconds(5))),
+            "restart managed gateway restarts it"
+        );
+        Assert.assertEquals(GatewayShell.GatewayRestartDisposition.RESTARTED, restarted.disposition(), "RESTARTED");
+        Assert.assertFalse(processRunner.isAlive(firstPid), "old gateway PID stopped");
+        Assert.assertTrue(restarted.discovery().pid().orElseThrow() != firstPid, "new gateway PID spawned");
+
+        // 3. Restart while STOPPING -> fails fast with PROCESS_STOPPING
+        ManagedProcessRecord gwRec = Assert.assertOk(
+            stateStore.readManagedProcess("acme", ProcessKey.gateway()), "read gw"
+        ).orElseThrow();
+        Assert.assertOk(stateStore.writeManagedProcess("acme", ProcessKey.gateway(), gwRec.requestStop(clock.now())), "mark gw stopping");
+        DomainError stoppingErr = Assert.assertErr(
+            shell.restart(project, new GatewayShell.GatewayRestartRequest(true, Duration.ofSeconds(5))),
+            "restart while gateway STOPPING fails fast"
+        );
+        Assert.assertEquals("PROCESS_STOPPING", stoppingErr.code(), "PROCESS_STOPPING");
     }
 
     public static void testReconcileWithFallbackRemoteDeletesOldLocalMappingOnFlipToRemote() {
