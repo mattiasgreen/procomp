@@ -3,6 +3,7 @@ package procomp.cli;
 import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.platform.FsConfigSource;
+import procomp.platform.FsGitHooksStore;
 import procomp.platform.FsProjectFiles;
 import procomp.platform.FsStateStore;
 import procomp.platform.JdkHttpClient;
@@ -12,6 +13,7 @@ import procomp.platform.OsProcessRunner;
 import procomp.platform.SystemClock;
 import procomp.shell.BuildShell;
 import procomp.shell.GatewayShell;
+import procomp.shell.GitHooksShell;
 import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
 import procomp.shell.ProcessShell;
@@ -22,6 +24,7 @@ import procomp.shell.RoutingShell;
 import procomp.shell.StatusShell;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.GitHooksStore;
 import procomp.shell.ports.GitRepositoryReader;
 import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
@@ -80,6 +83,7 @@ public final class CliRuntime {
             .portScanner(new OsPortScanner())
             .httpClient(new JdkHttpClient())
             .projectFiles(new FsProjectFiles())
+            .gitHooksStore(new FsGitHooksStore())
             .gitRepositoryReader(new OsGitRepositoryReader())
             .clock(new SystemClock())
             .observer(ProgressObserver.noop())
@@ -190,6 +194,10 @@ public final class CliRuntime {
         return runtime.gatewayShell();
     }
 
+    Result<GitHooksShell, DomainError> gitHooksShell() {
+        return runtime.gitHooksShell();
+    }
+
     Result<StatusShell, DomainError> statusShell() {
         return runtime.statusShell();
     }
@@ -234,6 +242,11 @@ public final class CliRuntime {
 
         Builder projectFiles(ProjectFiles projectFiles) {
             runtimeBuilder.projectFiles(projectFiles);
+            return this;
+        }
+
+        Builder gitHooksStore(GitHooksStore gitHooksStore) {
+            runtimeBuilder.gitHooksStore(gitHooksStore);
             return this;
         }
 

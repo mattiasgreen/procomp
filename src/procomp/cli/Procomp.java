@@ -198,6 +198,8 @@ public final class Procomp {
               profile <list|use|save|delete>      List, apply, save, or delete named routing Profiles (--json on list)
               gateway <start|stop|status|reconcile|logs>
                                                   Manage the local Gateway (-d|--detach, --timeout <sec>, --json, logs)
+              git hooks <status|install|upgrade> [repository...]
+                                                  Check or install/upgrade mandatory Git hooks across Repositories (--json)
               ui [--port <n>] [--open]            Start the localhost Web UI (default 127.0.0.1:9090)""");
     }
 

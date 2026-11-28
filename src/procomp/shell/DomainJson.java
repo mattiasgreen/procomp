@@ -10,8 +10,14 @@ import procomp.core.gateway.GatewayDriftReport;
 import procomp.core.gateway.RouteDrift;
 import procomp.core.gateway.StaleManagedMapping;
 import procomp.core.git.BranchInfo;
+import procomp.core.git.GitHooksInstallResult;
+import procomp.core.git.GitHooksReport;
 import procomp.core.git.GitRunRecord;
+import procomp.core.git.HookCheckResult;
+import procomp.core.git.HookInstallOutcome;
 import procomp.core.git.ObservedGitRun;
+import procomp.core.git.RepositoryHookStatus;
+import procomp.core.git.RepositoryInstallOutcome;
 import procomp.core.git.RepositoryObservation;
 import procomp.core.git.StashEntry;
 import procomp.core.process.DiagnosticCommand;
@@ -44,6 +50,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -84,6 +91,7 @@ public final class DomainJson {
         }
         root.put("services", Json.arr(serviceNodes));
         root.put("totalRssBytes", numOrNull(status.totalRssBytes()));
+        root.put("gitHooks", status.gitHooks().<JsonValue>map(DomainJson::gitHooksReport).orElse(Json.nil()));
         return Json.obj(root);
     }
 
@@ -404,6 +412,135 @@ public final class DomainJson {
         root.put("deletedPriorMappings", Json.num(result.deletedPriorMappings()));
         root.put("usedSingleMappingFallback", Json.bool(result.usedSingleMappingFallback()));
         appendDriftFields(root, result.drift());
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitHooksReport(GitHooksReport report) {
+        Objects.requireNonNull(report, "report must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(report.project()));
+        switch (report) {
+            case GitHooksReport.NotConfigured _ -> {
+                root.put("configured", Json.bool(false));
+                root.put("sourceError", Json.nil());
+                root.put("mode", Json.nil());
+                root.put("requiredHooks", Json.arr(List.of()));
+                root.put("hasWarnings", Json.bool(false));
+                root.put("checkedRepositoryCount", Json.num(0));
+                root.put("repositoriesWithIssuesCount", Json.num(0));
+                root.put("missingHookCount", Json.num(0));
+                root.put("outdatedHookCount", Json.num(0));
+                root.put("repositories", Json.arr(List.of()));
+            }
+            case GitHooksReport.SourceUnavailable unavailable -> {
+                root.put("configured", Json.bool(true));
+                root.put("sourceError", Json.str(unavailable.reason()));
+                root.put("mode", Json.nil());
+                root.put("requiredHooks", Json.arr(List.of()));
+                root.put("hasWarnings", Json.bool(true));
+                root.put("checkedRepositoryCount", Json.num(0));
+                root.put("repositoriesWithIssuesCount", Json.num(0));
+                root.put("missingHookCount", Json.num(0));
+                root.put("outdatedHookCount", Json.num(0));
+                root.put("repositories", Json.arr(List.of()));
+            }
+            case GitHooksReport.Configured configured -> {
+                root.put("configured", Json.bool(true));
+                root.put("sourceError", Json.nil());
+                root.put("mode", Json.str(configured.mode().name().toLowerCase(Locale.ROOT)));
+                List<JsonValue> reqNodes = new ArrayList<>(configured.requiredHooks().size());
+                for (String h : configured.requiredHooks()) {
+                    reqNodes.add(Json.str(h));
+                }
+                root.put("requiredHooks", Json.arr(reqNodes));
+                root.put("hasWarnings", Json.bool(configured.hasWarnings()));
+                root.put("checkedRepositoryCount", Json.num(configured.checkedRepositoryCount()));
+                root.put("repositoriesWithIssuesCount", Json.num(configured.repositoriesWithIssuesCount()));
+                root.put("missingHookCount", Json.num(configured.missingHookCount()));
+                root.put("outdatedHookCount", Json.num(configured.outdatedHookCount()));
+
+                List<JsonValue> repoNodes = new ArrayList<>(configured.repositories().size());
+                for (RepositoryHookStatus repo : configured.repositories()) {
+                    Map<String, JsonValue> rObj = new LinkedHashMap<>();
+                    rObj.put("repository", Json.str(repo.displayName()));
+                    rObj.put("path", Json.str(repo.repositoryRoot().toString()));
+                    rObj.put("remoteUrl", strOrNull(repo.remoteUrl()));
+                    switch (repo) {
+                        case RepositoryHookStatus.NotCloned _ -> {
+                            rObj.put("status", Json.str("NOT_CLONED"));
+                            rObj.put("hooksDir", Json.nil());
+                            rObj.put("hooks", Json.arr(List.of()));
+                        }
+                        case RepositoryHookStatus.NotGitRepository _ -> {
+                            rObj.put("status", Json.str("NOT_GIT_REPOSITORY"));
+                            rObj.put("hooksDir", Json.nil());
+                            rObj.put("hooks", Json.arr(List.of()));
+                        }
+                        case RepositoryHookStatus.Checked checked -> {
+                            String statusLabel = checked.allInstalled()
+                                ? "OK"
+                                : (!checked.missingHooks().isEmpty() ? "MISSING_HOOKS" : "OUTDATED_HOOKS");
+                            rObj.put("status", Json.str(statusLabel));
+                            rObj.put("hooksDir", Json.str(checked.hooksDir().toString()));
+                            List<JsonValue> hookNodes = new ArrayList<>(checked.hooks().size());
+                            for (HookCheckResult h : checked.hooks()) {
+                                Map<String, JsonValue> hObj = new LinkedHashMap<>();
+                                hObj.put("name", Json.str(h.hookName()));
+                                hObj.put("state", Json.str(h.state().name()));
+                                hObj.put("sourcePath", Json.str(h.sourcePath().toString()));
+                                hObj.put("targetPath", Json.str(h.targetPath().toString()));
+                                hookNodes.add(Json.obj(hObj));
+                            }
+                            rObj.put("hooks", Json.arr(hookNodes));
+                        }
+                    }
+                    repoNodes.add(Json.obj(rObj));
+                }
+                root.put("repositories", Json.arr(repoNodes));
+            }
+        }
+        return Json.obj(root);
+    }
+
+    public static JsonValue.JsonObject gitHooksInstallResult(GitHooksInstallResult result) {
+        Objects.requireNonNull(result, "result must not be null");
+        Map<String, JsonValue> root = new LinkedHashMap<>();
+        root.put("project", Json.str(result.project()));
+        root.put("mode", Json.str(result.mode().name().toLowerCase(Locale.ROOT)));
+        root.put("totalInstalled", Json.num(result.totalInstalled()));
+        root.put("totalUpgraded", Json.num(result.totalUpgraded()));
+        root.put("totalUnchanged", Json.num(result.totalUnchanged()));
+
+        List<JsonValue> repoNodes = new ArrayList<>(result.repositories().size());
+        for (RepositoryInstallOutcome repo : result.repositories()) {
+            Map<String, JsonValue> rObj = new LinkedHashMap<>();
+            rObj.put("repository", Json.str(repo.displayName()));
+            rObj.put("path", Json.str(repo.repositoryRoot().toString()));
+            switch (repo) {
+                case RepositoryInstallOutcome.SkippedNotCloned _ -> {
+                    rObj.put("status", Json.str("SKIPPED_NOT_CLONED"));
+                    rObj.put("hooks", Json.arr(List.of()));
+                }
+                case RepositoryInstallOutcome.SkippedNotGitRepository _ -> {
+                    rObj.put("status", Json.str("SKIPPED_NOT_GIT_REPOSITORY"));
+                    rObj.put("hooks", Json.arr(List.of()));
+                }
+                case RepositoryInstallOutcome.Applied applied -> {
+                    rObj.put("status", Json.str("APPLIED"));
+                    List<JsonValue> hookNodes = new ArrayList<>(applied.hooks().size());
+                    for (HookInstallOutcome h : applied.hooks()) {
+                        Map<String, JsonValue> hObj = new LinkedHashMap<>();
+                        hObj.put("name", Json.str(h.hookName()));
+                        hObj.put("action", Json.str(h.action().name()));
+                        hObj.put("targetPath", Json.str(h.targetPath().toString()));
+                        hookNodes.add(Json.obj(hObj));
+                    }
+                    rObj.put("hooks", Json.arr(hookNodes));
+                }
+            }
+            repoNodes.add(Json.obj(rObj));
+        }
+        root.put("repositories", Json.arr(repoNodes));
         return Json.obj(root);
     }
 

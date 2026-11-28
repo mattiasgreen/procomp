@@ -22,7 +22,8 @@ record RawProjectConfig(
     Optional<RawGatewayConfig> gateway,
     Optional<CatalogMapping> catalog,
     Map<String, RawServiceConfig> services,
-    Map<String, ProfileDefinition> profiles
+    Map<String, ProfileDefinition> profiles,
+    Optional<RawGitConfig> git
 ) {
     RawProjectConfig {
         envFiles = List.copyOf(envFiles);
@@ -30,6 +31,27 @@ record RawProjectConfig(
         runtimes = Collections.unmodifiableMap(new LinkedHashMap<>(runtimes));
         services = Collections.unmodifiableMap(new LinkedHashMap<>(services));
         profiles = Collections.unmodifiableMap(new LinkedHashMap<>(profiles));
+    }
+
+    record RawGitHooksConfig(
+        Optional<String> sourceDir,
+        List<String> required,
+        Map<String, String> files,
+        GitHookInstallMode mode
+    ) {
+        RawGitHooksConfig {
+            required = List.copyOf(required);
+            files = Collections.unmodifiableMap(new LinkedHashMap<>(files));
+        }
+    }
+
+    record RawGitConfig(
+        Optional<RawGitHooksConfig> hooks,
+        List<String> extraRepositories
+    ) {
+        RawGitConfig {
+            extraRepositories = List.copyOf(extraRepositories);
+        }
     }
 
     record RawDefaultsConfig(

@@ -6,6 +6,8 @@ import procomp.core.common.Json;
 import procomp.core.common.JsonValue;
 import procomp.core.common.Result;
 import procomp.core.common.Unit;
+import procomp.core.git.GitHooksInstallResult;
+import procomp.core.git.GitHooksReport;
 import procomp.core.process.InspectionReport;
 import procomp.core.project.ProfileDefinition;
 import procomp.core.project.Project;
@@ -22,6 +24,7 @@ import procomp.shell.GatewayShell.GatewayStartRequest;
 import procomp.shell.GatewayShell.GatewayStartResult;
 import procomp.shell.GatewayShell.GatewayStopRequest;
 import procomp.shell.GatewayShell.GatewayStopResult;
+import procomp.shell.GitHooksShell;
 import procomp.shell.GitShell;
 import procomp.shell.LogsShell;
 import procomp.shell.LogsShell.GatewayLogsPageRequest;
@@ -250,6 +253,20 @@ public final class ApiRouter {
             return methodNotAllowed(method, "GET");
         }
 
+        if ("/api/git/hooks".equals(path)) {
+            if (!"GET".equals(method)) {
+                return methodNotAllowed(method, "GET");
+            }
+            return handleGitHooksStatus();
+        }
+
+        if ("/api/git/hooks/install".equals(path)) {
+            if (!"POST".equals(method)) {
+                return methodNotAllowed(method, "POST");
+            }
+            return handleGitHooksInstall(request);
+        }
+
         if ("/api/git/status".equals(path)) {
             if (!"GET".equals(method)) {
                 return methodNotAllowed(method, "GET");
@@ -428,6 +445,68 @@ public final class ApiRouter {
         envelope.put("configPath", Json.str(loaded.configPath().toString()));
         envelope.put("cliCommand", Json.str(cliCommand));
         return ApiResponse.json(200, Json.obj(envelope));
+    }
+
+    private ApiResponse handleGitHooksStatus() {
+        String cliCommand = cli.gitHooksStatus(false);
+        Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+        if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+        Result<GitHooksShell, DomainError> shellRes = runtime.gitHooksShell();
+        if (shellRes instanceof Result.Err<GitHooksShell, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        Result<GitHooksReport, DomainError> reportRes =
+            ((Result.Ok<GitHooksShell, DomainError>) shellRes).value().status(project);
+        if (reportRes instanceof Result.Err<GitHooksReport, DomainError>(DomainError err)) {
+            return domainErrorResponse(err, cliCommand);
+        }
+        return okEnvelope(
+            DomainJson.gitHooksReport(((Result.Ok<GitHooksReport, DomainError>) reportRes).value()),
+            cliCommand
+        );
+    }
+
+    private ApiResponse handleGitHooksInstall(ApiRequest request) {
+        Result<JsonValue.JsonObject, DomainError> objRes = parseJsonObject(request.body(), true);
+        if (objRes instanceof Result.Err<JsonValue.JsonObject, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        JsonValue.JsonObject obj = ((Result.Ok<JsonValue.JsonObject, DomainError>) objRes).value();
+        Result<List<String>, DomainError> reposRes = readStringList(obj, "repositories", false);
+        if (reposRes instanceof Result.Err<List<String>, DomainError>(DomainError err)) {
+            return errorResponse(400, err, "");
+        }
+        List<String> repositories = ((Result.Ok<List<String>, DomainError>) reposRes).value();
+        String cliCommand = cli.gitHooksInstall(repositories);
+
+        mutationLock.lock();
+        try {
+            Result<LoadedProject, DomainError> loadedRes = projectHolder.current();
+            if (loadedRes instanceof Result.Err<LoadedProject, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Project project = ((Result.Ok<LoadedProject, DomainError>) loadedRes).value().project();
+
+            Result<GitHooksShell, DomainError> shellRes = runtime.gitHooksShell();
+            if (shellRes instanceof Result.Err<GitHooksShell, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            Result<GitHooksInstallResult, DomainError> installRes =
+                ((Result.Ok<GitHooksShell, DomainError>) shellRes).value().install(project, repositories);
+            if (installRes instanceof Result.Err<GitHooksInstallResult, DomainError>(DomainError err)) {
+                return domainErrorResponse(err, cliCommand);
+            }
+            return okEnvelope(
+                DomainJson.gitHooksInstallResult(((Result.Ok<GitHooksInstallResult, DomainError>) installRes).value()),
+                cliCommand
+            );
+        } finally {
+            mutationLock.unlock();
+        }
     }
 
     private ApiResponse handleInspect(String rawName) {
@@ -1752,7 +1831,8 @@ public final class ApiRouter {
         return switch (code) {
             case "FORBIDDEN_ORIGIN" -> 403;
             case "METHOD_NOT_ALLOWED" -> 405;
-            case "UNKNOWN_SERVICE", "UNKNOWN_PROFILE", "LOG_NOT_FOUND", "CONFIG_NOT_FOUND", "NOT_FOUND", "GIT_UNKNOWN_TARGET" -> 404;
+            case "UNKNOWN_SERVICE", "UNKNOWN_PROFILE", "LOG_NOT_FOUND", "CONFIG_NOT_FOUND", "NOT_FOUND",
+                "GIT_UNKNOWN_TARGET", "GIT_REPOSITORY_NOT_FOUND" -> 404;
             case "PORT_CONFLICT", "GATEWAY_CONFLICT", "GATEWAY_UNMANAGED", "GATEWAY_NOT_HEALTHY", "CONFLICT_PID_UNKNOWN",
                 "BUILD_ALREADY_RUNNING", "BUILD_RUN_UNKNOWN",
                 "GIT_RUN_IN_PROGRESS", "GIT_RUN_UNKNOWN_STATE", "GIT_DIRTY_WORKING_TREE", "GIT_NOT_CLONED", "GIT_NOT_A_REPOSITORY" -> 409;
@@ -1769,6 +1849,10 @@ public final class ApiRouter {
                 "WORKING_DIR_NOT_FOUND",
                 "ARTIFACT_NOT_FOUND",
                 "REPOSITORY_NOT_FOUND",
+                "GIT_HOOKS_NOT_CONFIGURED",
+                "GIT_HOOK_SOURCE_NOT_FOUND",
+                "GIT_HOOKS_EMPTY",
+                "GIT_REPOSITORY_INVALID_FILTER",
                 "GIT_NO_REPOSITORY",
                 "GIT_NO_REMOTE_URL",
                 "GIT_INVALID_BRANCH",

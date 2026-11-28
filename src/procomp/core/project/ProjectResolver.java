@@ -417,6 +417,10 @@ public final class ProjectResolver {
             }
         }
 
+        Result<Optional<GitConfig>, DomainError> gitRes = resolveGit(plan, hostEnv);
+        if (gitRes.isErr()) return gitRes.castError();
+        Optional<GitConfig> gitConfig = okVal(gitRes);
+
         return Result.ok(new Project(
             rawConfig.project(),
             plan.configPath(),
@@ -428,8 +432,70 @@ public final class ProjectResolver {
             gateway,
             services,
             rawConfig.profiles(),
-            List.copyOf(repoByRoot.values())
+            List.copyOf(repoByRoot.values()),
+            gitConfig
         ));
+    }
+
+    private static Result<Optional<GitConfig>, DomainError> resolveGit(
+        ResolutionPlan plan,
+        Map<String, String> hostEnv
+    ) {
+        if (plan.rawConfig().git().isEmpty()) {
+            return Result.ok(Optional.empty());
+        }
+        RawProjectConfig.RawGitConfig rawGit = plan.rawConfig().git().get();
+        Map<String, VarValue> gitVars = new LinkedHashMap<>(plan.expandedDefaultsVars());
+        gitVars.put("configDir", new VarValue.Scalar(plan.configDir().toString()));
+        plan.repositoriesRoot().ifPresent(p -> gitVars.put("repositoriesRoot", new VarValue.Scalar(p.toString())));
+        plan.currentUser().filter(s -> !s.isBlank()).ifPresent(u -> gitVars.put("user", new VarValue.Scalar(u)));
+
+        Optional<GitHooksConfig> resolvedHooks = Optional.empty();
+        if (rawGit.hooks().isPresent()) {
+            RawProjectConfig.RawGitHooksConfig rawHooks = rawGit.hooks().get();
+            Optional<Path> sourceDir = Optional.empty();
+            if (rawHooks.sourceDir().isPresent()) {
+                Result<String, DomainError> expRes = expandScalarAndHostEnv(
+                    rawHooks.sourceDir().get(), gitVars, hostEnv, "git.hooks.sourceDir"
+                );
+                if (expRes.isErr()) return expRes.castError();
+                Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), "git.hooks.sourceDir");
+                if (pathRes.isErr()) return pathRes.castError();
+                sourceDir = Optional.of(okVal(pathRes));
+            }
+
+            Map<String, Path> explicitFiles = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : rawHooks.files().entrySet()) {
+                String hookName = entry.getKey();
+                String ctx = "git.hooks.files." + hookName;
+                Result<String, DomainError> expRes = expandScalarAndHostEnv(entry.getValue(), gitVars, hostEnv, ctx);
+                if (expRes.isErr()) return expRes.castError();
+                Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), ctx);
+                if (pathRes.isErr()) return pathRes.castError();
+                explicitFiles.put(hookName, okVal(pathRes));
+            }
+
+            resolvedHooks = Optional.of(new GitHooksConfig(
+                sourceDir,
+                rawHooks.required(),
+                explicitFiles,
+                rawHooks.mode()
+            ));
+        }
+
+        List<Path> extraRepos = new ArrayList<>(rawGit.extraRepositories().size());
+        for (int i = 0; i < rawGit.extraRepositories().size(); i++) {
+            String ctx = "git.extraRepositories[" + i + "]";
+            Result<String, DomainError> expRes = expandScalarAndHostEnv(
+                rawGit.extraRepositories().get(i), gitVars, hostEnv, ctx
+            );
+            if (expRes.isErr()) return expRes.castError();
+            Result<Path, DomainError> pathRes = resolvePath(plan.configDir(), okVal(expRes), ctx);
+            if (pathRes.isErr()) return pathRes.castError();
+            extraRepos.add(okVal(pathRes));
+        }
+
+        return Result.ok(Optional.of(new GitConfig(resolvedHooks, extraRepos)));
     }
 
     /**

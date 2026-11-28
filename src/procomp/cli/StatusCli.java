@@ -85,6 +85,9 @@ public final class StatusCli {
         }
         out.println(formatGatewayLine(status.gateway()));
         status.totalRssBytes().ifPresent(total -> out.println(formatTotalRssLine(status, total)));
+        if (status.gitHooks().isPresent() && status.gitHooks().get().hasWarnings()) {
+            out.println(GitHooksCli.formatWarningLine(status.gitHooks().get()));
+        }
     }
 
     private static String formatTotalRssLine(EstateStatus status, long totalBytes) {

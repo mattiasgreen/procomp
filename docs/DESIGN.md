@@ -125,6 +125,8 @@ All `procomp git` commands accept `Service` or `Repository` names (canonical `Re
 | `procomp git stash [push] [target...] [-m <msg>] [-u\|--include-untracked] [--all] [--force] [--json]` | Parks uncommitted changes via `git stash push` sequentially (clean repos report `SKIPPED`). `procomp git stash list [target...] [--all] [--json]` lists stashes read-only. (`stash pop` is intentionally excluded.) |
 | `procomp git cancel [target...] [--all] [--json]` | Cleanly terminates `RUNNING` `Git Run`(s). |
 | `procomp git logs <target> [-n <lines>] [-f] [--err] [--path]` | Minimal raw log reader for `<repository>.git.out.log` (or `.err.log` with `--err`). |
+| `procomp git hooks [status] [--json]` | Read-only check of mandatory `Git Hook`s across all cloned `Repository` checkouts configured in `procomp.json` (plus `git.extraRepositories`). Reports `OK`, `MISSING`, `OUTDATED`, `NOT_CLONED`, and `NOT_GIT_REPOSITORY`. |
+| `procomp git hooks install [repository...] [--json]` | Installs missing mandatory `Git Hook`s and upgrades outdated hooks in all (or specified) cloned `Repository` checkouts using the configured mode (`copy` or `symlink`). `upgrade` is an alias for `install`. |
 
 ### Routing Table & Profiles
 
@@ -149,7 +151,7 @@ All `procomp git` commands accept `Service` or `Repository` names (canonical `Re
 
 | Command | Behavior |
 | :--- | :--- |
-| `procomp ui [--port <n>] [--open]` | Starts the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. Displays the estate table (including clickable `BUILD` and `GIT` badges), per-Service/Repository Build and Git controls (`Clone`, `Fetch`, `Pull`, `Switch` modal with `-committerdate` branch picker / `Fetch` / `--default` / inline dirty-tree warning & one-click `Stash (incl. untracked)`, `Stash`, `Cancel`), `Build Run` & `Repository`/`Git Run` details in the Inspect drawer, and `Service` / `Build` / `Git` source tabs in the live SSE Logs view, echoing verbatim `procomp` CLI commands on every action. |
+| `procomp ui [--port <n>] [--open]` | Starts the zero-build localhost Web UI (default `127.0.0.1:9090`) backed by the same `shell/` runtime. Displays the estate table (including clickable `BUILD` and `GIT` badges), per-Service/Repository Build and Git controls (`Clone`, `Fetch`, `Pull`, `Switch` modal with `-committerdate` branch picker / `Fetch` / `--default` / inline dirty-tree warning & one-click `Stash (incl. untracked)`, `Stash`, `Cancel`), mandatory `Git Hook` warning banner with one-click `Install / Upgrade All` and per-`Repository` actions, `Build Run` & `Repository`/`Git Run` details in the Inspect drawer, and `Service` / `Build` / `Git` source tabs in the live SSE Logs view, echoing verbatim `procomp` CLI commands on every action. |
 
 ---
 

@@ -41,7 +41,8 @@ public final class GitCli {
         Action.StashPush,
         Action.StashList,
         Action.Cancel,
-        Action.Logs {
+        Action.Logs,
+        Action.Hooks {
 
         record Status(List<String> targets, boolean localOnly, boolean fetch, boolean all, boolean force, Optional<Duration> timeout, boolean json) implements Action {}
         record Branches(String target, boolean json) implements Action {}
@@ -53,13 +54,14 @@ public final class GitCli {
         record StashList(List<String> targets, boolean all, boolean json) implements Action {}
         record Cancel(List<String> targets, boolean all, boolean json) implements Action {}
         record Logs(GitLogsRequest request) implements Action {}
+        record Hooks(GitHooksCli.Action action) implements Action {}
     }
 
     private GitCli() {}
 
     public static Result<Action, String> parse(List<String> args) {
         if (args.isEmpty()) {
-            return Result.err("Missing 'git' subcommand. Usage: procomp git <status|branches|clone|fetch|pull|switch|stash|cancel|logs> [options]");
+            return Result.err("Missing 'git' subcommand. Usage: procomp git <status|branches|clone|fetch|pull|switch|stash|cancel|logs|hooks> [options]");
         }
         String sub = args.get(0);
         List<String> rest = args.subList(1, args.size());
@@ -73,7 +75,8 @@ public final class GitCli {
             case "stash" -> parseStash(rest);
             case "cancel" -> parseCancel(rest);
             case "logs" -> parseLogs(rest);
-            default -> Result.err("Unknown 'git' subcommand '" + sub + "'. Supported: status, branches, clone, fetch, pull, switch, stash, cancel, logs.");
+            case "hooks" -> GitHooksCli.parse(rest).map(Action.Hooks::new);
+            default -> Result.err("Unknown 'git' subcommand '" + sub + "'. Supported: status, branches, clone, fetch, pull, switch, stash, cancel, logs, hooks.");
         };
     }
 
@@ -165,6 +168,7 @@ public final class GitCli {
                     }
                 }
             );
+            case Action.Hooks(GitHooksCli.Action hooksAction) -> GitHooksCli.execute(hooksAction, project, runtime);
         };
     }
 

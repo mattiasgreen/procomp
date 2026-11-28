@@ -267,6 +267,27 @@ public final class CliCommandFormatter {
         return join(tokens);
     }
 
+    public String gitHooksStatus(boolean json) {
+        List<String> tokens = base("git");
+        tokens.add("hooks");
+        tokens.add("status");
+        if (json) {
+            tokens.add("--json");
+        }
+        return join(tokens);
+    }
+
+    public String gitHooksInstall(List<String> repositories) {
+        Objects.requireNonNull(repositories, "repositories must not be null");
+        List<String> tokens = base("git");
+        tokens.add("hooks");
+        tokens.add("install");
+        for (String repo : repositories) {
+            tokens.add(quoteArg(repo));
+        }
+        return join(tokens);
+    }
+
     public String gitStatus(boolean localOnly, boolean fetch, boolean all, boolean json) {
         List<String> tokens = base("git");
         tokens.add("status");

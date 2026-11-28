@@ -4,6 +4,7 @@ import procomp.core.common.DomainError;
 import procomp.core.common.Result;
 import procomp.shell.ports.Clock;
 import procomp.shell.ports.ConfigSource;
+import procomp.shell.ports.GitHooksStore;
 import procomp.shell.ports.GitRepositoryReader;
 import procomp.shell.ports.HttpClient;
 import procomp.shell.ports.PortScanner;
@@ -29,6 +30,7 @@ public final class ProcompRuntime {
     private final Optional<PortScanner> portScanner;
     private final Optional<HttpClient> httpClient;
     private final Optional<ProjectFiles> projectFiles;
+    private final Optional<GitHooksStore> gitHooksStore;
     private final Optional<GitRepositoryReader> gitRepositoryReader;
     private final Optional<Clock> clock;
     private final ProgressObserver observer;
@@ -41,6 +43,7 @@ public final class ProcompRuntime {
     private Optional<GitShell> gitShell = Optional.empty();
     private Optional<ProcessShell> processShell = Optional.empty();
     private Optional<GatewayShell> gatewayShell = Optional.empty();
+    private Optional<GitHooksShell> gitHooksShell = Optional.empty();
     private Optional<StatusShell> statusShell = Optional.empty();
 
     private ProcompRuntime(
@@ -50,6 +53,7 @@ public final class ProcompRuntime {
         Optional<PortScanner> portScanner,
         Optional<HttpClient> httpClient,
         Optional<ProjectFiles> projectFiles,
+        Optional<GitHooksStore> gitHooksStore,
         Optional<GitRepositoryReader> gitRepositoryReader,
         Optional<Clock> clock,
         ProgressObserver observer
@@ -60,6 +64,7 @@ public final class ProcompRuntime {
         this.portScanner = portScanner;
         this.httpClient = httpClient;
         this.projectFiles = projectFiles;
+        this.gitHooksStore = gitHooksStore;
         this.gitRepositoryReader = gitRepositoryReader;
         this.clock = clock;
         this.observer = Objects.requireNonNull(observer, "observer must not be null");
@@ -82,6 +87,7 @@ public final class ProcompRuntime {
             portScanner,
             httpClient,
             projectFiles,
+            gitHooksStore,
             gitRepositoryReader,
             clock,
             newObserver
@@ -210,6 +216,16 @@ public final class ProcompRuntime {
         return Result.ok(gatewayShell.get());
     }
 
+    public synchronized Result<GitHooksShell, DomainError> gitHooksShell() {
+        if (gitHooksStore.isEmpty()) {
+            return Result.err(missingPorts("GitHooksShell", List.of("GitHooksStore")));
+        }
+        if (gitHooksShell.isEmpty()) {
+            gitHooksShell = Optional.of(new GitHooksShell(gitHooksStore.get(), observer));
+        }
+        return Result.ok(gitHooksShell.get());
+    }
+
     public synchronized Result<GitShell, DomainError> gitShell() {
         List<String> missing = new ArrayList<>();
         if (stateStore.isEmpty()) {
@@ -252,16 +268,37 @@ public final class ProcompRuntime {
                     maybeGit = Optional.of(g);
                 }
             }
-            statusShell = Optional.of(new StatusShell(
-                stateStore.get(),
-                processRunner.get(),
-                portScanner.get(),
-                httpClient.get(),
-                projectFiles.get(),
-                clock.get(),
-                observer,
-                maybeGit
-            ));
+            Optional<GitHooksShell> maybeGitHooks = Optional.empty();
+            if (gitHooksStore.isPresent()) {
+                if (gitHooksShell.isEmpty()) {
+                    gitHooksShell = Optional.of(new GitHooksShell(gitHooksStore.get(), observer));
+                }
+                maybeGitHooks = gitHooksShell;
+            }
+            if (maybeGitHooks.isPresent()) {
+                statusShell = Optional.of(new StatusShell(
+                    stateStore.get(),
+                    processRunner.get(),
+                    portScanner.get(),
+                    httpClient.get(),
+                    projectFiles.get(),
+                    clock.get(),
+                    observer,
+                    maybeGit,
+                    maybeGitHooks.get()
+                ));
+            } else {
+                statusShell = Optional.of(new StatusShell(
+                    stateStore.get(),
+                    processRunner.get(),
+                    portScanner.get(),
+                    httpClient.get(),
+                    projectFiles.get(),
+                    clock.get(),
+                    observer,
+                    maybeGit
+                ));
+            }
         }
         return Result.ok(statusShell.get());
     }
@@ -304,6 +341,7 @@ public final class ProcompRuntime {
         private Optional<PortScanner> portScanner = Optional.empty();
         private Optional<HttpClient> httpClient = Optional.empty();
         private Optional<ProjectFiles> projectFiles = Optional.empty();
+        private Optional<GitHooksStore> gitHooksStore = Optional.empty();
         private Optional<GitRepositoryReader> gitRepositoryReader = Optional.empty();
         private Optional<Clock> clock = Optional.empty();
         private ProgressObserver observer = ProgressObserver.noop();
@@ -340,6 +378,11 @@ public final class ProcompRuntime {
             return this;
         }
 
+        public Builder gitHooksStore(GitHooksStore gitHooksStore) {
+            this.gitHooksStore = Optional.ofNullable(gitHooksStore);
+            return this;
+        }
+
         public Builder gitRepositoryReader(GitRepositoryReader gitRepositoryReader) {
             this.gitRepositoryReader = Optional.ofNullable(gitRepositoryReader);
             return this;
@@ -363,6 +406,7 @@ public final class ProcompRuntime {
                 portScanner,
                 httpClient,
                 projectFiles,
+                gitHooksStore,
                 gitRepositoryReader,
                 clock,
                 observer
